@@ -57,6 +57,8 @@ A successful login writes a session file to `$XDG_CONFIG_HOME/proton-drive-fs/se
 proton-drive-fs mount <mountpoint> [-debug] [-ttl 30s] [-poll 10s] [-cache-dir path] [-cache-size 1GiB]
 ```
 
+If the mountpoint does not exist, mount says so and creates it.
+
 - `-debug` (default: false): enable FUSE debug logging.
 - `-ttl` (default: 30s): how long a directory listing stays cached before it is fetched again.
 - `-poll` (default: 10s): how often the event feed is polled for remote changes.

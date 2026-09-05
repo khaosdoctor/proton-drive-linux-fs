@@ -254,6 +254,23 @@ func runMount(args []string) int {
 	}
 	mountpoint := fs.Arg(0)
 
+	stat, err := os.Stat(mountpoint)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintf(os.Stderr, "error: checking mountpoint: %v\n", err)
+		return 1
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		fmt.Printf("mountpoint %s does not exist, creating it\n", mountpoint)
+		if err := os.MkdirAll(mountpoint, 0o755); err != nil {
+			fmt.Fprintf(os.Stderr, "error: creating mountpoint: %v\n", err)
+			return 1
+		}
+	}
+	if err == nil && !stat.IsDir() {
+		fmt.Fprintf(os.Stderr, "error: mountpoint %s is not a directory\n", mountpoint)
+		return 1
+	}
+
 	cacheLimit, err := parseCacheSize(*cacheSize)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error: invalid -cache-size:", err)
