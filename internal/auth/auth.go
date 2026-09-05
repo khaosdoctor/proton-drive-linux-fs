@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"github.com/ProtonMail/gluon/async"
 	"github.com/ProtonMail/gopenpgp/v2/crypto"
 	proton "github.com/henrybear327/go-proton-api"
+	"github.com/zalando/go-keyring"
 )
 
 const apiURL = "https://drive.proton.me/api"
@@ -18,14 +20,20 @@ const apiURL = "https://drive.proton.me/api"
 // ponytail: Proton rejects unknown app versions; "Other" is the fallback value to try if this one stops working.
 const appVersion = "macos-drive@1.0.0-alpha.1+rclone"
 
+// keyringService is the OS keyring service name the key password is stored under, keyed by username.
+const keyringService = "proton-drive-fs"
+
 // Session holds the credentials needed to restore a Proton Drive client without logging in again.
 type Session struct {
 	Username     string
 	UID          string
 	AccessToken  string
 	RefreshToken string
-	// ponytail: key password stored on disk 0600 like rclone; OS keyring is Phase 4
-	KeyPass []byte
+	// KeyPass is the unlocked key password kept in memory only; it is never written to disk directly.
+	KeyPass []byte `json:"-"`
+	// ponytail: keyring via Secret Service only; file fallback keeps headless boxes working
+	// KeyPassFile holds the key password on disk, populated only when the OS keyring is unavailable.
+	KeyPassFile []byte `json:"KeyPass,omitempty"`
 }
 
 func sessionDir() (string, error) {
@@ -124,31 +132,50 @@ func login(ctx context.Context, m *proton.Manager, username string, password []b
 	}, nil
 }
 
-// Save persists the session to disk (0600, in a 0700 directory).
-func (s *Session) Save() error {
+// SessionPath returns the on-disk path the session file is read from and written to.
+func SessionPath() (string, error) {
+	return sessionPath()
+}
+
+// Save persists the session to disk (0600, in a 0700 directory). The key password goes to
+// the OS keyring when one is available; otherwise it falls back to the session file itself.
+// usedKeyring reports which of the two happened.
+func (s *Session) Save() (usedKeyring bool, err error) {
 	dir, err := sessionDir()
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
+		return false, err
 	}
 
 	path, err := sessionPath()
 	if err != nil {
-		return err
+		return false, err
 	}
 
-	data, err := json.MarshalIndent(s, "", "  ")
+	onDisk := *s
+	onDisk.KeyPassFile = nil
+	usedKeyring = keyring.Set(keyringService, s.Username, base64.StdEncoding.EncodeToString(s.KeyPass)) == nil
+	if !usedKeyring {
+		onDisk.KeyPassFile = s.KeyPass
+	}
+
+	data, err := json.MarshalIndent(&onDisk, "", "  ")
 	if err != nil {
-		return err
+		return false, err
 	}
 
-	return os.WriteFile(path, data, 0o600)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return false, err
+	}
+
+	return usedKeyring, nil
 }
 
-// Load reads a previously saved session from disk.
+// Load reads a previously saved session from disk, restoring the key password from the OS
+// keyring or, failing that, from the session file's fallback field.
 func Load() (*Session, error) {
 	path, err := sessionPath()
 	if err != nil {
@@ -162,6 +189,21 @@ func Load() (*Session, error) {
 
 	var s Session
 	if err := json.Unmarshal(data, &s); err != nil {
+		return nil, err
+	}
+
+	s.KeyPass = s.KeyPassFile
+	if len(s.KeyPass) > 0 {
+		return &s, nil
+	}
+
+	encoded, err := keyring.Get(keyringService, s.Username)
+	if err != nil {
+		return nil, errors.New("no key password in the session file or OS keyring; run \"proton-drive-fs login\" again")
+	}
+
+	s.KeyPass, err = base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
 		return nil, err
 	}
 
@@ -187,7 +229,7 @@ func (s *Session) Client() (*proton.Client, *Keys, error) {
 	c.AddAuthHandler(func(a proton.Auth) {
 		s.AccessToken = a.AccessToken
 		s.RefreshToken = a.RefreshToken
-		_ = s.Save() // ponytail: best-effort persist of refreshed tokens
+		_, _ = s.Save() // ponytail: best-effort persist of refreshed tokens
 	})
 
 	ctx := context.Background()
@@ -235,6 +277,8 @@ func (s *Session) Logout(ctx context.Context) error {
 	defer c.Close()
 
 	authErr := c.AuthDelete(ctx)
+
+	_ = keyring.Delete(keyringService, s.Username) // ponytail: best-effort, not-found included
 
 	path, err := sessionPath()
 	if err != nil {

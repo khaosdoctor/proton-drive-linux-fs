@@ -49,7 +49,7 @@ Prompts for username, password, and a TOTP code if two-factor is enabled. On fir
 
 Repeated failed login attempts can trigger a temporary lock on the account from Proton's side.
 
-A successful login writes a session file to `$XDG_CONFIG_HOME/proton-drive-fs/session.json` (falls back to `~/.config/proton-drive-fs/session.json`), mode 0600 in a 0700 directory. The file holds the account username, the Proton session UID, the access and refresh tokens, and the salted key password derived from the account password. That key password is stored on disk in plain form, so it can unlock the drive's encryption keys on later runs without asking for the password again. `logout` removes this file and revokes the session with Proton.
+A successful login writes a session file to `$XDG_CONFIG_HOME/proton-drive-fs/session.json` (falls back to `~/.config/proton-drive-fs/session.json`), mode 0600 in a 0700 directory. The file holds the account username, the Proton session UID, and the access and refresh tokens. The salted key password derived from the account password unlocks the drive's encryption keys on later runs without asking for the password again; it goes to the OS keyring (Secret Service, for example GNOME Keyring or KWallet) when one is available, and otherwise stays in the session file itself with mode 0600. `logout` removes both.
 
 ### Mount
 

@@ -112,9 +112,17 @@ func runLogin(args []string) int {
 		return 1
 	}
 
-	if err := session.Save(); err != nil {
+	usedKeyring, err := session.Save()
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "error: saving session:", err)
 		return 1
+	}
+	if !usedKeyring {
+		path, pathErr := auth.SessionPath()
+		if pathErr != nil {
+			path = "the session file"
+		}
+		fmt.Fprintf(os.Stderr, "warning: no OS keyring available (Secret Service/libsecret); key password stored in %s with mode 0600\n", path)
 	}
 
 	fmt.Printf("logged in as %s\n", username)

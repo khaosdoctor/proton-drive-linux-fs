@@ -7,6 +7,7 @@ require (
 	github.com/ProtonMail/gopenpgp/v2 v2.10.0
 	github.com/hanwen/go-fuse/v2 v2.11.0
 	github.com/henrybear327/go-proton-api v1.0.0
+	github.com/zalando/go-keyring v0.2.8
 	golang.org/x/term v0.45.0
 )
 
@@ -20,10 +21,12 @@ require (
 	github.com/bradenaw/juniper v0.13.1 // indirect
 	github.com/cloudflare/circl v1.6.2 // indirect
 	github.com/cronokirby/saferith v0.33.0 // indirect
+	github.com/danieljoos/wincred v1.2.3 // indirect
 	github.com/emersion/go-message v0.16.0 // indirect
 	github.com/emersion/go-textwrapper v0.0.0-20200911093747-65d896831594 // indirect
 	github.com/emersion/go-vcard v0.0.0-20230626131229-38c18b295bbd // indirect
 	github.com/go-resty/resty/v2 v2.7.0 // indirect
+	github.com/godbus/dbus/v5 v5.2.2 // indirect
 	github.com/google/uuid v1.3.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
