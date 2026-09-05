@@ -22,6 +22,8 @@ type File struct {
 	sessionKey *crypto.SessionKey
 	blocks     map[int]proton.Block
 	size       int64
+	linkID     string
+	revID      string
 
 	mu       sync.Mutex
 	cache    map[int][]byte
@@ -57,6 +59,8 @@ func (c *Client) OpenFile(ctx context.Context, n *Node) (*File, error) {
 		sessionKey: sessionKey,
 		blocks:     blocks,
 		size:       n.Size,
+		linkID:     n.Link.LinkID,
+		revID:      revID,
 		cache:      make(map[int][]byte),
 	}, nil
 }
@@ -107,6 +111,15 @@ func (f *File) getBlock(ctx context.Context, idx int) ([]byte, error) {
 	}
 	f.mu.Unlock()
 
+	if f.client.cache != nil {
+		if data, ok := f.client.cache.Get(f.linkID, f.revID, idx); ok {
+			f.mu.Lock()
+			f.cachePut(idx, data)
+			f.mu.Unlock()
+			return data, nil
+		}
+	}
+
 	blk, ok := f.blocks[idx]
 	if !ok {
 		return nil, errors.New("block not found")
@@ -129,6 +142,10 @@ func (f *File) getBlock(ctx context.Context, idx int) ([]byte, error) {
 	}
 
 	data := plain.GetBinary()
+
+	if f.client.cache != nil {
+		f.client.cache.Put(f.linkID, f.revID, idx, data)
+	}
 
 	f.mu.Lock()
 	f.cachePut(idx, data)

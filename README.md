@@ -54,12 +54,14 @@ A successful login writes a session file to `$XDG_CONFIG_HOME/proton-drive-fs/se
 ### Mount
 
 ```
-proton-drive-fs mount <mountpoint> [-debug] [-ttl 30s] [-poll 10s]
+proton-drive-fs mount <mountpoint> [-debug] [-ttl 30s] [-poll 10s] [-cache-dir path] [-cache-size 1GiB]
 ```
 
 - `-debug` (default: false): enable FUSE debug logging.
 - `-ttl` (default: 30s): how long a directory listing stays cached before it is fetched again.
 - `-poll` (default: 10s): how often the event feed is polled for remote changes.
+- `-cache-dir` (default: `$XDG_CACHE_HOME/proton-drive-fs/blocks`, falls back to `~/.cache/proton-drive-fs/blocks`): where downloaded, decrypted file blocks are stored on disk so they survive a remount.
+- `-cache-size` (default: 1GiB): the total size the on-disk block cache is allowed to use; accepts suffixes like `512MiB` or `2GiB`. A value of 0 or less disables the on-disk cache.
 
 ### Unmount
 
@@ -112,7 +114,7 @@ Run `login` the same way first, with the same config bind mount, to create the s
 
 - Writes buffer the whole file locally and upload it in full on close; there is no partial write to the remote file.
 - Only one writer per file at a time.
-- No block-level disk cache yet; content caching relies on the kernel's page cache only.
+- The on-disk block cache is bounded by size only (least recently used eviction); there is no integrity re-check of cached blocks.
 - No trash/restore support and no shared-drive support.
 - The API this tool talks to is unofficial and can change or break without notice.
 - Only the primary Proton share is mounted; other shares are not exposed.

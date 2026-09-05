@@ -26,6 +26,15 @@ type Client struct {
 
 	shareID  string
 	volumeID string
+
+	// cache is optional; nil means block downloads never hit disk.
+	cache *BlockCache
+}
+
+// SetBlockCache attaches an on-disk block cache that OpenFile's Files consult before
+// downloading a block over the network.
+func (c *Client) SetBlockCache(bc *BlockCache) {
+	c.cache = bc
 }
 
 // Node is a decrypted file or folder in the drive tree.

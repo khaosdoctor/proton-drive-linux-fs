@@ -10,7 +10,9 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -183,20 +185,72 @@ func verifyHuman(ctx context.Context, reader *bufio.Reader, hv *auth.HumanVerifi
 	return auth.LoginWithHV(ctx, username, password, method, auth.FormatCodeToken(destination, code), promptTOTP)
 }
 
+// defaultCacheDir returns the default on-disk block cache directory, or "" if the user
+// cache directory can't be determined (the -cache-dir flag can still override it).
+func defaultCacheDir() string {
+	base, err := os.UserCacheDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(base, "proton-drive-fs", "blocks")
+}
+
+// parseCacheSize parses a byte size like "512MiB", "2GiB", "100M", or a bare byte count.
+// A result <= 0 disables the cache.
+func parseCacheSize(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, errors.New("empty size")
+	}
+
+	units := []struct {
+		suffix string
+		mult   int64
+	}{
+		{"KiB", 1 << 10}, {"MiB", 1 << 20}, {"GiB", 1 << 30},
+		{"K", 1 << 10}, {"M", 1 << 20}, {"G", 1 << 30},
+	}
+
+	for _, u := range units {
+		if !strings.HasSuffix(s, u.suffix) {
+			continue
+		}
+		val, err := strconv.ParseFloat(strings.TrimSuffix(s, u.suffix), 64)
+		if err != nil {
+			return 0, fmt.Errorf("invalid size %q: %w", s, err)
+		}
+		return int64(val * float64(u.mult)), nil
+	}
+
+	val, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid size %q: %w", s, err)
+	}
+	return val, nil
+}
+
 func runMount(args []string) int {
 	fs := flag.NewFlagSet("mount", flag.ContinueOnError)
 	debug := fs.Bool("debug", false, "enable FUSE debug logging")
 	ttl := fs.Duration("ttl", 30*time.Second, "directory listing cache TTL")
 	poll := fs.Duration("poll", 10*time.Second, "remote change polling interval")
+	cacheDir := fs.String("cache-dir", defaultCacheDir(), "on-disk block cache directory")
+	cacheSize := fs.String("cache-size", "1GiB", "on-disk block cache size limit (e.g. 512MiB, 2GiB); <=0 disables it")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
 	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs mount <mountpoint> [-debug] [-ttl 30s] [-poll 10s]")
+		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs mount <mountpoint> [-debug] [-ttl 30s] [-poll 10s] [-cache-dir path] [-cache-size 1GiB]")
 		return 2
 	}
 	mountpoint := fs.Arg(0)
+
+	cacheLimit, err := parseCacheSize(*cacheSize)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: invalid -cache-size:", err)
+		return 2
+	}
 
 	session, err := auth.Load()
 	if err != nil {
@@ -219,6 +273,13 @@ func runMount(args []string) int {
 		fmt.Fprintln(os.Stderr, "error: opening drive:", err)
 		return 1
 	}
+
+	blockCache, err := drive.OpenBlockCache(*cacheDir, cacheLimit)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: opening block cache:", err)
+		return 1
+	}
+	client.SetBlockCache(blockCache)
 
 	fmt.Printf("mounting %s; unmount with: proton-drive-fs unmount %s\n", mountpoint, mountpoint)
 
