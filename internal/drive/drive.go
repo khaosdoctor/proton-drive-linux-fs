@@ -12,9 +12,10 @@ import (
 
 // Client is a thin wrapper around the Proton API client scoped to a single drive share.
 type Client struct {
-	api     *proton.Client
-	addrKR  *crypto.KeyRing
-	shareID string
+	api      *proton.Client
+	addrKR   *crypto.KeyRing
+	shareID  string
+	volumeID string
 }
 
 // Node is a decrypted file or folder in the drive tree.
@@ -38,10 +39,11 @@ func Open(ctx context.Context, api *proton.Client, addrKR *crypto.KeyRing) (*Cli
 		return nil, nil, err
 	}
 
-	var shareID string
+	var shareID, volumeID string
 	for _, s := range shares {
 		if s.Flags == proton.PrimaryShare {
 			shareID = s.ShareID
+			volumeID = s.VolumeID
 			break
 		}
 	}
@@ -69,7 +71,7 @@ func Open(ctx context.Context, api *proton.Client, addrKR *crypto.KeyRing) (*Cli
 		return nil, nil, err
 	}
 
-	c := &Client{api: api, addrKR: addrKR, shareID: shareID}
+	c := &Client{api: api, addrKR: addrKR, shareID: shareID, volumeID: volumeID}
 	size, modTime := c.resolveFileAttrs(rootLink, rootKR)
 
 	root := &Node{Link: rootLink, Name: "/", KR: rootKR, Size: size, ModTime: modTime}

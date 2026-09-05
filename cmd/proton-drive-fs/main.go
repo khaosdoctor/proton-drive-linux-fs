@@ -106,12 +106,13 @@ func runMount(args []string) int {
 	fs := flag.NewFlagSet("mount", flag.ContinueOnError)
 	debug := fs.Bool("debug", false, "enable FUSE debug logging")
 	ttl := fs.Duration("ttl", 30*time.Second, "directory listing cache TTL")
+	poll := fs.Duration("poll", 10*time.Second, "remote change polling interval")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
 	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs mount <mountpoint> [-debug] [-ttl 30s]")
+		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs mount <mountpoint> [-debug] [-ttl 30s] [-poll 10s]")
 		return 2
 	}
 	mountpoint := fs.Arg(0)
@@ -140,7 +141,7 @@ func runMount(args []string) int {
 
 	fmt.Printf("mounting %s; unmount with: proton-drive-fs unmount %s\n", mountpoint, mountpoint)
 
-	if err := fusefs.Mount(ctx, mountpoint, client, root, fusefs.Options{Debug: *debug, TTL: *ttl}); err != nil {
+	if err := fusefs.Mount(ctx, mountpoint, client, root, fusefs.Options{Debug: *debug, TTL: *ttl, PollInterval: *poll}); err != nil {
 		fmt.Fprintln(os.Stderr, "error: mount failed:", err)
 		return 1
 	}
