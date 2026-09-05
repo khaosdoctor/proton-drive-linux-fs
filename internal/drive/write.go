@@ -56,8 +56,31 @@ func (c *Client) CreateDir(ctx context.Context, parent *Node, name string) error
 	return err
 }
 
+// moveLinkReq is the PUT .../links/{id}/move payload. It mirrors go-proton-api's MoveLinkReq
+// (link_file_types.go) plus NameSignatureEmail, the address that signed the new encrypted name.
+// The library never sends that field, so Proton's API rejects every move/rename with "This value
+// should not be blank" (Code=2000) -- the same longstanding failure in rclone's Proton backend,
+// which uses the same library.
+//
+// Source: WebClients packages/drive-store/store/_links/useLinksActions.ts, getMoveLinkData's
+// baseRequestBody (always sets NameSignatureEmail), sent via
+// packages/shared/lib/api/drive/share.ts queryMoveLink (PUT drive/shares/{shareID}/links/{linkID}/move).
+type moveLinkReq struct {
+	Name                    string
+	Hash                    string
+	ParentLinkID            string
+	OriginalHash            string
+	NodePassphrase          string
+	NodePassphraseSignature string
+	SignatureAddress        string
+	NameSignatureEmail      string
+}
+
 // Move relocates and/or renames n from oldParent to newParent as newName.
 func (c *Client) Move(ctx context.Context, n *Node, oldParent, newParent *Node, newName string) error {
+	// SetName/SetHash do the crypto (encrypt the new name, hash it under the new parent's hash
+	// key); go-proton-api's own MoveLinkReq is used only as a place to call them, its request is
+	// never sent.
 	req := proton.MoveLinkReq{
 		ParentLinkID:     newParent.Link.LinkID,
 		OriginalHash:     n.Link.Hash,
@@ -85,7 +108,18 @@ func (c *Client) Move(ctx context.Context, n *Node, oldParent, newParent *Node, 
 	req.NodePassphrase = nodePassphrase
 	req.NodePassphraseSignature = n.Link.NodePassphraseSignature
 
-	return c.api.MoveLink(ctx, c.shareID, n.Link.LinkID, req)
+	body := moveLinkReq{
+		Name:                    req.Name,
+		Hash:                    req.Hash,
+		ParentLinkID:            req.ParentLinkID,
+		OriginalHash:            req.OriginalHash,
+		NodePassphrase:          req.NodePassphrase,
+		NodePassphraseSignature: req.NodePassphraseSignature,
+		SignatureAddress:        req.SignatureAddress,
+		NameSignatureEmail:      c.signEmail,
+	}
+
+	return c.putJSON(ctx, "/drive/shares/"+c.shareID+"/links/"+n.Link.LinkID+"/move", body)
 }
 
 // Trash moves n (a file or folder) into the trash. Proton trashes non-empty folders

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/ProtonMail/gluon/async"
 	"github.com/ProtonMail/gopenpgp/v2/crypto"
@@ -15,10 +16,13 @@ import (
 	"github.com/zalando/go-keyring"
 )
 
-const apiURL = "https://drive.proton.me/api"
+// APIURL is Proton Drive's API base, exported so drive.putJSON can build direct requests
+// against the same host go-proton-api uses (it exposes no generic authenticated-request helper).
+const APIURL = "https://drive.proton.me/api"
 
+// AppVersion is the app-version string every request must carry.
 // ponytail: Proton rejects unknown app versions; "Other" is the fallback value to try if this one stops working.
-const appVersion = "macos-drive@1.0.0-alpha.1+rclone"
+const AppVersion = "macos-drive@1.0.0-alpha.1+rclone"
 
 // keyringService is the OS keyring service name the key password is stored under, keyed by username.
 const keyringService = "proton-drive-fs"
@@ -34,6 +38,11 @@ type Session struct {
 	// ponytail: keyring via Secret Service only; file fallback keeps headless boxes working
 	// KeyPassFile holds the key password on disk, populated only when the OS keyring is unavailable.
 	KeyPassFile []byte `json:"KeyPass,omitempty"`
+
+	// mu guards UID/AccessToken against concurrent reads from Tokens and the writes the
+	// AuthHandler in Client makes when go-proton-api refreshes them. A pointer field so Save's
+	// onDisk := *s copy never copies a live lock; unexported, so it never round-trips through JSON.
+	mu *sync.Mutex
 }
 
 func sessionDir() (string, error) {
@@ -54,8 +63,8 @@ func sessionPath() (string, error) {
 
 func newManager(opts ...proton.Option) *proton.Manager {
 	return proton.New(append([]proton.Option{
-		proton.WithHostURL(apiURL),
-		proton.WithAppVersion(appVersion),
+		proton.WithHostURL(APIURL),
+		proton.WithAppVersion(AppVersion),
 	}, opts...)...)
 }
 
@@ -129,6 +138,7 @@ func login(ctx context.Context, m *proton.Manager, username string, password []b
 		AccessToken:  a.AccessToken,
 		RefreshToken: a.RefreshToken,
 		KeyPass:      keyPass,
+		mu:           &sync.Mutex{},
 	}, nil
 }
 
@@ -191,6 +201,7 @@ func Load() (*Session, error) {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return nil, err
 	}
+	s.mu = &sync.Mutex{}
 
 	s.KeyPass = s.KeyPassFile
 	if len(s.KeyPass) > 0 {
@@ -210,6 +221,14 @@ func Load() (*Session, error) {
 	return &s, nil
 }
 
+// Tokens returns the current UID and access token, safe to call concurrently with the
+// AuthHandler that Client installs to store tokens go-proton-api refreshes.
+func (s *Session) Tokens() (uid, access string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.UID, s.AccessToken
+}
+
 // Keys holds the unlocked address keyrings a session's Client call produces: the merged
 // keyring (used for decrypt/verify against any of the user's addresses, as before) plus the
 // per-address keyrings and address list the drive layer needs to sign writes as one specific
@@ -218,6 +237,10 @@ type Keys struct {
 	Merged      *crypto.KeyRing
 	ByAddressID map[string]*crypto.KeyRing
 	Addresses   []proton.Address
+
+	// TokenSource returns the current uid/access token. drive.Client uses it for requests
+	// go-proton-api has no exported way to build (see internal/drive/http.go).
+	TokenSource func() (uid, access string)
 }
 
 // Client restores an authenticated Proton client from the session and unlocks the address
@@ -227,8 +250,10 @@ func (s *Session) Client() (*proton.Client, *Keys, error) {
 	c := m.NewClient(s.UID, s.AccessToken, s.RefreshToken)
 
 	c.AddAuthHandler(func(a proton.Auth) {
+		s.mu.Lock()
 		s.AccessToken = a.AccessToken
 		s.RefreshToken = a.RefreshToken
+		s.mu.Unlock()
 		_, _ = s.Save() // ponytail: best-effort persist of refreshed tokens
 	})
 
@@ -267,7 +292,7 @@ func (s *Session) Client() (*proton.Client, *Keys, error) {
 		}
 	}
 
-	return c, &Keys{Merged: merged, ByAddressID: addrKRs, Addresses: addrs}, nil
+	return c, &Keys{Merged: merged, ByAddressID: addrKRs, Addresses: addrs, TokenSource: s.Tokens}, nil
 }
 
 // Logout revokes the session on Proton's side and removes the local session file.

@@ -29,6 +29,13 @@ type Client struct {
 	shareID  string
 	volumeID string
 
+	// tokenSource returns the current uid/access token for putJSON's direct requests, kept in
+	// sync with library-triggered refreshes by auth.Session.
+	tokenSource func() (uid, access string)
+
+	// apiURL is putJSON's request base; auth.APIURL in production, a test server's URL in tests.
+	apiURL string
+
 	// cache is optional; nil means block downloads never hit disk.
 	cache *BlockCache
 
@@ -113,13 +120,15 @@ func Open(ctx context.Context, api *proton.Client, keys *auth.Keys) (*Client, *N
 	}
 
 	c := &Client{
-		api:       api,
-		addrKR:    keys.Merged,
-		signKR:    signKR,
-		signEmail: signEmail,
-		addressID: share.AddressID,
-		shareID:   shareID,
-		volumeID:  volumeID,
+		api:         api,
+		addrKR:      keys.Merged,
+		signKR:      signKR,
+		signEmail:   signEmail,
+		addressID:   share.AddressID,
+		shareID:     shareID,
+		volumeID:    volumeID,
+		tokenSource: keys.TokenSource,
+		apiURL:      auth.APIURL,
 	}
 	size, modTime := c.resolveFileAttrs(rootLink, rootKR)
 
