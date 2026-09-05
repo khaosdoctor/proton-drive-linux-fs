@@ -111,7 +111,10 @@ func (f *File) getBlock(ctx context.Context, idx int) ([]byte, error) {
 	}
 	f.mu.Unlock()
 
-	if f.client.cache != nil {
+	// ponytail: big files skip the disk cache so one video does not evict everything else; blocks are still fetched lazily
+	useDisk := f.client.cache != nil && cacheOnDisk(f.size, f.client.largeFile)
+
+	if useDisk {
 		if data, ok := f.client.cache.Get(f.linkID, f.revID, idx); ok {
 			f.mu.Lock()
 			f.cachePut(idx, data)
@@ -143,7 +146,7 @@ func (f *File) getBlock(ctx context.Context, idx int) ([]byte, error) {
 
 	data := plain.GetBinary()
 
-	if f.client.cache != nil {
+	if useDisk {
 		f.client.cache.Put(f.linkID, f.revID, idx, data)
 	}
 
@@ -169,6 +172,12 @@ func (f *File) cachePut(idx int, data []byte) {
 
 	f.cache[idx] = data
 	f.cacheLRU = append(f.cacheLRU, idx)
+}
+
+// cacheOnDisk reports whether a file of the given size should have its blocks stored in
+// the on-disk cache. largeFile <= 0 means no threshold, so every size is cached.
+func cacheOnDisk(size, largeFile int64) bool {
+	return largeFile <= 0 || size <= largeFile
 }
 
 // blockIndexForOffset returns the 1-based Proton block index covering byte offset off.

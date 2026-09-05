@@ -252,13 +252,14 @@ func runMount(args []string) int {
 	poll := fs.Duration("poll", 10*time.Second, "remote change polling interval")
 	cacheDir := fs.String("cache-dir", defaultCacheDir(), "on-disk block cache directory")
 	cacheSize := fs.String("cache-size", "1GiB", "on-disk block cache size limit (e.g. 512MiB, 2GiB); <=0 disables it")
+	largeFile := fs.String("large-file", "300MiB", "files larger than this bypass the on-disk block cache; 0 disables")
 	foreground := fs.Bool("foreground", false, "stay attached to the terminal and log to stderr; used by the systemd unit")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
 	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs mount <mountpoint> [-debug] [-ttl 30s] [-poll 10s] [-cache-dir path] [-cache-size 1GiB] [-foreground]")
+		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs mount <mountpoint> [-debug] [-ttl 30s] [-poll 10s] [-cache-dir path] [-cache-size 1GiB] [-large-file 300MiB] [-foreground]")
 		return 2
 	}
 	mountpoint := fs.Arg(0)
@@ -290,6 +291,12 @@ func runMount(args []string) int {
 		return 2
 	}
 
+	largeFileLimit, err := parseCacheSize(*largeFile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: invalid -large-file:", err)
+		return 2
+	}
+
 	session, err := auth.Load()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error: no saved session, run \"proton-drive-fs login\" first:", err)
@@ -317,7 +324,7 @@ func runMount(args []string) int {
 		fmt.Fprintln(os.Stderr, "error: opening block cache:", err)
 		return 1
 	}
-	client.SetBlockCache(blockCache)
+	client.SetBlockCache(blockCache, largeFileLimit)
 
 	fmt.Printf("mounting %s; unmount with: proton-drive-fs unmount %s\n", mountpoint, mountpoint)
 

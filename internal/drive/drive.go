@@ -30,12 +30,18 @@ type Client struct {
 
 	// cache is optional; nil means block downloads never hit disk.
 	cache *BlockCache
+
+	// largeFile is the file-size threshold above which blocks bypass the on-disk cache.
+	// <= 0 means no threshold.
+	largeFile int64
 }
 
 // SetBlockCache attaches an on-disk block cache that OpenFile's Files consult before
-// downloading a block over the network.
-func (c *Client) SetBlockCache(bc *BlockCache) {
+// downloading a block over the network. Files larger than largeFile skip the cache
+// entirely; largeFile <= 0 means no threshold.
+func (c *Client) SetBlockCache(bc *BlockCache, largeFile int64) {
 	c.cache = bc
+	c.largeFile = largeFile
 }
 
 // Node is a decrypted file or folder in the drive tree.

@@ -56,6 +56,28 @@ func TestBlockIndexRoundTrip(t *testing.T) {
 	}
 }
 
+func TestCacheOnDisk(t *testing.T) {
+	cases := []struct {
+		name      string
+		size      int64
+		largeFile int64
+		want      bool
+	}{
+		{"below threshold", 100, 300, true},
+		{"at threshold", 300, 300, true},
+		{"above threshold", 301, 300, false},
+		{"threshold disabled", 1 << 40, 0, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := cacheOnDisk(tc.size, tc.largeFile); got != tc.want {
+				t.Errorf("cacheOnDisk(%d, %d) = %v, want %v", tc.size, tc.largeFile, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestParseXAttr(t *testing.T) {
 	cases := []struct {
 		name      string
