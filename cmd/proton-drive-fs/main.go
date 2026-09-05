@@ -357,14 +357,14 @@ func mountDetached(args []string, mountpoint string) int {
 		fmt.Fprintln(os.Stderr, "error: opening log file:", err)
 		return 1
 	}
-	defer logFile.Close()
+	defer func() { _ = logFile.Close() }()
 
 	devNull, err := os.Open(os.DevNull)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error: opening /dev/null:", err)
 		return 1
 	}
-	defer devNull.Close()
+	defer func() { _ = devNull.Close() }()
 
 	childArgs := detachedArgs(args)
 
