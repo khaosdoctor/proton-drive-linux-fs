@@ -54,7 +54,7 @@ A successful login writes a session file to `$XDG_CONFIG_HOME/proton-drive-fs/se
 ### Mount
 
 ```
-proton-drive-fs mount <mountpoint> [-debug] [-ttl 30s] [-poll 10s] [-cache-dir path] [-cache-size 1GiB] [-large-file 300MiB] [-thumbnails] [-thumbnail-dir path] [-deny-readers names] [-foreground]
+proton-drive-fs mount <mountpoint> [-debug] [-ttl 30s] [-poll 10s] [-op-timeout 60s] [-cache-dir path] [-cache-size 1GiB] [-large-file 300MiB] [-thumbnails] [-thumbnail-dir path] [-deny-readers names] [-foreground]
 ```
 
 If the mountpoint does not exist, mount says so and creates it. By default mount detaches into the background and waits until the filesystem is mounted. When `systemd-cat` is on `PATH` the daemon's output goes to the journal under the identifier `proton-drive-fs`, readable with `journalctl --user -t proton-drive-fs`; without it, the output is appended to `$XDG_STATE_HOME/proton-drive-fs/mount.log` (falling back to `~/.local/state/proton-drive-fs/mount.log`).
@@ -62,6 +62,7 @@ If the mountpoint does not exist, mount says so and creates it. By default mount
 - `-debug` (default: false): enable FUSE debug logging.
 - `-ttl` (default: 30s): how long a directory listing stays cached before it is fetched again.
 - `-poll` (default: 10s): how often the event feed is polled for remote changes.
+- `-op-timeout` (default: 60s): deadline for one filesystem operation's network calls (listing, open, read, upload, mkdir, remove, rename); an operation stuck past this returns an error instead of hanging the caller. Uploads scale past this for large files.
 - `-cache-dir` (default: `$XDG_CACHE_HOME/proton-drive-fs/blocks`, falls back to `~/.cache/proton-drive-fs/blocks`): where downloaded, decrypted file blocks are stored on disk so they survive a remount.
 - `-cache-size` (default: 1GiB): the total size the on-disk block cache is allowed to use; accepts suffixes like `512MiB` or `2GiB`. A value of 0 or less disables the on-disk cache.
 - `-large-file` (default: 300MiB): files larger than this are still read lazily block by block but their blocks are not stored in the on-disk cache, so one large file cannot evict everything else; 0 disables the threshold.

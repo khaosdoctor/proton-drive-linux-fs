@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -22,11 +23,18 @@ import (
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/thumbs"
 )
 
+// defaultOpTimeout bounds a handler's network calls when Options.OpTimeout is unset.
+const defaultOpTimeout = 60 * time.Second
+
 // Options configures the mount.
 type Options struct {
 	Debug        bool
 	TTL          time.Duration
 	PollInterval time.Duration
+
+	// OpTimeout bounds every network call a handler makes; a handler that misses it returns
+	// ETIMEDOUT instead of hanging the caller. <=0 uses the default.
+	OpTimeout time.Duration
 
 	// Thumbnails, when set, receives the previews Proton stores for listed files. nil disables
 	// preview caching.
@@ -45,6 +53,9 @@ func Mount(ctx context.Context, mountpoint string, c *drive.Client, root *drive.
 	}
 	if opts.PollInterval <= 0 {
 		opts.PollInterval = 10 * time.Second
+	}
+	if opts.OpTimeout <= 0 {
+		opts.OpTimeout = defaultOpTimeout
 	}
 
 	// FUSE's kernel-side permission check compares these against the caller; 0:0 made every write ACCESS fail.
@@ -76,6 +87,7 @@ func Mount(ctx context.Context, mountpoint string, c *drive.Client, root *drive.
 
 	go c.Events(ctx, opts.PollInterval, st.handle, state.Paused)
 	go publishStatus(ctx, mountpoint, c)
+	go st.watchdog(ctx)
 
 	if st.thumbs != nil {
 		go st.runThumbWorker(ctx)
@@ -161,14 +173,17 @@ func fusermountBinary() string {
 // mountState tracks every registered directory node and each node's last-known parent, so a
 // remote event naming a LinkID can find which cached listings to drop.
 type mountState struct {
-	client *drive.Client
-	uid    uint32
-	gid    uint32
-	debug  bool
+	client    *drive.Client
+	uid       uint32
+	gid       uint32
+	debug     bool
+	opTimeout time.Duration
 
 	thumbs      *thumbs.Store
 	thumbJobs   chan thumbJob
 	denyReaders []string
+
+	inflight sync.Map // *int -> inflightOp; the watchdog reports whatever is still here well past its deadline
 
 	mu            sync.Mutex
 	dirs          map[string]*dirNode // folder LinkID -> its inode
@@ -182,6 +197,7 @@ func newMountState(c *drive.Client, uid, gid uint32, opts Options) *mountState {
 		uid:           uid,
 		gid:           gid,
 		debug:         opts.Debug,
+		opTimeout:     opts.OpTimeout,
 		thumbs:        opts.Thumbnails,
 		denyReaders:   opts.DenyReaders,
 		dirs:          make(map[string]*dirNode),
@@ -272,7 +288,10 @@ func (st *mountState) invalidateFileContent(ev drive.Event) {
 	if child == nil {
 		return
 	}
-	_ = child.NotifyContent(0, -1)
+
+	// Runs off the event-loop goroutine for the same reason invalidate's NotifyEntry does: a
+	// kernel reply blocked behind an in-flight handler for this file must not stall event delivery.
+	go func() { _ = child.NotifyContent(0, -1) }()
 }
 
 // handle reacts to one remote volume event by invalidating the cached listings and, for file
@@ -310,6 +329,61 @@ func parentsToInvalidate(newParent, oldParent string) []string {
 	return out
 }
 
+// inflightOp describes one handler currently running a network call, for the watchdog to report
+// if it runs long.
+type inflightOp struct {
+	op      string
+	path    string
+	started time.Time
+}
+
+// track registers a handler starting op on path and returns a func to unregister it; call it with
+// defer at the top of every handler that makes a network call, e.g. defer st.track("mkdir", name)().
+func (st *mountState) track(op, path string) func() {
+	key := new(int) // a fresh pointer is a cheap, unique, comparable map key
+	st.inflight.Store(key, inflightOp{op: op, path: path, started: time.Now()})
+	return func() { st.inflight.Delete(key) }
+}
+
+// watchdogInterval is how often watchdog checks for a stuck handler.
+const watchdogInterval = 30 * time.Second
+
+// watchdog periodically logs any handler that has been in flight well past its own deadline,
+// so a hang like the self-deadlock this mount used to hit (see expire's doc) shows up in the
+// journal instead of just freezing the file manager.
+func (st *mountState) watchdog(ctx context.Context) {
+	ticker := time.NewTicker(watchdogInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			st.logStuckOps()
+		}
+	}
+}
+
+func (st *mountState) logStuckOps() {
+	stale := 2 * st.opTimeout
+	now := time.Now()
+
+	st.inflight.Range(func(_, v any) bool {
+		op := v.(inflightOp)
+		if age := now.Sub(op.started); age > stale {
+			log.Printf("fusefs: watchdog: %s %q has been in flight for %s", op.op, op.path, age.Round(time.Second))
+		}
+		return true
+	})
+}
+
+// timedOut reports whether ctx's own per-request deadline, not some other failure, is why a
+// network call just returned an error.
+func timedOut(ctx context.Context) bool {
+	return errors.Is(ctx.Err(), context.DeadlineExceeded)
+}
+
 func inodeNum(linkID string) uint64 {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(linkID))
@@ -328,6 +402,10 @@ type dirNode struct {
 	// cache is keyed by the absolute path of each file, so children need it to build theirs.
 	path string
 
+	// notifying is set while a background NotifyEntry pass for this dir is in flight, so a burst
+	// of remote events dedupes to one pass instead of stacking up goroutines.
+	notifying atomic.Bool
+
 	mu       sync.Mutex
 	node     *drive.Node
 	children []*drive.Node
@@ -341,16 +419,46 @@ func (d *dirNode) setNode(n *drive.Node) {
 	d.mu.Unlock()
 }
 
-// invalidate expires the cached listing and drops the kernel dentry for every previously
-// listed child, forcing a re-Lookup (and re-Getattr) on next access.
-func (d *dirNode) invalidate() {
+// expire drops the cached listing so the next Lookup/Readdir refetches it, without touching the
+// kernel. A request handler for this directory must call this, never invalidate: the kernel holds
+// the directory locked for the duration of a Mkdir/Create/Unlink/Rmdir/Rename/Release and waits
+// for our reply before releasing that lock, while NotifyEntry blocks writing to /dev/fuse until
+// the same lock is free — calling it from inside a handler for its own directory deadlocks the
+// handler against itself (goroutine dump: Mkdir -> refresh -> invalidate -> NotifyEntry, stuck
+// behind the event loop's own invalidate of the same dir). The handler's own reply already tells
+// the kernel about the entry it just created/removed/renamed, so no notification is needed here.
+func (d *dirNode) expire() {
 	d.mu.Lock()
 	d.expires = time.Time{}
+	d.mu.Unlock()
+}
+
+// invalidate expires the cached listing and notifies the kernel, in the background, to drop the
+// dentry for every previously listed child, forcing a re-Lookup (and re-Getattr) on next access.
+// Call this only from the event loop (mountState.handle and its helpers), never from a request
+// handler; see expire's doc. The notification runs off this goroutine so a kernel reply that is
+// slow, or blocked behind an in-flight handler for this same dir, never stalls the event loop.
+func (d *dirNode) invalidate() {
+	d.expire()
+
+	if !d.notifying.CompareAndSwap(false, true) {
+		return // a notify pass for this dir is already in flight
+	}
+
+	d.mu.Lock()
 	names := make([]string, 0, len(d.children))
 	for _, ch := range d.children {
 		names = append(names, ch.Name)
 	}
 	d.mu.Unlock()
+
+	go d.notifyEntries(names)
+}
+
+// notifyEntries pushes NotifyEntry for each name to the kernel. Runs only on the goroutine
+// invalidate spawns for it.
+func (d *dirNode) notifyEntries(names []string) {
+	defer d.notifying.Store(false)
 
 	for _, name := range names {
 		_ = d.NotifyEntry(name)
@@ -397,8 +505,16 @@ func (d *dirNode) load(ctx context.Context) ([]*drive.Node, syscall.Errno) {
 		return d.children, 0
 	}
 
-	children, err := d.client.Children(ctx, d.node)
+	defer d.st.track("readdir", d.node.Name)()
+	opCtx, cancel := context.WithTimeout(ctx, d.st.opTimeout)
+	defer cancel()
+
+	children, err := d.client.Children(opCtx, d.node)
 	if err != nil {
+		if timedOut(opCtx) {
+			log.Printf("fusefs: readdir %q timed out after %s", d.node.Name, d.st.opTimeout)
+			return nil, syscall.ETIMEDOUT
+		}
 		log.Printf("fusefs: readdir %q: %v", d.node.Name, err)
 		return nil, syscall.EIO
 	}
@@ -419,9 +535,11 @@ func (d *dirNode) load(ctx context.Context) ([]*drive.Node, syscall.Errno) {
 }
 
 // refresh drops the cached listing and forces an immediate refetch, so a just-made local change
-// (create, delete, move) is visible to the next Lookup/Readdir without waiting for ttl.
+// (create, delete, move) is visible to the next Lookup/Readdir without waiting for ttl. Called
+// from request handlers (Mkdir, Unlink, Rmdir, Rename, Release), so it only expires the cache;
+// see expire's doc for why it must not notify the kernel.
 func (d *dirNode) refresh(ctx context.Context) ([]*drive.Node, syscall.Errno) {
-	d.invalidate()
+	d.expire()
 	return d.load(ctx)
 }
 
@@ -467,7 +585,15 @@ func (d *dirNode) findChild(ctx context.Context, name string) (*drive.Node, sysc
 
 // Mkdir creates a folder on the drive, then reuses Lookup to mount and return its inode.
 func (d *dirNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	if err := d.client.CreateDir(ctx, d.node, name); err != nil {
+	defer d.st.track("mkdir", path.Join(d.path, name))()
+	opCtx, cancel := context.WithTimeout(ctx, d.st.opTimeout)
+	defer cancel()
+
+	if err := d.client.CreateDir(opCtx, d.node, name); err != nil {
+		if timedOut(opCtx) {
+			log.Printf("fusefs: mkdir %q timed out after %s", name, d.st.opTimeout)
+			return nil, syscall.ETIMEDOUT
+		}
 		log.Printf("fusefs: creating dir %q: %v", name, err)
 		return nil, syscall.EIO
 	}
@@ -522,7 +648,15 @@ func (d *dirNode) remove(ctx context.Context, name string) syscall.Errno {
 		return errno
 	}
 
-	if err := d.client.Trash(ctx, d.node, target); err != nil {
+	defer d.st.track("remove", path.Join(d.path, name))()
+	opCtx, cancel := context.WithTimeout(ctx, d.st.opTimeout)
+	defer cancel()
+
+	if err := d.client.Trash(opCtx, d.node, target); err != nil {
+		if timedOut(opCtx) {
+			log.Printf("fusefs: remove %q timed out after %s", name, d.st.opTimeout)
+			return syscall.ETIMEDOUT
+		}
 		log.Printf("fusefs: trashing %q: %v", name, err)
 		return syscall.EIO
 	}
@@ -550,7 +684,15 @@ func (d *dirNode) Rename(ctx context.Context, name string, newParent fs.InodeEmb
 		return errno
 	}
 
-	if err := d.client.Move(ctx, target, d.node, newDir.node, newName); err != nil {
+	defer d.st.track("rename", path.Join(d.path, name)+" -> "+path.Join(newDir.path, newName))()
+	opCtx, cancel := context.WithTimeout(ctx, d.st.opTimeout)
+	defer cancel()
+
+	if err := d.client.Move(opCtx, target, d.node, newDir.node, newName); err != nil {
+		if timedOut(opCtx) {
+			log.Printf("fusefs: rename %q to %q timed out after %s", name, newName, d.st.opTimeout)
+			return syscall.ETIMEDOUT
+		}
 		log.Printf("fusefs: moving %q to %q: %v", name, newName, err)
 		return syscall.EIO
 	}
@@ -674,6 +816,14 @@ func (f *fileNode) currentName() string {
 	return f.name
 }
 
+// mountState returns the mountState of this file's current parent, for handlers that need
+// opTimeout or the in-flight registry.
+func (f *fileNode) mountState() *mountState {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.parent.st
+}
+
 func (f *fileNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	f.mu.Lock()
 	node := f.node
@@ -773,8 +923,16 @@ func (f *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 			}
 		}
 
-		file, err := f.client.OpenFile(ctx, node)
+		defer parent.st.track("open", f.currentName())()
+		opCtx, cancel := context.WithTimeout(ctx, parent.st.opTimeout)
+		defer cancel()
+
+		file, err := f.client.OpenFile(opCtx, node)
 		if err != nil {
+			if timedOut(opCtx) {
+				log.Printf("fusefs: open %q timed out after %s", f.currentName(), parent.st.opTimeout)
+				return nil, 0, syscall.ETIMEDOUT
+			}
 			log.Printf("fusefs: opening %q: %v", f.currentName(), err)
 			return nil, 0, syscall.EIO
 		}
@@ -796,10 +954,18 @@ func (f *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 	}
 
 	if flags&syscall.O_TRUNC == 0 {
-		if err := downloadInto(ctx, f.client, node, tmp); err != nil {
-			log.Printf("fusefs: downloading %q: %v", f.currentName(), err)
+		defer parent.st.track("open", f.currentName())()
+		opCtx, cancel := context.WithTimeout(ctx, parent.st.opTimeout)
+		defer cancel()
+
+		if err := downloadInto(opCtx, f.client, node, tmp); err != nil {
 			_ = tmp.Close()
 			_ = os.Remove(tmp.Name())
+			if timedOut(opCtx) {
+				log.Printf("fusefs: open %q timed out after %s", f.currentName(), parent.st.opTimeout)
+				return nil, 0, syscall.ETIMEDOUT
+			}
+			log.Printf("fusefs: downloading %q: %v", f.currentName(), err)
 			return nil, 0, syscall.EIO
 		}
 	}
@@ -817,6 +983,21 @@ func (f *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 	f.mu.Unlock()
 
 	return handle, 0, 0
+}
+
+// uploadTimeout returns the deadline for uploading a file of size bytes: base, or one second per
+// 256 KiB of it if that would be longer, so a large upload isn't cut off by the timeout meant to
+// catch a hung small request.
+func uploadTimeout(size int64, base time.Duration) time.Duration {
+	if size <= 0 {
+		return base
+	}
+
+	perByte := time.Duration(size/(256*1024)) * time.Second
+	if perByte > base {
+		return perByte
+	}
+	return base
 }
 
 // downloadInto streams node's full active-revision content into tmp, reusing the same
@@ -923,9 +1104,20 @@ func (h *fileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.Rea
 		return fuse.ReadResultData(dest[:n]), 0
 	}
 
-	n, err := h.file.ReadAt(ctx, dest, off)
+	name := h.node.currentName()
+	st := h.node.mountState()
+
+	defer st.track("read", name)()
+	opCtx, cancel := context.WithTimeout(ctx, st.opTimeout)
+	defer cancel()
+
+	n, err := h.file.ReadAt(opCtx, dest, off)
 	if err != nil && err != io.EOF {
-		log.Printf("fusefs: read %q at offset %d, len %d: %v", h.node.currentName(), off, len(dest), err)
+		if timedOut(opCtx) {
+			log.Printf("fusefs: read %q timed out after %s", name, st.opTimeout)
+			return nil, syscall.ETIMEDOUT
+		}
+		log.Printf("fusefs: read %q at offset %d, len %d: %v", name, off, len(dest), err)
 		return nil, syscall.EIO
 	}
 
@@ -1008,7 +1200,16 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 		return syscall.EIO
 	}
 
-	if err := fn.client.Upload(ctx, parent.node, name, existing, tmp, info.Size(), time.Now()); err != nil {
+	timeout := uploadTimeout(info.Size(), parent.st.opTimeout)
+	defer parent.st.track("upload", name)()
+	opCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	if err := fn.client.Upload(opCtx, parent.node, name, existing, tmp, info.Size(), time.Now()); err != nil {
+		if timedOut(opCtx) {
+			log.Printf("fusefs: upload %q timed out after %s", name, timeout)
+			return syscall.ETIMEDOUT
+		}
 		log.Printf("fusefs: uploading %q: %v", name, err)
 		return syscall.EIO
 	}

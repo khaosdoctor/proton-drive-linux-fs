@@ -293,6 +293,7 @@ func runMount(args []string) int {
 	debug := fs.Bool("debug", false, "enable FUSE debug logging")
 	ttl := fs.Duration("ttl", 30*time.Second, "directory listing cache TTL")
 	poll := fs.Duration("poll", 10*time.Second, "remote change polling interval")
+	opTimeout := fs.Duration("op-timeout", 60*time.Second, "deadline for one filesystem operation's network calls; a stuck operation returns an error after this instead of hanging")
 	cacheDir := fs.String("cache-dir", defaultCacheDir(), "on-disk block cache directory")
 	cacheSize := fs.String("cache-size", "1GiB", "on-disk block cache size limit (e.g. 512MiB, 2GiB); <=0 disables it")
 	largeFile := fs.String("large-file", "300MiB", "files larger than this bypass the on-disk block cache; 0 disables")
@@ -305,7 +306,7 @@ func runMount(args []string) int {
 	}
 
 	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs mount <mountpoint> [-debug] [-ttl 30s] [-poll 10s] [-cache-dir path] [-cache-size 1GiB] [-large-file 300MiB] [-thumbnails] [-thumbnail-dir path] [-deny-readers names] [-foreground]")
+		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs mount <mountpoint> [-debug] [-ttl 30s] [-poll 10s] [-op-timeout 60s] [-cache-dir path] [-cache-size 1GiB] [-large-file 300MiB] [-thumbnails] [-thumbnail-dir path] [-deny-readers names] [-foreground]")
 		return 2
 	}
 	mountpoint := fs.Arg(0)
@@ -387,6 +388,7 @@ func runMount(args []string) int {
 		Debug:        *debug,
 		TTL:          *ttl,
 		PollInterval: *poll,
+		OpTimeout:    *opTimeout,
 		Thumbnails:   thumbStore,
 		DenyReaders:  parseDenyReaders(*denyReaders),
 	}
