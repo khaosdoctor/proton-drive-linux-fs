@@ -129,7 +129,7 @@ func (f *File) getBlock(ctx context.Context, idx int) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	ciphertext, err := io.ReadAll(rc)
 	if err != nil {
