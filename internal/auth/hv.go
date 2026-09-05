@@ -5,12 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html/template"
-	"io"
-	"net"
 	"net/http"
 	"net/url"
-	"os/exec"
 	"strings"
 	"unicode"
 
@@ -63,138 +59,18 @@ func parseHVDetails(raw []byte) *HumanVerificationRequired {
 	return &HumanVerificationRequired{Token: d.HumanVerificationToken, Methods: d.HumanVerificationMethods}
 }
 
-// parseHVMessage reads the postMessage payload the verify app broadcasts on success
-// ({type: "HUMAN_VERIFICATION_SUCCESS", payload: {token, type}}), or the one the raw
-// captcha frame sends ({type: "pm_captcha", token}).
-func parseHVMessage(raw []byte) (string, string) {
-	var m struct {
-		Type    string
-		Token   string
-		Payload struct {
-			Token string
-			Type  string
-		}
-	}
-
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return "", ""
-	}
-
-	if m.Type == "HUMAN_VERIFICATION_SUCCESS" && m.Payload.Token != "" {
-		method := m.Payload.Type
-		if method == "" {
-			method = "captcha"
-		}
-		return m.Payload.Token, method
-	}
-
-	if m.Type == "pm_captcha" && m.Token != "" {
-		return m.Token, "captcha"
-	}
-
-	return "", ""
-}
-
-var hvPage = template.Must(template.New("hv").Parse(`<!doctype html>
-<title>Proton human verification</title>
-<body style="font-family: sans-serif; margin: 2rem">
-<p id="status">Complete the verification below, then go back to the terminal.</p>
-<iframe id="frame" name="frame" src="{{.VerifyURL}}" style="width: 100%; height: 34rem; border: 0"></iframe>
-<p><a href="{{.CaptchaURL}}" target="frame">Nothing showing up? Load Proton's plain CAPTCHA frame instead.</a></p>
-<script>
-var origins = ["{{.VerifyOrigin}}", "{{.APIOrigin}}"];
-window.addEventListener("message", function (e) {
-	if (origins.indexOf(e.origin) < 0) {
-		return;
-	}
-	fetch("/done", { method: "POST", body: JSON.stringify(e.data) }).then(function (r) {
-		if (r.status === 200) {
-			document.getElementById("status").textContent = "Verified. Go back to the terminal.";
-		}
-	});
-});
-</script>
-</body>
-`))
-
-// SolveCaptcha serves a local page embedding Proton's verify app and waits for it to
-// hand back a human verification token.
-func SolveCaptcha(ctx context.Context, token string, openBrowser bool) (string, error) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return "", err
-	}
-
-	apiOrigin, err := url.Parse(apiURL)
-	if err != nil {
-		return "", err
-	}
-	apiOrigin.Path = ""
-
-	// unverified: whether verify.proton.me allows a 127.0.0.1 page to frame it; the
-	// fallback link loads the /core/v4/captcha frame that Proton's own apps embed.
-	verifyURL := verifyOrigin + "/?" + url.Values{
+// CaptchaURL points at Proton's verify page for a human verification token. It has to
+// be opened as a normal browser tab: Proton serves the page with
+// "frame-ancestors https://mail.proton.me https://calendar.proton.me https://drive.proton.me",
+// so a local page cannot embed it, and the page only postMessages to window.parent,
+// never to an opener. Run top-level it instead POSTs the solved CAPTCHA to
+// core/v4/verification/captcha/<token>, which makes the same token redeemable by the
+// login retry (WebClients Verify.tsx, submitExternalCaptcha).
+func CaptchaURL(token string) string {
+	return verifyOrigin + "/?" + url.Values{
 		"methods": {"captcha"},
 		"token":   {token},
-		"embed":   {"true"},
 	}.Encode()
-
-	captchaURL := apiURL + "/core/v4/captcha?" + url.Values{
-		"Token":             {token},
-		"ForceWebMessaging": {"1"},
-	}.Encode()
-
-	done := make(chan string, 1)
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_ = hvPage.Execute(w, map[string]string{
-			"VerifyURL":    verifyURL,
-			"CaptchaURL":   captchaURL,
-			"VerifyOrigin": verifyOrigin,
-			"APIOrigin":    apiOrigin.String(),
-		})
-	})
-	mux.HandleFunc("/done", func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(io.LimitReader(r.Body, 64<<10))
-		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-
-		hvToken, _ := parseHVMessage(body)
-		if hvToken == "" {
-			// Resize and notification messages land here too; only a token matters.
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-
-		select {
-		case done <- hvToken:
-		default:
-		}
-
-		w.WriteHeader(http.StatusOK)
-	})
-
-	srv := &http.Server{Handler: mux}
-	go func() { _ = srv.Serve(ln) }()
-	defer srv.Close()
-
-	pageURL := "http://" + ln.Addr().String() + "/"
-	fmt.Println("Open this URL to complete the CAPTCHA:", pageURL)
-
-	if openBrowser {
-		_ = exec.Command("xdg-open", pageURL).Start()
-	}
-
-	select {
-	case hvToken := <-done:
-		return hvToken, nil
-	case <-ctx.Done():
-		return "", ctx.Err()
-	}
 }
 
 // RequestVerificationCode asks Proton to send a verification code to an email address

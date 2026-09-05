@@ -68,6 +68,7 @@ func prompt(reader *bufio.Reader, label string) (string, error) {
 func runLogin(args []string) int {
 	fs := flag.NewFlagSet("login", flag.ContinueOnError)
 	noBrowser := fs.Bool("no-browser", false, "do not open a browser for human verification")
+	hvMethod := fs.String("hv-method", "", "force a human verification method: captcha, email or sms")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -101,7 +102,7 @@ func runLogin(args []string) int {
 
 	var hv *auth.HumanVerificationRequired
 	if errors.As(err, &hv) {
-		session, err = verifyHuman(ctx, reader, hv, username, password, !*noBrowser, promptTOTP)
+		session, err = verifyHuman(ctx, reader, hv, username, password, *hvMethod, !*noBrowser, promptTOTP)
 	}
 
 	if err != nil {
@@ -118,27 +119,55 @@ func runLogin(args []string) int {
 	return 0
 }
 
+// pickHVMethod returns the forced method when Proton offered it, otherwise a code by
+// email or sms, and the CAPTCHA last because it needs a detour through a browser.
+func pickHVMethod(offered []string, forced string) (string, error) {
+	if forced != "" {
+		if !slices.Contains(offered, forced) {
+			return "", fmt.Errorf("proton did not offer verification method %q (offered: %s)", forced, strings.Join(offered, ", "))
+		}
+		return forced, nil
+	}
+
+	for _, method := range []string{"email", "sms", "captcha"} {
+		if slices.Contains(offered, method) {
+			return method, nil
+		}
+	}
+
+	return "", fmt.Errorf("no supported verification method offered: %s", strings.Join(offered, ", "))
+}
+
 // verifyHuman walks the user through the verification Proton asked for and retries
 // the login with the resulting token.
-func verifyHuman(ctx context.Context, reader *bufio.Reader, hv *auth.HumanVerificationRequired, username string, password []byte, openBrowser bool, promptTOTP func() (string, error)) (*auth.Session, error) {
+func verifyHuman(ctx context.Context, reader *bufio.Reader, hv *auth.HumanVerificationRequired, username string, password []byte, forced string, openBrowser bool, promptTOTP func() (string, error)) (*auth.Session, error) {
 	fmt.Println("Proton requires human verification. Methods offered:", strings.Join(hv.Methods, ", "))
 
-	if slices.Contains(hv.Methods, "captcha") {
-		token, err := auth.SolveCaptcha(ctx, hv.Token, openBrowser)
-		if err != nil {
+	method, err := pickHVMethod(hv.Methods, forced)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Println("Verifying with:", method)
+
+	if method == "captcha" {
+		captchaURL := auth.CaptchaURL(hv.Token)
+
+		fmt.Println("Proton refuses to be embedded in a local page, so the CAPTCHA has to run in a browser tab.")
+		fmt.Println("Open this URL to complete the CAPTCHA:", captchaURL)
+
+		if openBrowser {
+			_ = exec.Command("xdg-open", captchaURL).Start()
+		}
+
+		if _, err := prompt(reader, "Press Enter once the CAPTCHA is solved: "); err != nil {
 			return nil, err
 		}
 
-		return auth.LoginWithHV(ctx, username, password, "captcha", token, promptTOTP)
+		return auth.LoginWithHV(ctx, username, password, "captcha", hv.Token, promptTOTP)
 	}
 
-	method := "email"
 	label := "Email address for the verification code: "
-	if !slices.Contains(hv.Methods, "email") {
-		if !slices.Contains(hv.Methods, "sms") {
-			return nil, fmt.Errorf("no supported verification method offered: %s", strings.Join(hv.Methods, ", "))
-		}
-		method = "sms"
+	if method == "sms" {
 		label = "Phone number for the verification code: "
 	}
 

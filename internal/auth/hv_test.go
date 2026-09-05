@@ -69,63 +69,11 @@ func TestParseHVDetails(t *testing.T) {
 	}
 }
 
-func TestParseHVMessage(t *testing.T) {
-	tests := []struct {
-		name       string
-		raw        string
-		wantToken  string
-		wantMethod string
-	}{
-		{
-			name:       "verify app success",
-			raw:        `{"type":"HUMAN_VERIFICATION_SUCCESS","payload":{"token":"tok-1","type":"email"}}`,
-			wantToken:  "tok-1",
-			wantMethod: "email",
-		},
-		{
-			name:       "verify app success without method",
-			raw:        `{"type":"HUMAN_VERIFICATION_SUCCESS","payload":{"token":"tok-1"}}`,
-			wantToken:  "tok-1",
-			wantMethod: "captcha",
-		},
-		{
-			name:       "raw captcha frame",
-			raw:        `{"type":"pm_captcha","token":"tok-2"}`,
-			wantToken:  "tok-2",
-			wantMethod: "captcha",
-		},
-		{
-			name: "captcha frame height",
-			raw:  `{"type":"pm_height","height":320}`,
-		},
-		{
-			name: "verify app resize",
-			raw:  `{"type":"RESIZE","payload":{"height":320}}`,
-		},
-		{
-			name: "success without token",
-			raw:  `{"type":"HUMAN_VERIFICATION_SUCCESS","payload":{"type":"captcha"}}`,
-		},
-		{
-			name: "token from an unknown message type",
-			raw:  `{"type":"WHATEVER","token":"tok-3"}`,
-		},
-		{
-			name: "broken json",
-			raw:  `not json`,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			token, method := parseHVMessage([]byte(tt.raw))
-			if token != tt.wantToken {
-				t.Errorf("token: want %q, got %q", tt.wantToken, token)
-			}
-			if method != tt.wantMethod {
-				t.Errorf("method: want %q, got %q", tt.wantMethod, method)
-			}
-		})
+func TestCaptchaURL(t *testing.T) {
+	got := CaptchaURL("tok 1&x")
+	want := "https://verify.proton.me/?methods=captcha&token=tok+1%26x"
+	if got != want {
+		t.Errorf("want %q, got %q", want, got)
 	}
 }
 
