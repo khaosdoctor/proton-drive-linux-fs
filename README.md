@@ -12,6 +12,17 @@ Early and unofficial. Not affiliated with, endorsed by, or supported by Proton A
 
 ## Install
 
+From source:
+
+```
+git clone https://github.com/khaosdoctor/proton-drive-linux-fs
+cd proton-drive-linux-fs
+make build
+make install
+```
+
+The `make build` command places the binary in the repository root. Run `make help` to see all available targets.
+
 From a [GitHub Release](https://github.com/khaosdoctor/proton-drive-linux-fs/releases):
 
 ```
