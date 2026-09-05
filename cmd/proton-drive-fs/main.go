@@ -329,6 +329,13 @@ func runMount(args []string) int {
 	return 0
 }
 
+func detachedArgs(args []string) []string {
+	childArgs := make([]string, 0, len(args)+2)
+	childArgs = append(childArgs, "mount", "-foreground")
+	childArgs = append(childArgs, args...)
+	return childArgs
+}
+
 // mountDetached re-execs the current binary in the background with -foreground appended, waits
 // for the mount to appear in /proc/self/mounts, and reports the result without blocking the
 // caller's terminal.
@@ -359,10 +366,7 @@ func mountDetached(args []string, mountpoint string) int {
 	}
 	defer devNull.Close()
 
-	childArgs := make([]string, 0, len(args)+2)
-	childArgs = append(childArgs, "mount")
-	childArgs = append(childArgs, args...)
-	childArgs = append(childArgs, "-foreground")
+	childArgs := detachedArgs(args)
 
 	cmd := exec.Command(exe, childArgs...)
 	cmd.Stdin = devNull

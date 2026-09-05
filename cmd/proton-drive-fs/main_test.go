@@ -2,6 +2,50 @@ package main
 
 import "testing"
 
+func TestDetachedArgs(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{
+			name: "simple mount with mountpoint",
+			in:   []string{"-debug", "/mnt/x"},
+			want: []string{"mount", "-foreground", "-debug", "/mnt/x"},
+		},
+		{
+			name: "multiple flags with mountpoint",
+			in:   []string{"-debug", "-ttl", "30s", "/mnt/x"},
+			want: []string{"mount", "-foreground", "-debug", "-ttl", "30s", "/mnt/x"},
+		},
+		{
+			name: "just mountpoint",
+			in:   []string{"/mnt/x"},
+			want: []string{"mount", "-foreground", "/mnt/x"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := detachedArgs(tt.in)
+
+			if len(got) != len(tt.want) {
+				t.Fatalf("want len %d, got len %d", len(tt.want), len(got))
+			}
+
+			for i, v := range got {
+				if v != tt.want[i] {
+					t.Errorf("index %d: want %q, got %q", i, tt.want[i], v)
+				}
+			}
+
+			if len(got) >= 2 && got[1] != "-foreground" {
+				t.Errorf("want -foreground at index 1, got %q", got[1])
+			}
+		})
+	}
+}
+
 func TestPickHVMethod(t *testing.T) {
 	tests := []struct {
 		name    string
