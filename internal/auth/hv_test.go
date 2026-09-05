@@ -69,8 +69,35 @@ func TestParseHVDetails(t *testing.T) {
 	}
 }
 
-func TestCaptchaURL(t *testing.T) {
-	got := CaptchaURL("tok 1&x")
+func TestParseHVMessage(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "solved captcha",
+			raw:  `{"type":"pm_captcha","token":"hv-token:0123abc"}`,
+			want: "hv-token:0123abc",
+		},
+		{name: "height report", raw: `{"type":"pm_height","height":320}`},
+		{name: "expired solution", raw: `{"type":"pm_captcha_expired","token":"hv-token:old"}`},
+		{name: "no token", raw: `{"type":"pm_captcha"}`},
+		{name: "not a proton message", raw: `{"token":"hv-token:0123abc"}`},
+		{name: "broken json", raw: `not json`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := parseHVMessage([]byte(tt.raw)); got != tt.want {
+				t.Errorf("want %q, got %q", tt.want, got)
+			}
+		})
+	}
+}
+
+func TestVerifyURL(t *testing.T) {
+	got := verifyURL("tok 1&x")
 	want := "https://verify.proton.me/?methods=captcha&token=tok+1%26x"
 	if got != want {
 		t.Errorf("want %q, got %q", want, got)
