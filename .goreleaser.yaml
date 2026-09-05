@@ -1,0 +1,51 @@
+version: 2
+
+builds:
+  - main: ./cmd/proton-drive-fs
+    binary: proton-drive-fs
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - formats: [tar.gz]
+
+checksum:
+  name_template: "checksums.txt"
+
+dockers:
+  - image_templates:
+      - "ghcr.io/khaosdoctor/proton-drive-linux-fs:{{ .Version }}-amd64"
+      - "ghcr.io/khaosdoctor/proton-drive-linux-fs:latest-amd64"
+    use: buildx
+    dockerfile: Dockerfile.goreleaser
+    goarch: amd64
+    build_flag_templates:
+      - "--platform=linux/amd64"
+  - image_templates:
+      - "ghcr.io/khaosdoctor/proton-drive-linux-fs:{{ .Version }}-arm64"
+      - "ghcr.io/khaosdoctor/proton-drive-linux-fs:latest-arm64"
+    use: buildx
+    dockerfile: Dockerfile.goreleaser
+    goarch: arm64
+    build_flag_templates:
+      - "--platform=linux/arm64"
+
+docker_manifests:
+  - name_template: "ghcr.io/khaosdoctor/proton-drive-linux-fs:{{ .Version }}"
+    image_templates:
+      - "ghcr.io/khaosdoctor/proton-drive-linux-fs:{{ .Version }}-amd64"
+      - "ghcr.io/khaosdoctor/proton-drive-linux-fs:{{ .Version }}-arm64"
+  - name_template: "ghcr.io/khaosdoctor/proton-drive-linux-fs:latest"
+    image_templates:
+      - "ghcr.io/khaosdoctor/proton-drive-linux-fs:latest-amd64"
+      - "ghcr.io/khaosdoctor/proton-drive-linux-fs:latest-arm64"
+
+changelog:
+  use: github-native
