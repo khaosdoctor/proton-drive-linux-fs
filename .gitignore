@@ -27,3 +27,9 @@ Thumbs.db
 config.yaml
 config.yml
 *.env
+
+# Agent worktrees
+/.claude/
+
+# Build output
+/bin/

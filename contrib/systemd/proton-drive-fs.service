@@ -1,0 +1,12 @@
+[Unit]
+Description=Proton Drive FUSE mount
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/proton-drive-fs mount %h/ProtonDrive
+ExecStop=%h/.local/bin/proton-drive-fs unmount %h/ProtonDrive
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
