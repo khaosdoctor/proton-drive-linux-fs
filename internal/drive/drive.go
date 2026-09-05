@@ -44,6 +44,12 @@ func (c *Client) SetBlockCache(bc *BlockCache, largeFile int64) {
 	c.largeFile = largeFile
 }
 
+// LargeFileLimit returns the file-size threshold above which a file counts as large, the same
+// one that keeps big files out of the on-disk block cache. <= 0 means no threshold.
+func (c *Client) LargeFileLimit() int64 {
+	return c.largeFile
+}
+
 // Node is a decrypted file or folder in the drive tree.
 type Node struct {
 	Link    proton.Link

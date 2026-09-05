@@ -54,7 +54,7 @@ A successful login writes a session file to `$XDG_CONFIG_HOME/proton-drive-fs/se
 ### Mount
 
 ```
-proton-drive-fs mount <mountpoint> [-debug] [-ttl 30s] [-poll 10s] [-cache-dir path] [-cache-size 1GiB] [-large-file 300MiB] [-foreground]
+proton-drive-fs mount <mountpoint> [-debug] [-ttl 30s] [-poll 10s] [-cache-dir path] [-cache-size 1GiB] [-large-file 300MiB] [-thumbnails] [-thumbnail-dir path] [-deny-readers names] [-foreground]
 ```
 
 If the mountpoint does not exist, mount says so and creates it. By default mount detaches into the background, waits until the filesystem is mounted, and writes the daemon's log to `$XDG_STATE_HOME/proton-drive-fs/mount.log` (falling back to `~/.local/state/proton-drive-fs/mount.log`).
@@ -65,7 +65,16 @@ If the mountpoint does not exist, mount says so and creates it. By default mount
 - `-cache-dir` (default: `$XDG_CACHE_HOME/proton-drive-fs/blocks`, falls back to `~/.cache/proton-drive-fs/blocks`): where downloaded, decrypted file blocks are stored on disk so they survive a remount.
 - `-cache-size` (default: 1GiB): the total size the on-disk block cache is allowed to use; accepts suffixes like `512MiB` or `2GiB`. A value of 0 or less disables the on-disk cache.
 - `-large-file` (default: 300MiB): files larger than this are still read lazily block by block but their blocks are not stored in the on-disk cache, so one large file cannot evict everything else; 0 disables the threshold.
+- `-thumbnails` (default: true): write the preview image Proton stores for a file into the freedesktop thumbnail cache when a folder is listed.
+- `-thumbnail-dir` (default: `$XDG_CACHE_HOME/thumbnails`, falls back to `~/.cache/thumbnails`): the thumbnail cache directory to write into. This is the shared directory file managers read, not a directory of its own.
+- `-deny-readers` (default: `tracker-miner-fs,tracker-extract,localsearch,baloo_file,baloo_file_extractor,tumblerd,ffmpegthumbnailer,totem-video-thumbnailer,gdk-pixbuf-thumbnailer,gnome-desktop-thumbnailer,evince-thumbnailer`): comma-separated process names refused a read of a file above `-large-file`. Passing a value replaces the default list; `-deny-readers ""` turns the refusal off.
 - `-foreground` (default: false): stay attached to the terminal and log to stderr; used by the systemd unit.
+
+### Previews
+
+Proton stores a small thumbnail next to each file it has one for. When a folder is listed, the mount downloads those thumbnails and writes them into the freedesktop thumbnail cache (the directory `-thumbnail-dir` points at), so file managers show previews without opening the files themselves. A thumbnail is a few kilobytes regardless of how large the file is, and it is fetched in the background, so listing a folder is not held up by it.
+
+Some desktops also run thumbnailers and search indexers that open every file they find. On a network filesystem that means downloading everything in a folder just to look at it. Files above `-large-file` are refused to the processes in `-deny-readers`, which are the dedicated thumbnailer and indexer binaries; those opens fail with a permission error and nothing is downloaded. Applications the user launches to open a file are not on the list and are unaffected.
 
 ### Unmount
 

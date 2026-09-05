@@ -1,6 +1,27 @@
 package main
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
+
+func TestParseDenyReaders(t *testing.T) {
+	tests := []struct {
+		in   string
+		want []string
+	}{
+		{"", nil},
+		{"  ", nil},
+		{"tumblerd", []string{"tumblerd"}},
+		{" tumblerd , localsearch ,, baloo_file ", []string{"tumblerd", "localsearch", "baloo_file"}},
+	}
+
+	for _, tt := range tests {
+		if got := parseDenyReaders(tt.in); !slices.Equal(got, tt.want) {
+			t.Errorf("parseDenyReaders(%q) = %v, want %v", tt.in, got, tt.want)
+		}
+	}
+}
 
 func TestDetachedArgs(t *testing.T) {
 	tests := []struct {

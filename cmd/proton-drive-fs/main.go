@@ -22,6 +22,7 @@ import (
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/auth"
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/drive"
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/fusefs"
+	"github.com/khaosdoctor/proton-drive-linux-fs/internal/thumbs"
 )
 
 var version = "dev"
@@ -211,6 +212,46 @@ func defaultCacheDir() string {
 	return filepath.Join(base, "proton-drive-fs", "blocks")
 }
 
+// defaultThumbnailDir returns the freedesktop thumbnail cache directory, where file managers
+// look for previews: $XDG_CACHE_HOME/thumbnails, falling back to ~/.cache/thumbnails.
+func defaultThumbnailDir() string {
+	base, err := os.UserCacheDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(base, "thumbnails")
+}
+
+// defaultDenyReaders are the dedicated thumbnailer and indexer binaries refused a read of a
+// large file. Only processes that walk a folder on their own are listed: an application the
+// user launches to open a file, a slicer for example, must keep working.
+var defaultDenyReaders = []string{
+	"tracker-miner-fs",
+	"tracker-extract",
+	"localsearch",
+	"baloo_file",
+	"baloo_file_extractor",
+	"tumblerd",
+	"ffmpegthumbnailer",
+	"totem-video-thumbnailer",
+	"gdk-pixbuf-thumbnailer",
+	"gnome-desktop-thumbnailer",
+	"evince-thumbnailer",
+}
+
+// parseDenyReaders splits a comma-separated -deny-readers value, dropping blank entries. An
+// empty value disables the denylist.
+func parseDenyReaders(s string) []string {
+	var names []string
+	for _, name := range strings.Split(s, ",") {
+		if trimmed := strings.TrimSpace(name); trimmed != "" {
+			names = append(names, trimmed)
+		}
+	}
+
+	return names
+}
+
 // parseCacheSize parses a byte size like "512MiB", "2GiB", "100M", or a bare byte count.
 // A result <= 0 disables the cache.
 func parseCacheSize(s string) (int64, error) {
@@ -253,13 +294,16 @@ func runMount(args []string) int {
 	cacheDir := fs.String("cache-dir", defaultCacheDir(), "on-disk block cache directory")
 	cacheSize := fs.String("cache-size", "1GiB", "on-disk block cache size limit (e.g. 512MiB, 2GiB); <=0 disables it")
 	largeFile := fs.String("large-file", "300MiB", "files larger than this bypass the on-disk block cache; 0 disables")
+	thumbnails := fs.Bool("thumbnails", true, "write Proton's stored previews into the freedesktop thumbnail cache")
+	thumbnailDir := fs.String("thumbnail-dir", defaultThumbnailDir(), "freedesktop thumbnail cache directory")
+	denyReaders := fs.String("deny-readers", strings.Join(defaultDenyReaders, ","), "comma-separated process names refused a read of a file above -large-file; empty allows all")
 	foreground := fs.Bool("foreground", false, "stay attached to the terminal and log to stderr; used by the systemd unit")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
 	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs mount <mountpoint> [-debug] [-ttl 30s] [-poll 10s] [-cache-dir path] [-cache-size 1GiB] [-large-file 300MiB] [-foreground]")
+		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs mount <mountpoint> [-debug] [-ttl 30s] [-poll 10s] [-cache-dir path] [-cache-size 1GiB] [-large-file 300MiB] [-thumbnails] [-thumbnail-dir path] [-deny-readers names] [-foreground]")
 		return 2
 	}
 	mountpoint := fs.Arg(0)
@@ -326,9 +370,26 @@ func runMount(args []string) int {
 	}
 	client.SetBlockCache(blockCache, largeFileLimit)
 
+	var thumbStore *thumbs.Store
+	if *thumbnails && *thumbnailDir != "" {
+		thumbStore, err = thumbs.New(*thumbnailDir, mountpoint)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error: resolving thumbnail directory:", err)
+			return 1
+		}
+	}
+
 	fmt.Printf("mounting %s; unmount with: proton-drive-fs unmount %s\n", mountpoint, mountpoint)
 
-	if err := fusefs.Mount(ctx, mountpoint, client, root, fusefs.Options{Debug: *debug, TTL: *ttl, PollInterval: *poll}); err != nil {
+	opts := fusefs.Options{
+		Debug:        *debug,
+		TTL:          *ttl,
+		PollInterval: *poll,
+		Thumbnails:   thumbStore,
+		DenyReaders:  parseDenyReaders(*denyReaders),
+	}
+
+	if err := fusefs.Mount(ctx, mountpoint, client, root, opts); err != nil {
 		fmt.Fprintln(os.Stderr, "error: mount failed:", err)
 		return 1
 	}

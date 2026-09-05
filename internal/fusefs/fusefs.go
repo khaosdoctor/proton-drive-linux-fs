@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path"
 	"sync"
 	"syscall"
 	"time"
@@ -17,6 +18,7 @@ import (
 	proton "github.com/henrybear327/go-proton-api"
 
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/drive"
+	"github.com/khaosdoctor/proton-drive-linux-fs/internal/thumbs"
 )
 
 // Options configures the mount.
@@ -24,6 +26,14 @@ type Options struct {
 	Debug        bool
 	TTL          time.Duration
 	PollInterval time.Duration
+
+	// Thumbnails, when set, receives the previews Proton stores for listed files. nil disables
+	// preview caching.
+	Thumbnails *thumbs.Store
+
+	// DenyReaders are process names refused a read of a file above the client's large-file
+	// threshold. Empty allows every reader.
+	DenyReaders []string
 }
 
 // Mount publishes c's drive tree, rooted at root, at mountpoint and blocks until it is unmounted
@@ -39,8 +49,9 @@ func Mount(ctx context.Context, mountpoint string, c *drive.Client, root *drive.
 	// FUSE's kernel-side permission check compares these against the caller; 0:0 made every write ACCESS fail.
 	uid := uint32(os.Getuid())
 	gid := uint32(os.Getgid())
-	st := newMountState(c, uid, gid)
+	st := newMountState(c, uid, gid, opts)
 
+	// The root directory's path relative to the mountpoint is the empty string.
 	rootNode := &dirNode{client: c, node: root, ttl: opts.TTL, st: st}
 	st.register(rootNode)
 
@@ -63,6 +74,10 @@ func Mount(ctx context.Context, mountpoint string, c *drive.Client, root *drive.
 	}
 
 	go c.Events(ctx, opts.PollInterval, st.handle)
+
+	if st.thumbs != nil {
+		go st.runThumbWorker(ctx)
+	}
 
 	// A plain Unmount() fails while the mountpoint is busy (e.g. a shell still cd'd into it),
 	// and server.Wait() would then block forever waiting for a detach that never happens; fall
@@ -119,14 +134,36 @@ type mountState struct {
 	client *drive.Client
 	uid    uint32
 	gid    uint32
+	debug  bool
 
-	mu       sync.Mutex
-	dirs     map[string]*dirNode // folder LinkID -> its inode
-	parentOf map[string]string   // child LinkID -> parent LinkID
+	thumbs      *thumbs.Store
+	thumbJobs   chan thumbJob
+	denyReaders []string
+
+	mu            sync.Mutex
+	dirs          map[string]*dirNode // folder LinkID -> its inode
+	parentOf      map[string]string   // child LinkID -> parent LinkID
+	thumbInflight map[string]bool     // revision key -> queued, being fetched, or given up on
 }
 
-func newMountState(c *drive.Client, uid, gid uint32) *mountState {
-	return &mountState{client: c, uid: uid, gid: gid, dirs: make(map[string]*dirNode), parentOf: make(map[string]string)}
+func newMountState(c *drive.Client, uid, gid uint32, opts Options) *mountState {
+	st := &mountState{
+		client:        c,
+		uid:           uid,
+		gid:           gid,
+		debug:         opts.Debug,
+		thumbs:        opts.Thumbnails,
+		denyReaders:   opts.DenyReaders,
+		dirs:          make(map[string]*dirNode),
+		parentOf:      make(map[string]string),
+		thumbInflight: make(map[string]bool),
+	}
+
+	if st.thumbs != nil {
+		st.thumbJobs = make(chan thumbJob, thumbQueueSize)
+	}
+
+	return st
 }
 
 func (st *mountState) register(d *dirNode) {
@@ -257,6 +294,10 @@ type dirNode struct {
 	ttl    time.Duration
 	st     *mountState
 
+	// path is this folder's path relative to the mountpoint, "" for the root. The thumbnail
+	// cache is keyed by the absolute path of each file, so children need it to build theirs.
+	path string
+
 	mu       sync.Mutex
 	node     *drive.Node
 	children []*drive.Node
@@ -338,6 +379,10 @@ func (d *dirNode) load(ctx context.Context) ([]*drive.Node, syscall.Errno) {
 	parentID := d.node.Link.LinkID
 	for _, ch := range children {
 		d.st.setParent(ch.Link.LinkID, parentID)
+	}
+
+	if d.st.thumbs != nil {
+		go d.st.queueThumbs(d.path, children)
 	}
 
 	return children, 0
@@ -529,7 +574,7 @@ func (d *dirNode) makeChild(ctx context.Context, child *drive.Node, out *fuse.En
 
 	if child.IsDir() {
 		attr.Mode = fuse.S_IFDIR
-		dn := &dirNode{client: d.client, node: child, ttl: d.ttl, st: d.st}
+		dn := &dirNode{client: d.client, node: child, ttl: d.ttl, st: d.st, path: path.Join(d.path, child.Name)}
 		inode := d.NewInode(ctx, dn, attr)
 		d.st.register(dn)
 		return inode
@@ -668,11 +713,20 @@ func (f *fileNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAt
 func (f *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
 	f.mu.Lock()
 	node := f.node
+	parent := f.parent
 	f.mu.Unlock()
 
 	if node == nil {
 		// A pending (not yet uploaded) file only has the handle Create already returned.
 		return nil, 0, syscall.EIO
+	}
+
+	// Every open mode below can read, so the denylist applies to all of them.
+	if parent != nil {
+		if procName, pid, denied := parent.st.deniedReader(ctx, node.Size); denied {
+			log.Printf("fusefs: denied open of %q (%d bytes) by %s (pid %d); adjust with -deny-readers", f.currentName(), node.Size, procName, pid)
+			return nil, 0, syscall.EACCES
+		}
 	}
 
 	if flags&syscall.O_ACCMODE == syscall.O_RDONLY {
