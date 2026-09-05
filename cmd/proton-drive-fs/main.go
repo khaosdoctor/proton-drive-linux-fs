@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -39,7 +40,7 @@ func run(args []string) int {
 
 	switch args[0] {
 	case "login":
-		return runLogin()
+		return runLogin(args[1:])
 	case "mount":
 		return runMount(args[1:])
 	case "unmount":
@@ -54,16 +55,30 @@ func run(args []string) int {
 	}
 }
 
-func runLogin() int {
+func prompt(reader *bufio.Reader, label string) (string, error) {
+	fmt.Print(label)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+
+	return strings.TrimSpace(line), nil
+}
+
+func runLogin(args []string) int {
+	fs := flag.NewFlagSet("login", flag.ContinueOnError)
+	noBrowser := fs.Bool("no-browser", false, "do not open a browser for human verification")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
 	reader := bufio.NewReader(os.Stdin)
 
-	fmt.Print("Username: ")
-	username, err := reader.ReadString('\n')
+	username, err := prompt(reader, "Username: ")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error: reading username:", err)
 		return 1
 	}
-	username = strings.TrimSpace(username)
 	if username == "" {
 		fmt.Fprintln(os.Stderr, "error: username is required")
 		return 2
@@ -78,16 +93,17 @@ func runLogin() int {
 	}
 
 	promptTOTP := func() (string, error) {
-		fmt.Print("Two-factor code: ")
-		code, err := reader.ReadString('\n')
-		if err != nil {
-			return "", err
-		}
-		return strings.TrimSpace(code), nil
+		return prompt(reader, "Two-factor code: ")
 	}
 
 	ctx := context.Background()
 	session, err := auth.Login(ctx, username, password, promptTOTP)
+
+	var hv *auth.HumanVerificationRequired
+	if errors.As(err, &hv) {
+		session, err = verifyHuman(ctx, reader, hv, username, password, !*noBrowser, promptTOTP)
+	}
+
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error: login failed:", err)
 		return 1
@@ -100,6 +116,50 @@ func runLogin() int {
 
 	fmt.Printf("logged in as %s\n", username)
 	return 0
+}
+
+// verifyHuman walks the user through the verification Proton asked for and retries
+// the login with the resulting token.
+func verifyHuman(ctx context.Context, reader *bufio.Reader, hv *auth.HumanVerificationRequired, username string, password []byte, openBrowser bool, promptTOTP func() (string, error)) (*auth.Session, error) {
+	fmt.Println("Proton requires human verification. Methods offered:", strings.Join(hv.Methods, ", "))
+
+	if slices.Contains(hv.Methods, "captcha") {
+		token, err := auth.SolveCaptcha(ctx, hv.Token, openBrowser)
+		if err != nil {
+			return nil, err
+		}
+
+		return auth.LoginWithHV(ctx, username, password, "captcha", token, promptTOTP)
+	}
+
+	method := "email"
+	label := "Email address for the verification code: "
+	if !slices.Contains(hv.Methods, "email") {
+		if !slices.Contains(hv.Methods, "sms") {
+			return nil, fmt.Errorf("no supported verification method offered: %s", strings.Join(hv.Methods, ", "))
+		}
+		method = "sms"
+		label = "Phone number for the verification code: "
+	}
+
+	destination, err := prompt(reader, label)
+	if err != nil {
+		return nil, err
+	}
+	if destination == "" {
+		destination = username
+	}
+
+	if err := auth.RequestVerificationCode(ctx, username, method, destination); err != nil {
+		return nil, err
+	}
+
+	code, err := prompt(reader, "Verification code: ")
+	if err != nil {
+		return nil, err
+	}
+
+	return auth.LoginWithHV(ctx, username, password, method, auth.FormatCodeToken(destination, code), promptTOTP)
 }
 
 func runMount(args []string) int {

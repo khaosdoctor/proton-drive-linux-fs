@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 
@@ -43,17 +44,39 @@ func sessionPath() (string, error) {
 	return filepath.Join(dir, "session.json"), nil
 }
 
-func newManager() *proton.Manager {
-	return proton.New(proton.WithHostURL(apiURL), proton.WithAppVersion(appVersion))
+func newManager(opts ...proton.Option) *proton.Manager {
+	return proton.New(append([]proton.Option{
+		proton.WithHostURL(apiURL),
+		proton.WithAppVersion(appVersion),
+	}, opts...)...)
 }
 
 // Login authenticates against Proton and returns a Session ready to be saved.
-// totp is called only if the account requires a second factor.
+// totp is called only if the account requires a second factor. When Proton demands
+// human verification the error is a *HumanVerificationRequired.
 func Login(ctx context.Context, username string, password []byte, totp func() (string, error)) (*Session, error) {
-	m := newManager()
+	return login(ctx, newManager(), username, password, totp)
+}
 
+// LoginWithHV logs in carrying the human verification token obtained after a
+// *HumanVerificationRequired error. method is the verification method the token
+// came from ("captcha", "email" or "sms").
+func LoginWithHV(ctx context.Context, username string, password []byte, method, hvToken string, totp func() (string, error)) (*Session, error) {
+	m := newManager(proton.WithTransport(hvTransport{
+		base:   http.DefaultTransport,
+		method: method,
+		token:  hvToken,
+	}))
+
+	return login(ctx, m, username, password, totp)
+}
+
+func login(ctx context.Context, m *proton.Manager, username string, password []byte, totp func() (string, error)) (*Session, error) {
 	c, a, err := m.NewClientWithLogin(ctx, username, password)
 	if err != nil {
+		if hv := asHumanVerification(err); hv != nil {
+			return nil, hv
+		}
 		return nil, err
 	}
 	defer c.Close()
