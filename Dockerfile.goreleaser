@@ -1,15 +1,7 @@
-FROM golang:1.27-alpine AS builder
-
-WORKDIR /app
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-ARG VERSION=dev
-RUN CGO_ENABLED=0 go build -ldflags "-s -w -X main.version=${VERSION}" -o /proton-drive-fs ./cmd/proton-drive-fs
-
 FROM alpine:3.22
+
 RUN apk add --no-cache fuse3 ca-certificates
-COPY --from=builder /proton-drive-fs /usr/local/bin/proton-drive-fs
+COPY proton-drive-fs /usr/local/bin/
 
 LABEL org.opencontainers.image.source="https://github.com/khaosdoctor/proton-drive-linux-fs"
 LABEL org.opencontainers.image.licenses="MIT"
