@@ -37,7 +37,7 @@ Requirements: Linux, FUSE 3 (the `fuse3` package on most distributions), and acc
 
 ## Usage
 
-proton-drive-fs is one binary with five subcommands: `login`, `mount`, `unmount`, `logout`, `version`.
+proton-drive-fs is one binary with six subcommands: `login`, `mount`, `unmount`, `tray`, `logout`, `version`.
 
 ### Log in
 
@@ -57,7 +57,7 @@ A successful login writes a session file to `$XDG_CONFIG_HOME/proton-drive-fs/se
 proton-drive-fs mount <mountpoint> [-debug] [-ttl 30s] [-poll 10s] [-cache-dir path] [-cache-size 1GiB] [-large-file 300MiB] [-thumbnails] [-thumbnail-dir path] [-deny-readers names] [-foreground]
 ```
 
-If the mountpoint does not exist, mount says so and creates it. By default mount detaches into the background, waits until the filesystem is mounted, and writes the daemon's log to `$XDG_STATE_HOME/proton-drive-fs/mount.log` (falling back to `~/.local/state/proton-drive-fs/mount.log`).
+If the mountpoint does not exist, mount says so and creates it. By default mount detaches into the background and waits until the filesystem is mounted. When `systemd-cat` is on `PATH` the daemon's output goes to the journal under the identifier `proton-drive-fs`, readable with `journalctl --user -t proton-drive-fs`; without it, the output is appended to `$XDG_STATE_HOME/proton-drive-fs/mount.log` (falling back to `~/.local/state/proton-drive-fs/mount.log`).
 
 - `-debug` (default: false): enable FUSE debug logging.
 - `-ttl` (default: 30s): how long a directory listing stays cached before it is fetched again.
@@ -94,11 +94,52 @@ Revokes the session with Proton and removes the session file.
 
 ### Systemd service
 
-Copy `contrib/systemd/proton-drive-fs.service` to `~/.config/systemd/user/`, then enable it:
+There are two user units in `contrib/systemd/`: `proton-drive-fs.service` keeps the mount running, and `proton-drive-fs-tray.service` keeps the tray icon running with the graphical session. Copy the ones you want to `~/.config/systemd/user/`, then enable them:
 
 ```
 systemctl --user enable --now proton-drive-fs
+systemctl --user enable --now proton-drive-fs-tray
 ```
+
+Both units run the binary from `~/.local/bin`; edit `ExecStart` if yours lives elsewhere. The mount unit runs `mount -foreground`, so its output goes to the journal as part of the unit. A mount started outside systemd logs to the journal too when `systemd-cat` is installed: `journalctl --user -t proton-drive-fs`.
+
+## Tray
+
+```
+proton-drive-fs tray [-mountpoint ~/ProtonDrive]
+```
+
+Runs a status icon in the system tray over StatusNotifierItem, which is what Waybar, KDE Plasma and the GNOME AppIndicator extension speak. With no `-mountpoint` the tray reuses the last mountpoint it was given and falls back to `~/ProtonDrive`; the choice is stored in `$XDG_CONFIG_HOME/proton-drive-fs/tray.json` so the menu keeps working after a restart.
+
+The icon is a cloud in one of four states, picked in this order:
+
+- Hollow outline: no saved session, or nothing mounted. The status line in the menu says which of the two it is.
+- Two bars in the corner: polling is paused.
+- A dot in the corner: a download or an upload is in flight.
+- Solid: mounted, logged in, nothing moving.
+
+The menu holds a status line (`Mounted at <path>`, `Not mounted` or `Not logged in`), then `Mount` or `Unmount`, `Pause syncing` or `Resume syncing`, `Open folder`, `Open logs`, and then `Log in` or `Log out` and `Quit`. `Mount` and `Unmount` run this same binary, so a mount started from the menu is the same detached mount you get from a shell and it survives the tray closing. `Quit` only closes the icon; it never unmounts.
+
+`Log in` needs a terminal because it prompts for the password. The tray starts the first terminal it finds on `PATH`, trying `$TERMINAL` first and then `x-terminal-emulator`, `kitty`, `alacritty`, `foot`, `gnome-terminal`, `konsole`, `xterm`. When none of them is installed, the status line shows the command to run yourself for ten seconds. `Open logs` follows the journal in a terminal when the mount logs there, and otherwise opens the log file with `xdg-open`.
+
+Pause stops one thing: the poll of Proton's event feed. Remote changes stop reaching the mount until you resume, while reads and writes keep working throughout. It is a marker file at `$XDG_RUNTIME_DIR/proton-drive-fs/paused` (falling back to `$XDG_STATE_HOME/proton-drive-fs/paused`) that the mount checks on every poll tick, so it also applies to a mount the tray did not start.
+
+For the syncing state the mount writes `$XDG_RUNTIME_DIR/proton-drive-fs/status.json` (same fallback) once a second with the number of transfers in flight. A snapshot older than ten seconds counts as no mount running; whether the filesystem is mounted always comes from `/proc/self/mounts` instead.
+
+### Desktop entry
+
+```
+install -Dm644 contrib/proton-drive-fs.desktop ~/.local/share/applications/proton-drive-fs.desktop
+install -Dm644 contrib/icons/proton-drive-fs.png ~/.local/share/icons/hicolor/64x64/apps/proton-drive-fs.png
+```
+
+To start the tray with the session instead, use the `proton-drive-fs-tray.service` user unit described under [Systemd service](#systemd-service).
+
+### Tray hosts
+
+- Waybar: add the `tray` module to `modules-right` and `"tray": {}` to the config.
+- KDE Plasma: works with no setup.
+- GNOME: needs the AppIndicator and KStatusNotifierItem Support extension; GNOME Shell has no tray of its own.
 
 ## How it works
 

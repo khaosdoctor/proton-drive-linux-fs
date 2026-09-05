@@ -3,6 +3,7 @@ module github.com/khaosdoctor/proton-drive-linux-fs
 go 1.27
 
 require (
+	fyne.io/systray v1.12.2
 	github.com/ProtonMail/gluon v0.17.1-0.20230724134000-308be39be96e
 	github.com/ProtonMail/gopenpgp/v2 v2.10.0
 	github.com/hanwen/go-fuse/v2 v2.11.0

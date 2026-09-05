@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Proton Drive FS
+Comment=Mount Proton Drive as a folder
+Exec=proton-drive-fs tray
+Icon=proton-drive-fs
+Terminal=false
+Categories=Utility;Network;
+StartupNotify=false

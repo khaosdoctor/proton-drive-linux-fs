@@ -15,6 +15,10 @@ builds:
 
 archives:
   - formats: [tar.gz]
+    files:
+      - LICENSE
+      - README.md
+      - contrib/**
 
 checksum:
   name_template: "checksums.txt"

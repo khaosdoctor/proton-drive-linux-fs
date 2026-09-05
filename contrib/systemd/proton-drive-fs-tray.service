@@ -1,0 +1,12 @@
+[Unit]
+Description=Proton Drive FS tray
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/proton-drive-fs tray
+Restart=on-failure
+
+[Install]
+WantedBy=graphical-session.target

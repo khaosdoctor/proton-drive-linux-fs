@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"sync/atomic"
 	"time"
 
 	"github.com/ProtonMail/gopenpgp/v2/crypto"
@@ -34,6 +35,9 @@ type Client struct {
 	// largeFile is the file-size threshold above which blocks bypass the on-disk cache.
 	// <= 0 means no threshold.
 	largeFile int64
+
+	// transfers counts block downloads and uploads in flight; see activity.go.
+	transfers atomic.Int64
 }
 
 // SetBlockCache attaches an on-disk block cache that OpenFile's Files consult before

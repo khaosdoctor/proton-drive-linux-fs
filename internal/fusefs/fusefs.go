@@ -18,6 +18,7 @@ import (
 	proton "github.com/henrybear327/go-proton-api"
 
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/drive"
+	"github.com/khaosdoctor/proton-drive-linux-fs/internal/state"
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/thumbs"
 )
 
@@ -73,7 +74,8 @@ func Mount(ctx context.Context, mountpoint string, c *drive.Client, root *drive.
 		return err
 	}
 
-	go c.Events(ctx, opts.PollInterval, st.handle)
+	go c.Events(ctx, opts.PollInterval, st.handle, state.Paused)
+	go publishStatus(ctx, mountpoint, c)
 
 	if st.thumbs != nil {
 		go st.runThumbWorker(ctx)
@@ -117,6 +119,34 @@ func Mount(ctx context.Context, mountpoint string, c *drive.Client, root *drive.
 	}
 
 	return nil
+}
+
+// publishStatus writes a status snapshot for the tray once a second, and only when something
+// changed, so a mount nobody watches costs one comparison per second. The snapshot is removed
+// on shutdown; a reader that finds a stale one treats the mount as gone.
+func publishStatus(ctx context.Context, mountpoint string, c *drive.Client) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	defer state.RemoveStatus()
+
+	var last state.Status
+
+	for {
+		current := state.Status{Mountpoint: mountpoint, Transfers: c.Transfers(), Paused: state.Paused()}
+		if current != last {
+			last = current
+			current.Updated = time.Now().Unix()
+			if err := state.WriteStatus(current); err != nil {
+				log.Printf("fusefs: writing status: %v", err)
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // fusermountBinary returns the fusermount helper to use for a lazy unmount: fusermount3 when

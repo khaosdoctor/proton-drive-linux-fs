@@ -102,6 +102,9 @@ func (c *Client) Trash(ctx context.Context, parent *Node, n *Node) error {
 func (c *Client) Upload(ctx context.Context, parent *Node, name string, existing *Node, r io.Reader, size int64, modTime time.Time) error {
 	newFile := existing == nil
 
+	c.beginTransfer()
+	defer c.endTransfer()
+
 	linkID, revisionID, nodeKR, sessionKey, err := c.startRevision(ctx, parent, name, existing)
 	if err != nil {
 		return err

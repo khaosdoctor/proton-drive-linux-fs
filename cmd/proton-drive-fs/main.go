@@ -28,7 +28,7 @@ import (
 var version = "dev"
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: proton-drive-fs <login|mount|unmount|logout|version> [args]")
+	fmt.Fprintln(os.Stderr, "usage: proton-drive-fs <login|mount|unmount|tray|logout|version> [args]")
 }
 
 func main() {
@@ -48,6 +48,8 @@ func run(args []string) int {
 		return runMount(args[1:])
 	case "unmount":
 		return runUnmount(args[1:])
+	case "tray":
+		return runTray(args[1:])
 	case "logout":
 		return runLogout()
 	case "version":
@@ -414,19 +416,6 @@ func mountDetached(args []string, mountpoint string) int {
 		return 1
 	}
 
-	logPath, err := mountLogPath()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "error: preparing log file:", err)
-		return 1
-	}
-
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "error: opening log file:", err)
-		return 1
-	}
-	defer func() { _ = logFile.Close() }()
-
 	devNull, err := os.Open(os.DevNull)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error: opening /dev/null:", err)
@@ -434,12 +423,38 @@ func mountDetached(args []string, mountpoint string) int {
 	}
 	defer func() { _ = devNull.Close() }()
 
+	name := exe
 	childArgs := detachedArgs(args)
+	output := devNull
+	logPath := ""
 
-	cmd := exec.Command(exe, childArgs...)
+	// systemd-cat puts the daemon's output in the journal, where it is rotated and can be
+	// followed per unit. Without it, keep appending to the log file.
+	catPath, catErr := exec.LookPath("systemd-cat")
+	if catErr == nil {
+		name = catPath
+		childArgs = append([]string{"-t", journalTag, "--level-prefix=false", exe}, childArgs...)
+	}
+	if catErr != nil {
+		logPath, err = mountLogPath()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error: preparing log file:", err)
+			return 1
+		}
+
+		logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error: opening log file:", err)
+			return 1
+		}
+		defer func() { _ = logFile.Close() }()
+		output = logFile
+	}
+
+	cmd := exec.Command(name, childArgs...)
 	cmd.Stdin = devNull
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
+	cmd.Stdout = output
+	cmd.Stderr = output
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
 	if err := cmd.Start(); err != nil {
@@ -459,26 +474,43 @@ func mountDetached(args []string, mountpoint string) int {
 	for {
 		mounts, err := os.ReadFile("/proc/self/mounts")
 		if err == nil && mountedAt(string(mounts), absMountpoint) {
+			if logPath == "" {
+				fmt.Printf("mounted %s (pid %d, logs: journalctl --user -t %s); unmount with: proton-drive-fs unmount %s\n", mountpoint, cmd.Process.Pid, journalTag, mountpoint)
+				return 0
+			}
 			fmt.Printf("mounted %s (pid %d, log %s); unmount with: proton-drive-fs unmount %s\n", mountpoint, cmd.Process.Pid, logPath, mountpoint)
 			return 0
 		}
 
 		select {
 		case <-exited:
-			fmt.Fprintf(os.Stderr, "error: mount process exited; see %s\n", logPath)
-			printLastLines(logPath, 20)
+			reportMountFailure("mount process exited", logPath)
 			return 1
 		default:
 		}
 
 		if time.Now().After(deadline) {
-			fmt.Fprintf(os.Stderr, "error: timed out waiting for mount; see %s\n", logPath)
-			printLastLines(logPath, 20)
+			reportMountFailure("timed out waiting for mount", logPath)
 			return 1
 		}
 
 		time.Sleep(200 * time.Millisecond)
 	}
+}
+
+// journalTag is the syslog identifier the detached mount logs under.
+const journalTag = "proton-drive-fs"
+
+// reportMountFailure points at wherever the failed child's output went: the journal, or the
+// log file with its last lines inlined.
+func reportMountFailure(what string, logPath string) {
+	if logPath == "" {
+		fmt.Fprintf(os.Stderr, "error: %s; see: journalctl --user -t %s -n 50\n", what, journalTag)
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "error: %s; see %s\n", what, logPath)
+	printLastLines(logPath, 20)
 }
 
 // mountLogPath returns the daemon log path under $XDG_STATE_HOME/proton-drive-fs, falling back

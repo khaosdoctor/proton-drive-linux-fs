@@ -19,7 +19,9 @@ type Event struct {
 
 // Events polls volume events every interval and calls fn for each one until ctx is done.
 // It returns after ctx is cancelled. Errors are logged with log.Printf and polling continues.
-func (c *Client) Events(ctx context.Context, interval time.Duration, fn func(Event)) {
+// When paused is non-nil and returns true, the tick is skipped without calling the API; the
+// next unpaused tick picks up from the last event seen, so nothing is lost.
+func (c *Client) Events(ctx context.Context, interval time.Duration, fn func(Event), paused func() bool) {
 	last, err := c.api.GetLatestVolumeEventID(ctx, c.volumeID)
 	if err != nil {
 		log.Printf("drive: getting latest volume event id: %v", err)
@@ -33,6 +35,10 @@ func (c *Client) Events(ctx context.Context, interval time.Duration, fn func(Eve
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		}
+
+		if paused != nil && paused() {
+			continue
 		}
 
 		if last == "" {

@@ -130,7 +130,9 @@ func (f *File) getBlock(ctx context.Context, idx int) ([]byte, error) {
 		return nil, errors.New("block not found")
 	}
 
+	f.client.beginTransfer()
 	ciphertext, err := f.client.getBlockBytes(ctx, blk.BareURL, blk.Token)
+	f.client.endTransfer()
 	if err != nil {
 		return nil, err
 	}
