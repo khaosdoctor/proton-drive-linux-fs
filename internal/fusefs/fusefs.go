@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"sync"
 	"syscall"
 	"time"
@@ -60,13 +61,53 @@ func Mount(ctx context.Context, mountpoint string, c *drive.Client, root *drive.
 
 	go c.Events(ctx, opts.PollInterval, st.handle)
 
+	// A plain Unmount() fails while the mountpoint is busy (e.g. a shell still cd'd into it),
+	// and server.Wait() would then block forever waiting for a detach that never happens; fall
+	// back to a lazy unmount so Ctrl-C always returns, and let the kernel finish detaching once
+	// the last reference drops.
+	unmountDone := make(chan struct{})
 	go func() {
+		defer close(unmountDone)
+
 		<-ctx.Done()
-		_ = server.Unmount()
+
+		if err := server.Unmount(); err != nil {
+			log.Printf("fusefs: unmount %s: %v; retrying lazily", mountpoint, err)
+
+			bin := fusermountBinary()
+			out, lazyErr := exec.Command(bin, "-u", "-z", mountpoint).CombinedOutput()
+			if lazyErr != nil {
+				log.Printf("fusefs: lazy unmount %s: %v: %s", mountpoint, lazyErr, out)
+				log.Printf("fusefs: could not unmount %s; run: fusermount3 -uz %s", mountpoint, mountpoint)
+			}
+		}
 	}()
 
-	server.Wait()
+	done := make(chan struct{})
+	go func() {
+		server.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-unmountDone:
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+		}
+	}
+
 	return nil
+}
+
+// fusermountBinary returns the fusermount helper to use for a lazy unmount: fusermount3 when
+// it's on PATH (what libfuse3, and go-fuse, expect), else the older fusermount name.
+func fusermountBinary() string {
+	if _, err := exec.LookPath("fusermount3"); err == nil {
+		return "fusermount3"
+	}
+	return "fusermount"
 }
 
 // mountState tracks every registered directory node and each node's last-known parent, so a
@@ -266,6 +307,7 @@ func (d *dirNode) load(ctx context.Context) ([]*drive.Node, syscall.Errno) {
 
 	children, err := d.client.Children(ctx, d.node)
 	if err != nil {
+		log.Printf("fusefs: readdir %q: %v", d.node.Name, err)
 		return nil, syscall.EIO
 	}
 
@@ -761,7 +803,7 @@ func (h *fileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.Rea
 	if tmp != nil {
 		n, err := tmp.ReadAt(dest, off)
 		if err != nil && err != io.EOF {
-			log.Printf("fusefs: reading temp buffer for %q: %v", h.node.currentName(), err)
+			log.Printf("fusefs: read %q at offset %d, len %d: %v", h.node.currentName(), off, len(dest), err)
 			return nil, syscall.EIO
 		}
 		return fuse.ReadResultData(dest[:n]), 0
@@ -769,6 +811,7 @@ func (h *fileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.Rea
 
 	n, err := h.file.ReadAt(ctx, dest, off)
 	if err != nil && err != io.EOF {
+		log.Printf("fusefs: read %q at offset %d, len %d: %v", h.node.currentName(), off, len(dest), err)
 		return nil, syscall.EIO
 	}
 
