@@ -575,18 +575,23 @@ func printLastLines(path string, n int) {
 }
 
 func runUnmount(args []string) int {
-	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs unmount <mountpoint>")
+	fs := flag.NewFlagSet("unmount", flag.ContinueOnError)
+	force := fs.Bool("force", false, "lazily unmount and abort the kernel FUSE connection; for a mount wedged by a dead or deadlocked daemon")
+	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	mountpoint := args[0]
 
-	bin := "fusermount3"
-	if _, err := exec.LookPath(bin); err != nil {
-		bin = "fusermount"
+	if fs.NArg() < 1 {
+		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs unmount [-force] <mountpoint>")
+		return 2
+	}
+	mountpoint := fs.Arg(0)
+
+	if *force {
+		return runUnmountForce(mountpoint)
 	}
 
-	cmd := exec.Command(bin, "-u", mountpoint)
+	cmd := exec.Command(fusermountBinary(), "-u", mountpoint)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -595,6 +600,105 @@ func runUnmount(args []string) int {
 	}
 
 	return 0
+}
+
+// fusermountBinary returns the fusermount helper to use: fusermount3 when it's on PATH (what
+// libfuse3, and go-fuse, expect), else the older fusermount name.
+func fusermountBinary() string {
+	if _, err := exec.LookPath("fusermount3"); err == nil {
+		return "fusermount3"
+	}
+	return "fusermount"
+}
+
+// runUnmountForce recovers a wedged mount: it lazily unmounts so blocked callers stop waiting on
+// the mountpoint, then aborts the kernel-side FUSE connection so requests already stuck in the
+// kernel (e.g. a file manager's threads) get errors instead of hanging forever. Either step
+// succeeding counts as recovery, since the daemon may already be dead and one side moot.
+func runUnmountForce(mountpoint string) int {
+	absMountpoint, err := filepath.Abs(mountpoint)
+	if err != nil {
+		absMountpoint = mountpoint
+	}
+
+	mountinfo, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: reading /proc/self/mountinfo:", err)
+	}
+	minor, found := fuseConnectionID(string(mountinfo), absMountpoint)
+
+	out, lazyErr := exec.Command(fusermountBinary(), "-u", "-z", mountpoint).CombinedOutput()
+	if lazyErr != nil {
+		fmt.Fprintf(os.Stderr, "error: lazy unmount %s: %v: %s\n", mountpoint, lazyErr, out)
+	}
+
+	aborted := false
+	if found {
+		aborted = abortFuseConnection(minor)
+	}
+
+	if lazyErr == nil || aborted {
+		return 0
+	}
+
+	fmt.Fprintln(os.Stderr, "error: could not unmount or abort", mountpoint)
+	return 1
+}
+
+// fuseConnectionID scans mountinfo (the contents of /proc/self/mountinfo) for the line whose
+// mount point field (field 5, octal-escaped like /proc/self/mounts) is mountpoint and whose
+// fstype starts with "fuse". It returns the minor number from that line's major:minor (field 3):
+// the kernel names each FUSE connection's /sys/fs/fuse/connections/<id> directory by minor number.
+func fuseConnectionID(mountinfo string, mountpoint string) (int, bool) {
+	escaped := escapeMountField(mountpoint)
+	for _, line := range strings.Split(mountinfo, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 5 || fields[4] != escaped {
+			continue
+		}
+
+		sep := slices.Index(fields, "-")
+		if sep < 0 || sep+1 >= len(fields) || !strings.HasPrefix(fields[sep+1], "fuse") {
+			continue
+		}
+
+		majorMinor := strings.SplitN(fields[2], ":", 2)
+		if len(majorMinor) != 2 {
+			continue
+		}
+		minor, err := strconv.Atoi(majorMinor[1])
+		if err != nil {
+			continue
+		}
+
+		return minor, true
+	}
+
+	return 0, false
+}
+
+// abortFuseConnection writes to /sys/fs/fuse/connections/<minor>/abort, which tells the kernel to
+// fail every pending and future request on that FUSE connection instead of blocking forever. It
+// reports whether the abort file exists and was written successfully.
+func abortFuseConnection(minor int) bool {
+	dir := fmt.Sprintf("/sys/fs/fuse/connections/%d", minor)
+	abortPath := filepath.Join(dir, "abort")
+	if _, err := os.Stat(abortPath); err != nil {
+		return false
+	}
+
+	waiting := "?"
+	if data, err := os.ReadFile(filepath.Join(dir, "waiting")); err == nil {
+		waiting = strings.TrimSpace(string(data))
+	}
+	fmt.Printf("aborting FUSE connection %d (%s requests waiting)\n", minor, waiting)
+
+	if err := os.WriteFile(abortPath, []byte("1"), 0o200); err != nil {
+		fmt.Fprintln(os.Stderr, "error: aborting FUSE connection:", err)
+		return false
+	}
+
+	return true
 }
 
 func runLogout() int {

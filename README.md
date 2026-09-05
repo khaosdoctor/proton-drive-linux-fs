@@ -91,10 +91,10 @@ Some desktops also run thumbnailers and search indexers that open every file the
 ### Unmount
 
 ```
-proton-drive-fs unmount <mountpoint>
+proton-drive-fs unmount [-force] <mountpoint>
 ```
 
-Runs `fusermount3 -u` (or `fusermount -u` if `fusermount3` is not on `PATH`).
+Runs `fusermount3 -u` (or `fusermount -u` if `fusermount3` is not on `PATH`). When the daemon has died or deadlocked and programs are stuck on the mount, `-force` lazily unmounts and aborts the kernel-side FUSE connection so blocked programs get errors instead of hanging; it needs no root for mounts you own.
 
 ### Log out
 

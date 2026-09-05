@@ -110,7 +110,7 @@ func Mount(ctx context.Context, mountpoint string, c *drive.Client, root *drive.
 			out, lazyErr := exec.Command(bin, "-u", "-z", mountpoint).CombinedOutput()
 			if lazyErr != nil {
 				log.Printf("fusefs: lazy unmount %s: %v: %s", mountpoint, lazyErr, out)
-				log.Printf("fusefs: could not unmount %s; run: fusermount3 -uz %s", mountpoint, mountpoint)
+				log.Printf("fusefs: could not unmount %s; run: proton-drive-fs unmount -force %s", mountpoint, mountpoint)
 			}
 		}
 	}()

@@ -152,3 +152,42 @@ func TestMountedAt(t *testing.T) {
 		})
 	}
 }
+
+func TestFuseConnectionID(t *testing.T) {
+	mountinfo := `1234 56 0:104 / /home/u/Proton\040Drive rw,nosuid,nodev,relatime shared:1 - fuse.proton-drive-fs proton-drive-fs rw,user_id=1000,group_id=1000
+36 35 8:1 / / rw,relatime shared:1 - ext4 /dev/sda1 rw
+`
+
+	tests := []struct {
+		name       string
+		mountpoint string
+		wantID     int
+		wantFound  bool
+	}{
+		{
+			name:       "matches fuse line and escapes the space",
+			mountpoint: "/home/u/Proton Drive",
+			wantID:     104,
+			wantFound:  true,
+		},
+		{
+			name:       "ignores non-fuse lines",
+			mountpoint: "/",
+			wantFound:  false,
+		},
+		{
+			name:       "no matching mountpoint",
+			mountpoint: "/nope",
+			wantFound:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotID, gotFound := fuseConnectionID(mountinfo, tt.mountpoint)
+			if gotFound != tt.wantFound || (gotFound && gotID != tt.wantID) {
+				t.Errorf("fuseConnectionID(_, %q) = (%d, %v), want (%d, %v)", tt.mountpoint, gotID, gotFound, tt.wantID, tt.wantFound)
+			}
+		})
+	}
+}
