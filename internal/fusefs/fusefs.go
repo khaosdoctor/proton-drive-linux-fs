@@ -352,7 +352,7 @@ func (d *dirNode) Create(ctx context.Context, name string, flags uint32, mode ui
 	}
 
 	fn := &fileNode{client: d.client, parent: d, name: name}
-	handle := &fileHandle{node: fn, tmp: tmp, dirty: true}
+	handle := &fileHandle{node: fn, tmp: tmp, dirty: true, owns: true}
 	fn.handle = handle
 
 	// ponytail: inode number derived from parent+name until the real LinkID exists after upload
@@ -541,12 +541,19 @@ func (f *fileNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.Attr
 	out.Mode = f.Mode() | 0o644
 	out.Ino = f.StableAttr().Ino
 
-	if node == nil {
-		if handle != nil {
-			if size, ok := handle.tmpSize(); ok {
-				out.Size = uint64(size)
+	// A dirty write handle's temp buffer is the current size, even for an existing file whose
+	// node still points at the last-uploaded revision.
+	if handle != nil {
+		if size, ok := handle.tmpSize(); ok {
+			out.Size = uint64(size)
+			if node != nil {
+				out.Mtime = uint64(node.ModTime.Unix())
 			}
+			return 0
 		}
+	}
+
+	if node == nil {
 		return 0
 	}
 
@@ -562,9 +569,14 @@ func (f *fileNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAt
 		return f.Getattr(ctx, fh, out)
 	}
 
-	f.mu.Lock()
-	handle := f.handle
-	f.mu.Unlock()
+	// Prefer the handle the kernel passed in fh; fall back to this node's write handle for a
+	// bare truncate(2) or an fh that isn't the write handle (e.g. a read-only fh).
+	handle, ok := fh.(*fileHandle)
+	if !ok || !handle.hasTmp() {
+		f.mu.Lock()
+		handle = f.handle
+		f.mu.Unlock()
+	}
 
 	// ponytail: truncate needs a write handle already open on the file; a bare truncate(2) with
 	// no prior open isn't supported.
@@ -592,6 +604,19 @@ func (f *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 	}
 
 	if flags&syscall.O_ACCMODE == syscall.O_RDONLY {
+		// A dirty write handle's buffered bytes are the current content; read from the same
+		// temp file (not closed or removed here) instead of serving the stale committed
+		// revision. Direct I/O keeps the kernel from caching pre-write bytes alongside them.
+		f.mu.Lock()
+		writer := f.handle
+		f.mu.Unlock()
+
+		if writer != nil {
+			if tmp := writer.sharedTmp(); tmp != nil {
+				return &fileHandle{node: f, tmp: tmp}, fuse.FOPEN_DIRECT_IO, 0
+			}
+		}
+
 		file, err := f.client.OpenFile(ctx, node)
 		if err != nil {
 			log.Printf("fusefs: opening %q: %v", f.currentName(), err)
@@ -599,6 +624,14 @@ func (f *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 		}
 		return &fileHandle{node: f, file: file}, fuse.FOPEN_KEEP_CACHE, 0
 	}
+
+	// ponytail: single writer per file; per-handle set if a real workload needs concurrent writers
+	f.mu.Lock()
+	if f.handle != nil {
+		f.mu.Unlock()
+		return nil, 0, syscall.EBUSY
+	}
+	f.mu.Unlock()
 
 	tmp, err := os.CreateTemp("", "proton-drive-fs-*")
 	if err != nil {
@@ -615,9 +648,15 @@ func (f *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 		}
 	}
 
-	handle := &fileHandle{node: f, tmp: tmp}
+	handle := &fileHandle{node: f, tmp: tmp, owns: true}
 
 	f.mu.Lock()
+	if f.handle != nil {
+		f.mu.Unlock()
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+		return nil, 0, syscall.EBUSY
+	}
 	f.handle = handle
 	f.mu.Unlock()
 
@@ -660,14 +699,29 @@ type fileHandle struct {
 	file *drive.File // set for a read-only handle
 
 	mu    sync.Mutex
-	tmp   *os.File // set for a write-capable handle
+	tmp   *os.File // set for a write-capable handle, or a read-only view of the write handle's tmp
 	dirty bool
+	owns  bool // true only for the write handle that owns tmp: it alone closes, removes and uploads it
 }
 
 var _ = (fs.FileReader)((*fileHandle)(nil))
 var _ = (fs.FileWriter)((*fileHandle)(nil))
 var _ = (fs.FileFlusher)((*fileHandle)(nil))
 var _ = (fs.FileReleaser)((*fileHandle)(nil))
+
+func (h *fileHandle) hasTmp() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.tmp != nil
+}
+
+// sharedTmp returns the write handle's temp file for a borrowing read-only handle to read from,
+// or nil if this handle has no temp buffer.
+func (h *fileHandle) sharedTmp() *os.File {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.tmp
+}
 
 func (h *fileHandle) tmpSize() (int64, bool) {
 	h.mu.Lock()
@@ -755,10 +809,13 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 	h.mu.Lock()
 	tmp := h.tmp
 	dirty := h.dirty
+	owns := h.owns
 	h.tmp = nil
 	h.mu.Unlock()
 
-	if tmp == nil {
+	// A borrowing read-only handle (owns == false) neither owns nor uploads the write handle's
+	// temp file; only that write handle's own Release closes and removes it.
+	if tmp == nil || !owns {
 		return 0
 	}
 	defer func() {
@@ -799,14 +856,21 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 		return syscall.EIO
 	}
 
-	children, errno := parent.refresh(ctx)
+	// Re-read parent/name: a concurrent Rename during the upload may have moved this file, and
+	// the post-upload refresh/lookup must target where it is now, not where it was.
+	fn.mu.Lock()
+	refreshName := fn.name
+	refreshParent := fn.parent
+	fn.mu.Unlock()
+
+	children, errno := refreshParent.refresh(ctx)
 	if errno != 0 {
-		log.Printf("fusefs: reloading %q after upload", name)
+		log.Printf("fusefs: reloading %q after upload", refreshName)
 		return errno
 	}
 
 	for _, child := range children {
-		if child.Name == name {
+		if child.Name == refreshName {
 			fn.setNode(child)
 			break
 		}
