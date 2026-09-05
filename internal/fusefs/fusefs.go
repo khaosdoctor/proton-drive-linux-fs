@@ -36,7 +36,10 @@ func Mount(ctx context.Context, mountpoint string, c *drive.Client, root *drive.
 		opts.PollInterval = 10 * time.Second
 	}
 
-	st := newMountState(c)
+	// FUSE's kernel-side permission check compares these against the caller; 0:0 made every write ACCESS fail.
+	uid := uint32(os.Getuid())
+	gid := uint32(os.Getgid())
+	st := newMountState(c, uid, gid)
 
 	rootNode := &dirNode{client: c, node: root, ttl: opts.TTL, st: st}
 	st.register(rootNode)
@@ -114,14 +117,16 @@ func fusermountBinary() string {
 // remote event naming a LinkID can find which cached listings to drop.
 type mountState struct {
 	client *drive.Client
+	uid    uint32
+	gid    uint32
 
 	mu       sync.Mutex
 	dirs     map[string]*dirNode // folder LinkID -> its inode
 	parentOf map[string]string   // child LinkID -> parent LinkID
 }
 
-func newMountState(c *drive.Client) *mountState {
-	return &mountState{client: c, dirs: make(map[string]*dirNode), parentOf: make(map[string]string)}
+func newMountState(c *drive.Client, uid, gid uint32) *mountState {
+	return &mountState{client: c, uid: uid, gid: gid, dirs: make(map[string]*dirNode), parentOf: make(map[string]string)}
 }
 
 func (st *mountState) register(d *dirNode) {
@@ -282,6 +287,7 @@ func (d *dirNode) invalidate() {
 }
 
 var _ = (fs.NodeGetattrer)((*dirNode)(nil))
+var _ = (fs.NodeStatfser)((*dirNode)(nil))
 var _ = (fs.NodeLookuper)((*dirNode)(nil))
 var _ = (fs.NodeReaddirer)((*dirNode)(nil))
 var _ = (fs.NodeMkdirer)((*dirNode)(nil))
@@ -293,6 +299,21 @@ var _ = (fs.NodeCreater)((*dirNode)(nil))
 func (d *dirNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = d.Mode() | 0o755
 	out.Ino = d.StableAttr().Ino
+	out.Uid = d.st.uid
+	out.Gid = d.st.gid
+	return 0
+}
+
+func (d *dirNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
+	// ponytail: Proton exposes no quota through this API path; report a large fake filesystem so tools do not treat it as full
+	out.Bsize = 4096
+	out.Frsize = 4096
+	out.NameLen = 255
+	out.Blocks = 1 << 40
+	out.Bfree = 1 << 39
+	out.Bavail = 1 << 39
+	out.Files = 1 << 30
+	out.Ffree = 1 << 29
 	return 0
 }
 
@@ -342,7 +363,7 @@ func (d *dirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (
 
 		if existing := d.GetChild(name); existing != nil {
 			refreshNode(existing, child)
-			fillEntryOut(out, child)
+			d.fillEntryOut(out, child)
 			return existing, 0
 		}
 
@@ -403,6 +424,8 @@ func (d *dirNode) Create(ctx context.Context, name string, flags uint32, mode ui
 
 	out.Ino = attr.Ino
 	out.Mode = fuse.S_IFREG | 0o644
+	out.Uid = d.st.uid
+	out.Gid = d.st.gid
 
 	return inode, handle, 0, 0
 }
@@ -501,7 +524,7 @@ func (d *dirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 }
 
 func (d *dirNode) makeChild(ctx context.Context, child *drive.Node, out *fuse.EntryOut) *fs.Inode {
-	fillEntryOut(out, child)
+	d.fillEntryOut(out, child)
 	attr := fs.StableAttr{Ino: out.Ino}
 
 	if child.IsDir() {
@@ -517,8 +540,10 @@ func (d *dirNode) makeChild(ctx context.Context, child *drive.Node, out *fuse.En
 }
 
 // fillEntryOut populates a Lookup/makeChild EntryOut from child's current attributes.
-func fillEntryOut(out *fuse.EntryOut, child *drive.Node) {
+func (d *dirNode) fillEntryOut(out *fuse.EntryOut, child *drive.Node) {
 	out.Ino = inodeNum(child.Link.LinkID)
+	out.Uid = d.st.uid
+	out.Gid = d.st.gid
 
 	if child.IsDir() {
 		out.Mode = fuse.S_IFDIR | 0o755
@@ -578,10 +603,15 @@ func (f *fileNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.Attr
 	f.mu.Lock()
 	node := f.node
 	handle := f.handle
+	parent := f.parent
 	f.mu.Unlock()
 
 	out.Mode = f.Mode() | 0o644
 	out.Ino = f.StableAttr().Ino
+	if parent != nil {
+		out.Uid = parent.st.uid
+		out.Gid = parent.st.gid
+	}
 
 	// A dirty write handle's temp buffer is the current size, even for an existing file whose
 	// node still points at the last-uploaded revision.
