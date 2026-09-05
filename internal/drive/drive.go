@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"time"
 
 	"github.com/ProtonMail/gopenpgp/v2/crypto"
@@ -171,8 +172,9 @@ func (c *Client) resolveFileAttrs(link proton.Link, kr *crypto.KeyRing) (int64, 
 		return size, modTime
 	}
 
-	common, err := decryptXAttr(c.addrKR, kr, link.FileProperties.ActiveRevision.XAttr)
+	common, err := decryptXAttr(kr, link.FileProperties.ActiveRevision.XAttr)
 	if err != nil {
+		log.Printf("drive: xattr for link %s: %v; using encrypted size %d", link.LinkID, err, link.Size)
 		return size, modTime
 	}
 
@@ -189,7 +191,7 @@ func (c *Client) resolveFileAttrs(link proton.Link, kr *crypto.KeyRing) (int64, 
 
 // decryptXAttr decrypts a Link's armored XAttr blob (encrypted to the node key, signed by the
 // address key) and parses its JSON payload.
-func decryptXAttr(addrKR, nodeKR *crypto.KeyRing, armored string) (proton.RevisionXAttrCommon, error) {
+func decryptXAttr(nodeKR *crypto.KeyRing, armored string) (proton.RevisionXAttrCommon, error) {
 	if armored == "" {
 		return proton.RevisionXAttrCommon{}, nil
 	}
@@ -199,7 +201,8 @@ func decryptXAttr(addrKR, nodeKR *crypto.KeyRing, armored string) (proton.Revisi
 		return proton.RevisionXAttrCommon{}, err
 	}
 
-	dec, err := nodeKR.Decrypt(msg, addrKR, crypto.GetUnixTime())
+	// ponytail: XAttr is metadata (size, mtime); skip signature verification so a foreign signer does not hide the real size
+	dec, err := nodeKR.Decrypt(msg, nil, 0)
 	if err != nil {
 		return proton.RevisionXAttrCommon{}, err
 	}
