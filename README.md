@@ -54,16 +54,17 @@ A successful login writes a session file to `$XDG_CONFIG_HOME/proton-drive-fs/se
 ### Mount
 
 ```
-proton-drive-fs mount <mountpoint> [-debug] [-ttl 30s] [-poll 10s] [-cache-dir path] [-cache-size 1GiB]
+proton-drive-fs mount <mountpoint> [-debug] [-ttl 30s] [-poll 10s] [-cache-dir path] [-cache-size 1GiB] [-foreground]
 ```
 
-If the mountpoint does not exist, mount says so and creates it.
+If the mountpoint does not exist, mount says so and creates it. By default mount detaches into the background, waits until the filesystem is mounted, and writes the daemon's log to `$XDG_STATE_HOME/proton-drive-fs/mount.log` (falling back to `~/.local/state/proton-drive-fs/mount.log`).
 
 - `-debug` (default: false): enable FUSE debug logging.
 - `-ttl` (default: 30s): how long a directory listing stays cached before it is fetched again.
 - `-poll` (default: 10s): how often the event feed is polled for remote changes.
 - `-cache-dir` (default: `$XDG_CACHE_HOME/proton-drive-fs/blocks`, falls back to `~/.cache/proton-drive-fs/blocks`): where downloaded, decrypted file blocks are stored on disk so they survive a remount.
 - `-cache-size` (default: 1GiB): the total size the on-disk block cache is allowed to use; accepts suffixes like `512MiB` or `2GiB`. A value of 0 or less disables the on-disk cache.
+- `-foreground` (default: false): stay attached to the terminal and log to stderr; used by the systemd unit.
 
 ### Unmount
 

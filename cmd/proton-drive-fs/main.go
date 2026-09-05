@@ -252,12 +252,13 @@ func runMount(args []string) int {
 	poll := fs.Duration("poll", 10*time.Second, "remote change polling interval")
 	cacheDir := fs.String("cache-dir", defaultCacheDir(), "on-disk block cache directory")
 	cacheSize := fs.String("cache-size", "1GiB", "on-disk block cache size limit (e.g. 512MiB, 2GiB); <=0 disables it")
+	foreground := fs.Bool("foreground", false, "stay attached to the terminal and log to stderr; used by the systemd unit")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
 	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs mount <mountpoint> [-debug] [-ttl 30s] [-poll 10s] [-cache-dir path] [-cache-size 1GiB]")
+		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs mount <mountpoint> [-debug] [-ttl 30s] [-poll 10s] [-cache-dir path] [-cache-size 1GiB] [-foreground]")
 		return 2
 	}
 	mountpoint := fs.Arg(0)
@@ -277,6 +278,10 @@ func runMount(args []string) int {
 	if err == nil && !stat.IsDir() {
 		fmt.Fprintf(os.Stderr, "error: mountpoint %s is not a directory\n", mountpoint)
 		return 1
+	}
+
+	if !*foreground {
+		return mountDetached(args, mountpoint)
 	}
 
 	cacheLimit, err := parseCacheSize(*cacheSize)
@@ -322,6 +327,145 @@ func runMount(args []string) int {
 	}
 
 	return 0
+}
+
+// mountDetached re-execs the current binary in the background with -foreground appended, waits
+// for the mount to appear in /proc/self/mounts, and reports the result without blocking the
+// caller's terminal.
+func mountDetached(args []string, mountpoint string) int {
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: locating own executable:", err)
+		return 1
+	}
+
+	logPath, err := mountLogPath()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: preparing log file:", err)
+		return 1
+	}
+
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: opening log file:", err)
+		return 1
+	}
+	defer logFile.Close()
+
+	devNull, err := os.Open(os.DevNull)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: opening /dev/null:", err)
+		return 1
+	}
+	defer devNull.Close()
+
+	childArgs := make([]string, 0, len(args)+2)
+	childArgs = append(childArgs, "mount")
+	childArgs = append(childArgs, args...)
+	childArgs = append(childArgs, "-foreground")
+
+	cmd := exec.Command(exe, childArgs...)
+	cmd.Stdin = devNull
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintln(os.Stderr, "error: starting mount process:", err)
+		return 1
+	}
+
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+
+	absMountpoint, err := filepath.Abs(mountpoint)
+	if err != nil {
+		absMountpoint = mountpoint
+	}
+
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		mounts, err := os.ReadFile("/proc/self/mounts")
+		if err == nil && mountedAt(string(mounts), absMountpoint) {
+			fmt.Printf("mounted %s (pid %d, log %s); unmount with: proton-drive-fs unmount %s\n", mountpoint, cmd.Process.Pid, logPath, mountpoint)
+			return 0
+		}
+
+		select {
+		case <-exited:
+			fmt.Fprintf(os.Stderr, "error: mount process exited; see %s\n", logPath)
+			printLastLines(logPath, 20)
+			return 1
+		default:
+		}
+
+		if time.Now().After(deadline) {
+			fmt.Fprintf(os.Stderr, "error: timed out waiting for mount; see %s\n", logPath)
+			printLastLines(logPath, 20)
+			return 1
+		}
+
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// mountLogPath returns the daemon log path under $XDG_STATE_HOME/proton-drive-fs, falling back
+// to ~/.local/state/proton-drive-fs, creating the directory (0700) if needed.
+func mountLogPath() (string, error) {
+	stateDir := os.Getenv("XDG_STATE_HOME")
+	if stateDir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		stateDir = filepath.Join(home, ".local", "state")
+	}
+
+	dir := filepath.Join(stateDir, "proton-drive-fs")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+
+	return filepath.Join(dir, "mount.log"), nil
+}
+
+// mountedAt reports whether procMounts (the contents of /proc/self/mounts) has an entry whose
+// mountpoint field is mountpoint and whose fstype is fuse.proton-drive-fs. The kernel escapes
+// space, tab, newline and backslash in the mountpoint field as octal (e.g. " " -> "\040"), so
+// mountpoint is escaped the same way before comparing.
+func mountedAt(procMounts string, mountpoint string) bool {
+	escaped := escapeMountField(mountpoint)
+	for _, line := range strings.Split(procMounts, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		if fields[1] == escaped && fields[2] == "fuse.proton-drive-fs" {
+			return true
+		}
+	}
+	return false
+}
+
+func escapeMountField(s string) string {
+	replacer := strings.NewReplacer(`\`, `\134`, " ", `\040`, "\t", `\011`, "\n", `\012`)
+	return replacer.Replace(s)
+}
+
+// printLastLines prints up to the last n lines of the file at path to stderr.
+func printLastLines(path string, n int) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	for _, line := range lines {
+		fmt.Fprintln(os.Stderr, line)
+	}
 }
 
 func runUnmount(args []string) int {

@@ -4,7 +4,7 @@ After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/proton-drive-fs mount %h/ProtonDrive
+ExecStart=%h/.local/bin/proton-drive-fs mount -foreground %h/ProtonDrive
 ExecStop=%h/.local/bin/proton-drive-fs unmount %h/ProtonDrive
 Restart=on-failure
 
