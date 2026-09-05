@@ -45,7 +45,7 @@ proton-drive-fs is one binary with five subcommands: `login`, `mount`, `unmount`
 proton-drive-fs login
 ```
 
-Prompts for username, password, and a TOTP code if two-factor is enabled. On first login Proton may require human verification (CAPTCHA, email code, or SMS code); a CAPTCHA runs in a browser tab, the CLI prints the URL and opens it automatically unless you pass `-no-browser` (default: false), in which case open the URL yourself. Force a specific method with `-hv-method captcha|email|sms` (default: none forced, tried in the order email, sms, captcha).
+Prompts for username, password, and a TOTP code if two-factor is enabled. On first login Proton may require human verification (CAPTCHA, email code, or SMS code); for a CAPTCHA the CLI prints the verify.proton.me URL and opens it unless you pass `-no-browser` (default: false), in which case open the URL yourself. Solve the CAPTCHA there, then press Enter in the terminal. Force a specific method with `-hv-method captcha|email|sms` (default: none forced, tried in the order email, sms, captcha).
 
 Repeated failed login attempts can trigger a temporary lock on the account from Proton's side.
 

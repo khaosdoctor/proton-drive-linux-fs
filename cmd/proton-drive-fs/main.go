@@ -160,12 +160,20 @@ func verifyHuman(ctx context.Context, reader *bufio.Reader, hv *auth.HumanVerifi
 	fmt.Println("Verifying with:", method)
 
 	if method == "captcha" {
-		token, err := auth.SolveCaptcha(ctx, hv.Token, openBrowser)
-		if err != nil {
+		url := auth.CaptchaURL(hv.Token)
+
+		fmt.Println("Proton requires a CAPTCHA. Solve it at:")
+		fmt.Println(url)
+
+		if openBrowser {
+			_ = exec.Command("xdg-open", url).Start()
+		}
+
+		if _, err := prompt(reader, "Press Enter once the CAPTCHA is solved: "); err != nil {
 			return nil, err
 		}
 
-		return auth.LoginWithHV(ctx, username, password, "captcha", token, promptTOTP)
+		return auth.LoginWithHV(ctx, username, password, "captcha", hv.Token, promptTOTP)
 	}
 
 	label := "Email address for the verification code: "
