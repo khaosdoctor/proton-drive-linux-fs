@@ -71,8 +71,3 @@ func (c *Client) Events(ctx context.Context, interval time.Duration, fn func(Eve
 		}
 	}
 }
-
-// DecryptName decrypts link's name using parent's keyring and the client's address keyring.
-func (c *Client) DecryptName(link proton.Link, parent *Node) (string, error) {
-	return link.GetName(parent.KR, c.addrKR)
-}

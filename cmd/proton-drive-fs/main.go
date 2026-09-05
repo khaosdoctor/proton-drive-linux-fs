@@ -183,7 +183,7 @@ func runMount(args []string) int {
 		return 1
 	}
 
-	api, addrKR, err := session.Client()
+	api, keys, err := session.Client()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error: restoring session:", err)
 		return 1
@@ -193,7 +193,7 @@ func runMount(args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	client, root, err := drive.Open(ctx, api, addrKR)
+	client, root, err := drive.Open(ctx, api, keys)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error: opening drive:", err)
 		return 1

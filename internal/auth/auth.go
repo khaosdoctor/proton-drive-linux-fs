@@ -168,9 +168,19 @@ func Load() (*Session, error) {
 	return &s, nil
 }
 
-// Client restores an authenticated Proton client from the session and unlocks the
-// combined address keyring. Refreshed tokens are persisted automatically.
-func (s *Session) Client() (*proton.Client, *crypto.KeyRing, error) {
+// Keys holds the unlocked address keyrings a session's Client call produces: the merged
+// keyring (used for decrypt/verify against any of the user's addresses, as before) plus the
+// per-address keyrings and address list the drive layer needs to sign writes as one specific
+// address.
+type Keys struct {
+	Merged      *crypto.KeyRing
+	ByAddressID map[string]*crypto.KeyRing
+	Addresses   []proton.Address
+}
+
+// Client restores an authenticated Proton client from the session and unlocks the address
+// keyrings. Refreshed tokens are persisted automatically.
+func (s *Session) Client() (*proton.Client, *Keys, error) {
 	m := newManager()
 	c := m.NewClient(s.UID, s.AccessToken, s.RefreshToken)
 
@@ -200,7 +210,7 @@ func (s *Session) Client() (*proton.Client, *crypto.KeyRing, error) {
 		return nil, nil, err
 	}
 
-	addrKR, err := crypto.NewKeyRing(nil)
+	merged, err := crypto.NewKeyRing(nil)
 	if err != nil {
 		c.Close()
 		return nil, nil, err
@@ -208,14 +218,14 @@ func (s *Session) Client() (*proton.Client, *crypto.KeyRing, error) {
 
 	for _, kr := range addrKRs {
 		for _, key := range kr.GetKeys() {
-			if err := addrKR.AddKey(key); err != nil {
+			if err := merged.AddKey(key); err != nil {
 				c.Close()
 				return nil, nil, err
 			}
 		}
 	}
 
-	return c, addrKR, nil
+	return c, &Keys{Merged: merged, ByAddressID: addrKRs, Addresses: addrs}, nil
 }
 
 // Logout revokes the session on Proton's side and removes the local session file.

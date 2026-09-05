@@ -8,12 +8,22 @@ import (
 
 	"github.com/ProtonMail/gopenpgp/v2/crypto"
 	proton "github.com/henrybear327/go-proton-api"
+
+	"github.com/khaosdoctor/proton-drive-linux-fs/internal/auth"
 )
 
 // Client is a thin wrapper around the Proton API client scoped to a single drive share.
 type Client struct {
-	api      *proton.Client
-	addrKR   *crypto.KeyRing
+	api    *proton.Client
+	addrKR *crypto.KeyRing
+
+	// signKR and signEmail are the keyring and address used to sign writes (name/passphrase/
+	// block/manifest signatures); addressID is that same address's ID, required by block upload
+	// requests.
+	signKR    *crypto.KeyRing
+	signEmail string
+	addressID string
+
 	shareID  string
 	volumeID string
 }
@@ -33,7 +43,7 @@ func (n *Node) IsDir() bool {
 }
 
 // Open resolves the primary share and its root node, returning a Client ready to list children.
-func Open(ctx context.Context, api *proton.Client, addrKR *crypto.KeyRing) (*Client, *Node, error) {
+func Open(ctx context.Context, api *proton.Client, keys *auth.Keys) (*Client, *Node, error) {
 	shares, err := api.ListShares(ctx, false)
 	if err != nil {
 		return nil, nil, err
@@ -56,7 +66,12 @@ func Open(ctx context.Context, api *proton.Client, addrKR *crypto.KeyRing) (*Cli
 		return nil, nil, err
 	}
 
-	shareKR, err := share.GetKeyRing(addrKR)
+	signEmail, signKR, err := resolveSigner(keys, share.AddressID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	shareKR, err := share.GetKeyRing(keys.Merged)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -66,17 +81,44 @@ func Open(ctx context.Context, api *proton.Client, addrKR *crypto.KeyRing) (*Cli
 		return nil, nil, err
 	}
 
-	rootKR, err := rootLink.GetKeyRing(shareKR, addrKR)
+	rootKR, err := rootLink.GetKeyRing(shareKR, keys.Merged)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	c := &Client{api: api, addrKR: addrKR, shareID: shareID, volumeID: volumeID}
+	c := &Client{
+		api:       api,
+		addrKR:    keys.Merged,
+		signKR:    signKR,
+		signEmail: signEmail,
+		addressID: share.AddressID,
+		shareID:   shareID,
+		volumeID:  volumeID,
+	}
 	size, modTime := c.resolveFileAttrs(rootLink, rootKR)
 
 	root := &Node{Link: rootLink, Name: "/", KR: rootKR, Size: size, ModTime: modTime}
 
 	return c, root, nil
+}
+
+// resolveSigner finds the address and its unlocked keyring matching a share's AddressID. Writes
+// are signed as this address, as the Proton clients do.
+func resolveSigner(keys *auth.Keys, addressID string) (string, *crypto.KeyRing, error) {
+	for _, a := range keys.Addresses {
+		if a.ID != addressID {
+			continue
+		}
+
+		kr, ok := keys.ByAddressID[addressID]
+		if !ok {
+			return "", nil, errors.New("no unlocked keyring for share's address")
+		}
+
+		return a.Email, kr, nil
+	}
+
+	return "", nil, errors.New("no address found for share's address id")
 }
 
 // Children lists the active children of parent, decrypting their names and keyrings.
