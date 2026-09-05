@@ -118,7 +118,7 @@ The icon is a cloud in one of four states, picked in this order:
 - A dot in the corner: a download or an upload is in flight.
 - Solid: mounted, logged in, nothing moving.
 
-The menu holds a status line (`Mounted at <path>`, `Not mounted` or `Not logged in`), then `Mount` or `Unmount`, `Pause syncing` or `Resume syncing`, `Open folder`, `Open logs`, and then `Log in` or `Log out` and `Quit`. `Mount` and `Unmount` run this same binary, so a mount started from the menu is the same detached mount you get from a shell and it survives the tray closing. `Quit` only closes the icon; it never unmounts.
+The menu holds a status line (`Mounted at <path>`, `Not mounted` or `Not logged in`), then items shown only when they apply: `Mount` when logged in but not mounted, `Unmount` when mounted, `Pause syncing` or `Resume syncing` when mounted, `Open folder` when mounted, `Open logs`, `Log in` when logged out, `Log out` when logged in, and `Quit`. `Mount` and `Unmount` run this same binary, so a mount started from the menu is the same detached mount you get from a shell and it survives the tray closing. `Quit` only closes the icon; it never unmounts.
 
 `Log in` needs a terminal because it prompts for the password. The tray starts the first terminal it finds on `PATH`, trying `$TERMINAL` first and then `x-terminal-emulator`, `kitty`, `alacritty`, `foot`, `gnome-terminal`, `konsole`, `xterm`. When none of them is installed, the status line shows the command to run yourself for ten seconds. `Open logs` follows the journal in a terminal when the mount logs there, and otherwise opens the log file with `xdg-open`.
 

@@ -7,6 +7,49 @@ import (
 	"testing"
 )
 
+func TestVisibilityFor(t *testing.T) {
+	tests := []struct {
+		name     string
+		loggedIn bool
+		mounted  bool
+		want     menuVisibility
+	}{
+		{
+			"logged out, not mounted",
+			false,
+			false,
+			menuVisibility{Mount: false, Unmount: false, Pause: false, OpenFolder: false, Login: true, Logout: false},
+		},
+		{
+			"logged out, mounted",
+			false,
+			true,
+			menuVisibility{Mount: false, Unmount: true, Pause: true, OpenFolder: true, Login: true, Logout: false},
+		},
+		{
+			"logged in, not mounted",
+			true,
+			false,
+			menuVisibility{Mount: true, Unmount: false, Pause: false, OpenFolder: false, Login: false, Logout: true},
+		},
+		{
+			"logged in, mounted",
+			true,
+			true,
+			menuVisibility{Mount: false, Unmount: true, Pause: true, OpenFolder: true, Login: false, Logout: true},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := visibilityFor(tt.loggedIn, tt.mounted)
+			if got != tt.want {
+				t.Errorf("visibilityFor(%v, %v) = %+v, want %+v", tt.loggedIn, tt.mounted, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestPickState(t *testing.T) {
 	tests := []struct {
 		name      string

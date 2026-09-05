@@ -210,12 +210,29 @@ func (a *app) apply(sn snapshot) {
 		a.status.SetTitle(sn.statusLine(a.opts.Mountpoint))
 	}
 
-	showIf(a.mount, sn.loggedIn && !sn.mounted)
-	showIf(a.unmount, sn.mounted)
-	showIf(a.pause, !sn.paused)
-	showIf(a.resume, sn.paused)
-	showIf(a.login, !sn.loggedIn)
-	showIf(a.logout, sn.loggedIn)
+	v := visibilityFor(sn.loggedIn, sn.mounted)
+	showIf(a.mount, v.Mount)
+	showIf(a.unmount, v.Unmount)
+	showIf(a.pause, v.Pause && !sn.paused)
+	showIf(a.resume, v.Pause && sn.paused)
+	showIf(a.openFolder, v.OpenFolder)
+	showIf(a.login, v.Login)
+	showIf(a.logout, v.Logout)
+}
+
+type menuVisibility struct {
+	Mount, Unmount, Pause, OpenFolder, Login, Logout bool
+}
+
+func visibilityFor(loggedIn, mounted bool) menuVisibility {
+	return menuVisibility{
+		Mount:      loggedIn && !mounted,
+		Unmount:    mounted,
+		Pause:      mounted,
+		OpenFolder: mounted,
+		Login:      !loggedIn,
+		Logout:     loggedIn,
+	}
 }
 
 func showIf(item *systray.MenuItem, show bool) {
