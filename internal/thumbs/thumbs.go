@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"time"
 
+	_ "golang.org/x/image/webp"
 	_ "image/jpeg" // Proton stores thumbnails as JPEG; PNG is registered by the png import above.
 
 	"golang.org/x/image/draw"
@@ -79,13 +80,13 @@ func (s *Store) Fresh(relPath string, mtime time.Time) bool {
 	return recorded == strconv.FormatInt(mtime.Unix(), 10)
 }
 
-// Write decodes img (JPEG or PNG) and stores it as a normal and a large thumbnail for relPath,
+// Write decodes img (JPEG or PNG or WebP) and stores it as a normal and a large thumbnail for relPath,
 // tagged with mtime and size so a file manager can tell when it goes stale. A size of 0 or less
 // leaves Thumb::Size out.
 func (s *Store) Write(relPath string, mtime time.Time, size int64, img []byte) error {
 	src, _, err := image.Decode(bytes.NewReader(img))
 	if err != nil {
-		return err
+		return fmt.Errorf("decode thumbnail (%d bytes, starts %x): %w", len(img), img[:min(16, len(img))], err)
 	}
 
 	text := [][2]string{
