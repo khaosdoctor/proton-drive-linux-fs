@@ -20,6 +20,41 @@ archives:
       - README.md
       - contrib/**
 
+nfpms:
+  - id: proton-drive-fs
+    package_name: proton-drive-fs
+    file_name_template: "{{ .ConventionalFileName }}"
+    vendor: khaosdoctor
+    homepage: https://github.com/khaosdoctor/proton-drive-linux-fs
+    maintainer: Lucas Santos <hello@lsantos.dev>
+    description: FUSE virtual filesystem for Proton Drive on Linux.
+    license: MIT
+    formats:
+      - deb
+      - rpm
+      - apk
+      - archlinux
+    dependencies:
+      - fuse3
+    recommends:
+      - zenity
+    contents:
+      - src: contrib/proton-drive-fs.desktop
+        dst: /usr/share/applications/proton-drive-fs.desktop
+      - src: contrib/icons/proton-drive-fs.png
+        dst: /usr/share/icons/hicolor/64x64/apps/proton-drive-fs.png
+      - src: contrib/systemd/proton-drive-fs.service
+        dst: /usr/lib/systemd/user/proton-drive-fs.service
+      - src: contrib/systemd/proton-drive-fs-tray.service
+        dst: /usr/lib/systemd/user/proton-drive-fs-tray.service
+      - src: contrib/io.github.khaosdoctor.proton_drive_fs.metainfo.xml
+        dst: /usr/share/metainfo/io.github.khaosdoctor.proton_drive_fs.metainfo.xml
+      - src: LICENSE
+        dst: /usr/share/licenses/proton-drive-fs/LICENSE
+        type: doc
+    scripts:
+      postinstall: contrib/packaging/postinstall.sh
+
 checksum:
   name_template: "checksums.txt"
 

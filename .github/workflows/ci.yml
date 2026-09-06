@@ -27,3 +27,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: docker build .
+
+  packaging:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: sudo apt-get update && sudo apt-get install -y desktop-file-utils appstream
+      - run: desktop-file-validate contrib/proton-drive-fs.desktop
+      - run: appstreamcli validate --no-net contrib/*.metainfo.xml
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: latest
+          args: check

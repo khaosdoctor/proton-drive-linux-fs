@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Limitation: goreleaser does not templatize this file, so the <release>
+  entry below is a static placeholder, not the actual release history.
+  Update it by hand, or drop the releases tag, if that becomes a problem.
+-->
+<component type="desktop-application">
+  <id>io.github.khaosdoctor.proton_drive_fs</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Proton Drive FS</name>
+  <summary>Mount Proton Drive as a local folder through FUSE</summary>
+  <description>
+    <p>
+      Proton Drive FS mounts Proton Drive as a local folder through FUSE.
+      Files and folders are listed from Proton's metadata, and the bytes of
+      a file download only when something opens it.
+    </p>
+    <p>
+      Remote changes reach the mount through Proton's event feed, which
+      invalidates the affected directory listings and cached file content.
+      Writes are buffered to a local temp file and uploaded to Proton in
+      full when the file closes.
+    </p>
+    <p>
+      This is an early, unofficial project. It is not affiliated with,
+      endorsed by, or supported by Proton AG.
+    </p>
+  </description>
+  <launchable type="desktop-id">proton-drive-fs.desktop</launchable>
+  <url type="homepage">https://github.com/khaosdoctor/proton-drive-linux-fs</url>
+  <url type="bugtracker">https://github.com/khaosdoctor/proton-drive-linux-fs/issues</url>
+  <url type="vcs-browser">https://github.com/khaosdoctor/proton-drive-linux-fs</url>
+  <developer id="io.github.khaosdoctor">
+    <name>Lucas Santos</name>
+  </developer>
+  <provides>
+    <binary>proton-drive-fs</binary>
+  </provides>
+  <content_rating type="oars-1.1" />
+  <!-- No screenshot yet; required before this can go on Flathub. -->
+  <releases>
+    <release version="0.0.0" date="2026-09-06" />
+  </releases>
+</component>

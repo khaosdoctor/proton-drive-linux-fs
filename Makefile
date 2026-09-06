@@ -6,7 +6,7 @@ PREFIX ?= $(HOME)/.local
 MP ?= $(HOME)/ProtonDrive
 GOLANGCI := go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
 
-.PHONY: all build test race lint check generate install uninstall clean restart status help
+.PHONY: all build test race lint check generate install uninstall clean restart status packages help
 
 all: build
 
@@ -61,6 +61,9 @@ restart:
 status:
 	./$(BIN) status $(MP)
 
+packages:
+	go run github.com/goreleaser/goreleaser/v2@latest release --snapshot --clean --skip=publish,docker
+
 help:
 	@printf "Usage: make [target]\n\nTargets:\n"
 	@printf "  all\t\tBuild the project (default)\n"
@@ -75,4 +78,5 @@ help:
 	@printf "  clean\t\tRemove built binary and bin/ directory\n"
 	@printf "  restart\tUnmount, rebuild, and remount MP (default: \$$HOME/ProtonDrive)\n"
 	@printf "  status\tShow proton-drive-fs status for MP (default: \$$HOME/ProtonDrive)\n"
+	@printf "  packages\tBuild local deb/rpm/apk/pkg.tar.zst packages into dist/\n"
 	@printf "  help\t\tShow this message\n"

@@ -41,6 +41,13 @@ make install
 installs the two systemd user units described in [Usage](usage.md). Run `make help`
 to see every target.
 
+## Native packages
+
+`.deb`, `.rpm`, `.apk`, and Arch packages are attached to each
+[release](https://github.com/khaosdoctor/proton-drive-linux-fs/releases). Install one
+with the matching package manager (`dpkg`, `rpm`, `apk`, or `pacman`), then enable the
+tray with `systemctl --user enable --now proton-drive-fs-tray`.
+
 ## Container image
 
 ```
