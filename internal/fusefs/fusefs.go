@@ -74,7 +74,7 @@ func Mount(ctx context.Context, mountpoint string, c *drive.Client, root *drive.
 	// FUSE's kernel-side permission check compares these against the caller; 0:0 made every write ACCESS fail.
 	uid := uint32(os.Getuid())
 	gid := uint32(os.Getgid())
-	st := newMountState(c, uid, gid, opts)
+	st := newMountState(ctx, c, uid, gid, opts)
 
 	// The root directory's path relative to the mountpoint is the empty string.
 	rootNode := &dirNode{client: c, node: root, ttl: opts.TTL, st: st}
@@ -205,6 +205,13 @@ type mountState struct {
 	debug     bool
 	opTimeout time.Duration
 
+	// ctx is the mount's own lifetime context, cancelled on unmount. A directory listing fetch
+	// parents its own deadline on this instead of on whichever request's context happened to
+	// trigger it, so one caller cancelling its request never fails every other goroutine waiting
+	// on the same in-flight fetch (see dirNode.finishLoad). nil in tests that build a mountState
+	// directly; finishLoad falls back to context.Background() then.
+	ctx context.Context
+
 	thumbs      *thumbs.Store
 	thumbJobs   chan thumbJob
 	denyReaders []string
@@ -228,9 +235,10 @@ type mountState struct {
 	thumbInflight map[string]bool     // revision key -> queued, being fetched, or given up on
 }
 
-func newMountState(c *drive.Client, uid, gid uint32, opts Options) *mountState {
+func newMountState(ctx context.Context, c *drive.Client, uid, gid uint32, opts Options) *mountState {
 	st := &mountState{
 		client:        c,
+		ctx:           ctx,
 		uid:           uid,
 		gid:           gid,
 		debug:         opts.Debug,
@@ -514,9 +522,17 @@ type dirNode struct {
 	children []*drive.Node
 	expires  time.Time
 
+	// gen counts every upsertChild/removeChild patch to children, so a fetch that was already in
+	// flight when a patch landed can tell its result is stale (see publish).
+	gen uint64
+
 	// loading is non-nil while one goroutine fetches this listing, and closed when it is done;
 	// everybody else waits on it instead of issuing the same ListChildren again.
 	loading chan struct{}
+
+	// loadErrno is the errno the most recently finished fetch failed with, valid to read once the
+	// `loading` channel that fetch published to has closed. 0 after a successful fetch.
+	loadErrno syscall.Errno
 }
 
 // setNode replaces the node backing this directory, e.g. after a remote listing refresh.
@@ -603,9 +619,10 @@ func (d *dirNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno
 	return 0
 }
 
-// load returns the cached children, refetching them once ttl has elapsed. The fetch and its
-// crypto run with d.mu released: a folder with 10k entries takes long enough that holding the
-// lock across it would block every Lookup on this directory for the whole listing.
+// load returns the cached children, refetching them once ttl has elapsed. The fetch itself runs
+// detached from any single caller (see finishLoad): every caller here, whether it triggers the
+// fetch or finds one already running, only ever waits for it to finish and respects nothing but
+// its own ctx while doing so, so one caller's cancellation or timeout never fails another's.
 func (d *dirNode) load(ctx context.Context) ([]*drive.Node, syscall.Errno) {
 	for {
 		children, done, wait := d.beginLoad()
@@ -614,15 +631,29 @@ func (d *dirNode) load(ctx context.Context) ([]*drive.Node, syscall.Errno) {
 		}
 
 		if done != nil {
-			return d.finishLoad(ctx, done)
+			go d.finishLoad(done)
+			wait = done
 		}
 
 		select {
 		case <-wait:
+			return d.loadResult()
 		case <-ctx.Done():
 			return nil, syscall.EINTR
 		}
 	}
+}
+
+// loadResult reads the outcome of the fetch that just finished: the freshly published listing, or
+// the errno finishLoad recorded when the fetch failed.
+func (d *dirNode) loadResult() ([]*drive.Node, syscall.Errno) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if d.children != nil && time.Now().Before(d.expires) {
+		return d.children, 0
+	}
+	return nil, d.loadErrno
 }
 
 // beginLoad says how this caller gets the listing: children when the cache is still fresh, done
@@ -642,43 +673,81 @@ func (d *dirNode) beginLoad() (children []*drive.Node, done, wait chan struct{})
 	return nil, d.loading, nil
 }
 
+// shouldPublish reports whether a freshly fetched listing should replace the cache. hadChildren
+// is whether the directory already had a cached listing for a handler to patch; startGen and
+// curGen are dirNode.gen at the moment the fetch started and right now. A handler's local patch
+// (upsertChild/removeChild) bumps gen, so startGen != curGen means the fetch's result predates a
+// patch that already landed and must not overwrite it.
+func shouldPublish(hadChildren bool, startGen, curGen uint64) bool {
+	return !hadChildren || startGen == curGen
+}
+
 // publish swaps a freshly fetched listing in and wakes everyone waiting on the fetch. children
-// nil means the fetch failed and the cache stays as it was.
-func (d *dirNode) publish(children []*drive.Node, done chan struct{}) {
+// nil means the fetch failed and the cache stays as it was, and loadResult reports the errno
+// finishLoad stored instead. When a handler patched the cache while this fetch was in flight, the
+// patch wins over the listing that predates it: the fetched slice is dropped, but the cache still
+// counts as fresh (expires is refreshed) so the next TTL refetch or event-driven expire is what
+// brings the remote view back in sync, not an immediate re-fetch.
+func (d *dirNode) publish(children []*drive.Node, done chan struct{}, startGen uint64) {
 	d.mu.Lock()
 	d.loading = nil
+
 	if children != nil {
-		d.children = children
+		if shouldPublish(d.children != nil, startGen, d.gen) {
+			d.children = children
+		}
 		d.expires = time.Now().Add(d.ttl)
 	}
+
 	d.mu.Unlock()
 
 	close(done)
 }
 
-// finishLoad fetches the listing this caller took ownership of in beginLoad.
-func (d *dirNode) finishLoad(ctx context.Context, done chan struct{}) ([]*drive.Node, syscall.Errno) {
+// finishLoad fetches the listing whoever called beginLoad and got done took ownership of. It runs
+// on its own goroutine, detached from any single caller's context: the fetch is parented on the
+// mount's own lifetime context (or context.Background() in a test that never set one), not on the
+// context of whichever request happened to trigger it, so that request cancelling or timing out
+// never fails every other goroutine waiting on this same fetch (see load). Each of those waiters
+// reads the result for itself via loadResult once `done` closes.
+func (d *dirNode) finishLoad(done chan struct{}) {
 	d.mu.Lock()
 	node := d.node
+	startGen := d.gen
 	d.mu.Unlock()
 
 	defer d.st.track("readdir", node.Name)()
-	opCtx, cancel := context.WithTimeout(ctx, d.st.opTimeout)
+
+	parent := context.Background()
+	if d.st.ctx != nil {
+		parent = d.st.ctx
+	}
+	opCtx, cancel := context.WithTimeout(parent, d.st.opTimeout)
 	defer cancel()
 
-	children, err := d.client.Children(opCtx, node)
+	children, err := fetchChildren(opCtx, d.client, node)
 	if err != nil {
-		d.publish(nil, done)
-
+		errno := syscall.EIO
 		if timedOut(opCtx) {
 			log.Printf("fusefs: readdir %q timed out after %s", node.Name, d.st.opTimeout)
-			return nil, syscall.ETIMEDOUT
+			errno = syscall.ETIMEDOUT
+		} else {
+			log.Printf("fusefs: readdir %q: %v", node.Name, err)
 		}
-		log.Printf("fusefs: readdir %q: %v", node.Name, err)
-		return nil, syscall.EIO
+
+		d.mu.Lock()
+		d.loadErrno = errno
+		d.mu.Unlock()
+
+		d.publish(nil, done, startGen)
+		return
 	}
 
-	d.publish(children, done)
+	d.mu.Lock()
+	d.loadErrno = 0
+	d.mu.Unlock()
+
+	d.publish(children, done, startGen)
 
 	parentID := node.Link.LinkID
 	for _, ch := range children {
@@ -688,8 +757,12 @@ func (d *dirNode) finishLoad(ctx context.Context, done chan struct{}) ([]*drive.
 	if d.st.thumbs != nil {
 		go d.st.queueThumbs(d.path, children)
 	}
+}
 
-	return children, 0
+// fetchChildren lists node's children over the network; overridden in tests to fake a slow or
+// failing fetch without a real drive.Client.
+var fetchChildren = func(ctx context.Context, c *drive.Client, node *drive.Node) ([]*drive.Node, error) {
+	return c.Children(ctx, node)
 }
 
 // upsertChild patches one entry into the cached listing, replacing an entry with the same link or
@@ -699,6 +772,7 @@ func (d *dirNode) finishLoad(ctx context.Context, done chan struct{}) ([]*drive.
 func (d *dirNode) upsertChild(n *drive.Node) {
 	d.mu.Lock()
 	d.children = upsertNode(d.children, n)
+	d.gen++
 	parentID := d.node.Link.LinkID
 	d.mu.Unlock()
 
@@ -710,6 +784,7 @@ func (d *dirNode) removeChild(name string) {
 	d.mu.Lock()
 	removed, children := removeNode(d.children, name)
 	d.children = children
+	d.gen++
 	d.mu.Unlock()
 
 	if removed != nil {

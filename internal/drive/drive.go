@@ -98,9 +98,8 @@ type Node struct {
 	client   *Client
 	parentKR *crypto.KeyRing
 
-	krOnce sync.Once
-	kr     *crypto.KeyRing
-	krErr  error
+	krMu sync.Mutex
+	kr   *crypto.KeyRing
 
 	attrMu     sync.Mutex
 	attrsKnown bool
@@ -113,18 +112,31 @@ func (n *Node) IsDir() bool {
 	return n.Link.Type == proton.LinkTypeFolder
 }
 
-// Keyring unlocks this node's own keyring, once, and returns it. Unlocking is deferred because
-// a listing of 10k entries would otherwise spend tens of seconds of CPU unlocking a key for
-// every child, and almost none of those children are opened.
-func (n *Node) Keyring() (*crypto.KeyRing, error) {
-	n.krOnce.Do(func() {
-		if n.kr != nil {
-			return
-		}
-		n.kr, n.krErr = n.Link.GetKeyRing(n.parentKR, n.client.addrKR)
-	})
+// getKeyRing unlocks a link's own keyring; overridden in tests to simulate a transient failure
+// without a real PGP key.
+var getKeyRing = func(link proton.Link, parentKR, addrKR *crypto.KeyRing) (*crypto.KeyRing, error) {
+	return link.GetKeyRing(parentKR, addrKR)
+}
 
-	return n.kr, n.krErr
+// Keyring unlocks this node's own keyring and caches it on success. Unlocking is deferred because
+// a listing of 10k entries would otherwise spend tens of seconds of CPU unlocking a key for every
+// child, and almost none of those children are opened. A failure is never cached: it retries on
+// the next call instead of poisoning the node until its listing expires.
+func (n *Node) Keyring() (*crypto.KeyRing, error) {
+	n.krMu.Lock()
+	defer n.krMu.Unlock()
+
+	if n.kr != nil {
+		return n.kr, nil
+	}
+
+	kr, err := getKeyRing(n.Link, n.parentKR, n.client.addrKR)
+	if err != nil {
+		return nil, err
+	}
+
+	n.kr = kr
+	return n.kr, nil
 }
 
 // Size is the file's plaintext size when it is known, and the encrypted Link size until the node
