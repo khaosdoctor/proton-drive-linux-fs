@@ -56,24 +56,28 @@ func (c *Client) CreateDir(ctx context.Context, parent *Node, name string) error
 	return err
 }
 
-// moveLinkReq is the PUT .../links/{id}/move payload. It mirrors go-proton-api's MoveLinkReq
-// (link_file_types.go) plus NameSignatureEmail, the address that signed the new encrypted name.
-// The library never sends that field, so Proton's API rejects every move/rename with "This value
-// should not be blank" (Code=2000) -- the same longstanding failure in rclone's Proton backend,
-// which uses the same library.
+// moveLinkReq is the PUT .../links/{id}/move payload, matching WebClients' baseRequestBody
+// exactly (packages/drive-store/store/_links/useLinksActions.ts, getMoveLinkData) as sent by
+// packages/shared/lib/api/drive/share.ts queryMoveLink, typed as MoveLink in
+// packages/shared/lib/interfaces/drive/link.ts. Those five fields are the whole schema; go-proton-
+// api's own MoveLinkReq (link_file_types.go) additionally carries OriginalHash and
+// SignatureAddress, which have no place in the current API -- sending OriginalHash empty (it's
+// never populated) is exactly the "This value should not be blank" (Code=2000) the API rejects
+// every move/rename with. NewShareID/ContentHash (cross-share moves, photos) aren't in the
+// struct: this client never sets them.
 //
-// Source: WebClients packages/drive-store/store/_links/useLinksActions.ts, getMoveLinkData's
-// baseRequestBody (always sets NameSignatureEmail), sent via
-// packages/shared/lib/api/drive/share.ts queryMoveLink (PUT drive/shares/{shareID}/links/{linkID}/move).
+// WebClients also conditionally adds NodePassphraseSignature + SignatureEmail when the moved
+// link's own signatures show it needs re-verification (an anonymously-uploaded or externally-
+// signed node, requestBody's case 2/3). This client only ever moves nodes under its own
+// account, so that case doesn't arise in practice.
+// ponytail: omitted re-sign path (case 2/3); add NodePassphraseSignature/SignatureEmail here,
+// re-signed with c.signKR, if this fs ever moves nodes it didn't create/own.
 type moveLinkReq struct {
-	Name                    string
-	Hash                    string
-	ParentLinkID            string
-	OriginalHash            string
-	NodePassphrase          string
-	NodePassphraseSignature string
-	SignatureAddress        string
-	NameSignatureEmail      string
+	Name               string
+	Hash               string
+	ParentLinkID       string
+	NodePassphrase     string
+	NameSignatureEmail string
 }
 
 // Move relocates and/or renames n from oldParent to newParent as newName.
@@ -82,9 +86,7 @@ func (c *Client) Move(ctx context.Context, n *Node, oldParent, newParent *Node, 
 	// key); go-proton-api's own MoveLinkReq is used only as a place to call them, its request is
 	// never sent.
 	req := proton.MoveLinkReq{
-		ParentLinkID:     newParent.Link.LinkID,
-		OriginalHash:     n.Link.Hash,
-		SignatureAddress: c.signEmail,
+		ParentLinkID: newParent.Link.LinkID,
 	}
 
 	if err := req.SetName(newName, c.signKR, newParent.KR); err != nil {
@@ -105,18 +107,12 @@ func (c *Client) Move(ctx context.Context, n *Node, oldParent, newParent *Node, 
 		return err
 	}
 
-	req.NodePassphrase = nodePassphrase
-	req.NodePassphraseSignature = n.Link.NodePassphraseSignature
-
 	body := moveLinkReq{
-		Name:                    req.Name,
-		Hash:                    req.Hash,
-		ParentLinkID:            req.ParentLinkID,
-		OriginalHash:            req.OriginalHash,
-		NodePassphrase:          req.NodePassphrase,
-		NodePassphraseSignature: req.NodePassphraseSignature,
-		SignatureAddress:        req.SignatureAddress,
-		NameSignatureEmail:      c.signEmail,
+		Name:               req.Name,
+		Hash:               req.Hash,
+		ParentLinkID:       req.ParentLinkID,
+		NodePassphrase:     nodePassphrase,
+		NameSignatureEmail: c.signEmail,
 	}
 
 	return c.putJSON(ctx, "/drive/shares/"+c.shareID+"/links/"+n.Link.LinkID+"/move", body)

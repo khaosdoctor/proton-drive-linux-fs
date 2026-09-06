@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
+	"strings"
 
 	proton "github.com/henrybear327/go-proton-api"
 
@@ -69,9 +71,40 @@ func (c *Client) putJSONOnce(ctx context.Context, path string, body any) (int, e
 
 	var apiErr proton.APIError
 	if decErr := json.NewDecoder(resp.Body).Decode(&apiErr); decErr != nil {
-		return resp.StatusCode, fmt.Errorf("PUT %s: unexpected status %d", path, resp.StatusCode)
+		return resp.StatusCode, fmt.Errorf("PUT %s: unexpected status %d (payload keys: %s)", path, resp.StatusCode, payloadFieldLengths(payload))
 	}
 	apiErr.Status = resp.StatusCode
 
-	return resp.StatusCode, &apiErr
+	// Proton's "This value should not be blank" (Code=2000) never names the field -- record each
+	// key's string length (never its value; names/passphrases are encrypted but still sensitive)
+	// so the next failure names the empty one straight from the journal.
+	return resp.StatusCode, fmt.Errorf("%w (payload keys: %s)", apiErr, payloadFieldLengths(payload))
+}
+
+// payloadFieldLengths summarizes a marshaled JSON object's top-level fields as "Key=len Key2=len2
+// ...", in alphabetical key order for a deterministic one-line message. Non-string values are
+// sized by their raw JSON length. Returns "" if payload isn't a JSON object.
+func payloadFieldLengths(payload []byte) string {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		return ""
+	}
+
+	keys := make([]string, 0, len(fields))
+	for k := range fields {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		length := len(fields[k])
+		var s string
+		if err := json.Unmarshal(fields[k], &s); err == nil {
+			length = len(s)
+		}
+		parts = append(parts, fmt.Sprintf("%s=%d", k, length))
+	}
+
+	return strings.Join(parts, " ")
 }
