@@ -617,6 +617,28 @@ func timedOut(ctx context.Context) bool {
 	return errors.Is(ctx.Err(), context.DeadlineExceeded)
 }
 
+// openErrno maps a failed OpenFile/downloadInto call to the errno returned to the kernel. A 404
+// from Proton means the file's link or active revision no longer exists remotely — the case a
+// listing served straight from the disk cache on a cold start can hit, since it was never checked
+// against the network before being handed out (see dirNode.serveFromDiskCache) — so this also
+// expires parent's cached listing, the same self-heal a remote delete event would trigger, instead
+// of failing every open of this now-ghost entry the same way until the next TTL refetch.
+func openErrno(err error, parent *dirNode, opCtx context.Context, verb, path string) syscall.Errno {
+	if drive.IsNotFound(err) {
+		if parent != nil {
+			parent.expire()
+		}
+		slog.Warn(verb+" failed: no longer exists remotely, dropped cached listing", "path", path)
+		return syscall.ENOENT
+	}
+	if timedOut(opCtx) {
+		slog.Error(verb+" timed out", "path", path)
+		return syscall.ETIMEDOUT
+	}
+	slog.Error(verb+" failed", "path", path, "err", err)
+	return syscall.EIO
+}
+
 func inodeNum(linkID string) uint64 {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(linkID))
@@ -655,6 +677,14 @@ type dirNode struct {
 	// loadErrno is the errno the most recently finished fetch failed with, valid to read once the
 	// `loading` channel that fetch published to has closed. 0 after a successful fetch.
 	loadErrno syscall.Errno
+
+	// persistMu serializes writes to the disk-persisted listing (see persistListing), so two
+	// concurrent patches - or a patch racing a network fetch's own persist - can't land on disk out
+	// of order. persistedGen is the gen (see gen above) of the last write that won, guarded by
+	// persistMu, not d.mu: a write for a gen it has already moved past is dropped instead of
+	// clobbering newer content with older.
+	persistMu    sync.Mutex
+	persistedGen uint64
 }
 
 // setNode replaces the node backing this directory, e.g. after a remote listing refresh.
@@ -746,6 +776,10 @@ func (d *dirNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno
 // fetch or finds one already running, only ever waits for it to finish and respects nothing but
 // its own ctx while doing so, so one caller's cancellation or timeout never fails another's.
 func (d *dirNode) load(ctx context.Context) ([]*drive.Node, syscall.Errno) {
+	if children, ok := d.serveFromDiskCache(); ok {
+		return children, 0
+	}
+
 	for {
 		children, done, wait := d.beginLoad()
 		if children != nil {
@@ -766,6 +800,42 @@ func (d *dirNode) load(ctx context.Context) ([]*drive.Node, syscall.Errno) {
 			return nil, syscall.EINTR
 		}
 	}
+}
+
+// serveFromDiskCache checks the persisted listing cache on a cold directory (no in-memory listing
+// yet, no fetch already in flight): if one is there, it is published as the current listing,
+// already expired so the very next load call triggers a real refresh, and a background fetch
+// through the normal singleflight path is kicked off immediately (see finishLoad) — every caller
+// after this one waits on that fetch as usual, only this one gets to skip the network round-trip.
+func (d *dirNode) serveFromDiskCache() ([]*drive.Node, bool) {
+	d.mu.Lock()
+	cold := d.children == nil && d.loading == nil
+	node := d.node
+	d.mu.Unlock()
+	if !cold {
+		return nil, false
+	}
+
+	children, ok := cachedChildren(d.client, node)
+	if !ok {
+		return nil, false
+	}
+
+	d.mu.Lock()
+	if d.children != nil || d.loading != nil {
+		// A real fetch started (or finished) while CachedChildren ran; let it win.
+		d.mu.Unlock()
+		return children, true
+	}
+	d.children = children
+	d.expires = time.Time{}
+	d.loading = make(chan struct{})
+	done := d.loading
+	d.mu.Unlock()
+
+	go d.finishLoad(done)
+
+	return children, true
 }
 
 // loadResult reads the outcome of the fetch that just finished: the freshly published listing, or
@@ -872,6 +942,7 @@ func (d *dirNode) finishLoad(done chan struct{}) {
 	d.mu.Unlock()
 
 	d.publish(children, done, startGen)
+	d.persistListing(node, children, startGen)
 
 	parentID := node.Link.LinkID
 	for _, ch := range children {
@@ -889,6 +960,28 @@ var fetchChildren = func(ctx context.Context, c *drive.Client, node *drive.Node)
 	return c.Children(ctx, node)
 }
 
+// cachedChildren rebuilds a directory's children from the persisted listing cache, without a
+// network call; overridden in tests. See drive.Client.CachedChildren.
+var cachedChildren = func(c *drive.Client, node *drive.Node) ([]*drive.Node, bool) {
+	return c.CachedChildren(node)
+}
+
+// persistListing writes children to the disk-persisted listing cache, serialized against every
+// other persist for this directory: gen (d.gen at the moment children was snapshotted, under
+// d.mu) orders the writes, and one that would go backward - it landed after a persist for a newer
+// gen already won - is dropped instead of clobbering that newer content with older.
+func (d *dirNode) persistListing(node *drive.Node, children []*drive.Node, gen uint64) {
+	d.persistMu.Lock()
+	defer d.persistMu.Unlock()
+
+	if gen < d.persistedGen {
+		return
+	}
+	d.persistedGen = gen
+
+	d.client.CacheListing(node, children)
+}
+
 // upsertChild patches one entry into the cached listing, replacing an entry with the same link or
 // the same name. Handlers do this instead of re-listing the parent after a write: a re-list per
 // written file makes a bulk copy quadratic (10k files into one folder is ~340k listing requests
@@ -897,10 +990,11 @@ func (d *dirNode) upsertChild(n *drive.Node) {
 	d.mu.Lock()
 	d.children = upsertNode(d.children, n)
 	d.gen++
-	parentID := d.node.Link.LinkID
+	node, children, gen := d.node, d.children, d.gen
 	d.mu.Unlock()
 
-	d.st.setParent(n.Link.LinkID, parentID)
+	d.st.setParent(n.Link.LinkID, node.Link.LinkID)
+	d.persistListing(node, children, gen)
 }
 
 // removeChild drops the entry named name from the cached listing.
@@ -909,11 +1003,13 @@ func (d *dirNode) removeChild(name string) {
 	removed, children := removeNode(d.children, name)
 	d.children = children
 	d.gen++
+	node, gen := d.node, d.gen
 	d.mu.Unlock()
 
 	if removed != nil {
 		d.st.forgetParent(removed.Link.LinkID)
 	}
+	d.persistListing(node, children, gen)
 }
 
 // upsertNode returns the listing with the entry n stands for replaced, matched by link id or by
@@ -1368,12 +1464,7 @@ func (f *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 
 		file, err := f.client.OpenFile(opCtx, node, f.displayPath())
 		if err != nil {
-			if timedOut(opCtx) {
-				slog.Error("opening file timed out", "path", f.currentName(), "timeout", parent.st.opTimeout)
-				return nil, 0, syscall.ETIMEDOUT
-			}
-			slog.Error("opening file failed", "path", f.currentName(), "err", err)
-			return nil, 0, syscall.EIO
+			return nil, 0, openErrno(err, parent, opCtx, "opening file", f.currentName())
 		}
 		return &fileHandle{node: f, file: file}, fuse.FOPEN_KEEP_CACHE, 0
 	}
@@ -1403,12 +1494,7 @@ func (f *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 			_ = tmp.Close()
 			_ = os.Remove(tmp.Name())
 			parent.st.recordFinished(recentTransfer{Path: displayPath, Action: "download", Status: "failed", Bytes: moved, Finished: time.Now(), Err: err.Error()})
-			if timedOut(opCtx) {
-				slog.Error("opening file timed out", "path", f.currentName(), "timeout", parent.st.opTimeout)
-				return nil, 0, syscall.ETIMEDOUT
-			}
-			slog.Error("downloading file failed", "path", f.currentName(), "err", err)
-			return nil, 0, syscall.EIO
+			return nil, 0, openErrno(err, parent, opCtx, "downloading file", f.currentName())
 		}
 		if moved > 0 {
 			parent.st.recordFinished(recentTransfer{Path: displayPath, Action: "download", Status: "done", Bytes: moved, Finished: time.Now()})

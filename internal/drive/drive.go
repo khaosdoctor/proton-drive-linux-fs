@@ -94,6 +94,56 @@ func (c *Client) LargeFileLimit() int64 {
 	return c.largeFile
 }
 
+// CachedChildren rebuilds parent's children from the persisted listing cache, without any network
+// call: it unlocks parent's own keyring (already resolved, or a fast in-memory unlock) but leaves
+// each child's keyring lazy, same as a normal listing. The second result is false when nothing is
+// cached, the cache is disabled, or parent's keyring can't be unlocked.
+func (c *Client) CachedChildren(parent *Node) ([]*Node, bool) {
+	if c == nil || c.cache == nil {
+		return nil, false
+	}
+
+	entries, ok := c.cache.GetListing(parent.Link.LinkID)
+	if !ok {
+		return nil, false
+	}
+
+	parentKR, err := parent.Keyring()
+	if err != nil {
+		return nil, false
+	}
+
+	nodes := make([]*Node, 0, len(entries))
+	for _, e := range entries {
+		var link proton.Link
+		if err := json.Unmarshal(e.Link, &link); err != nil {
+			continue
+		}
+		nodes = append(nodes, c.newNode(link, e.Name, parentKR))
+	}
+
+	return nodes, true
+}
+
+// CacheListing persists parent's current children so a future cold start can serve them without a
+// network round-trip (see CachedChildren). A no-op when the cache is disabled.
+func (c *Client) CacheListing(parent *Node, children []*Node) {
+	if c == nil || c.cache == nil {
+		return
+	}
+
+	entries := make([]ListingEntry, 0, len(children))
+	for _, n := range children {
+		raw, err := json.Marshal(n.Link)
+		if err != nil {
+			continue
+		}
+		entries = append(entries, ListingEntry{Name: n.Name, Link: raw})
+	}
+
+	c.cache.PutListing(parent.Link.LinkID, entries)
+}
+
 // Node is a decrypted file or folder in the drive tree. Its name is decrypted when the node is
 // built; the node keyring and the attributes that need it are resolved on first use.
 type Node struct {

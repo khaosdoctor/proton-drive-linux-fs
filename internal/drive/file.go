@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -149,6 +150,15 @@ func (f *File) Close() error {
 	}
 	f.client.end(t, err)
 	return err
+}
+
+// IsNotFound reports whether err is Proton's HTTP 404 response for a link or revision. That's the
+// shape a cold-started listing built from the disk cache can hit: Open resolves a name to a link
+// the API has since deleted. Callers use it to self-heal (drop the stale cached listing) instead
+// of just failing the same way on every future open.
+func IsNotFound(err error) bool {
+	var apiErr *proton.APIError
+	return errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound
 }
 
 // ReadAt fills p with data starting at off, downloading and decrypting blocks on demand.

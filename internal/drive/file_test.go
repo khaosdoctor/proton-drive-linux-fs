@@ -2,6 +2,8 @@ package drive
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -68,6 +70,22 @@ func TestGetBlockSingleflight(t *testing.T) {
 	}
 	if got := f.BytesTransferred(); got != int64(len(plain)) {
 		t.Fatalf("BytesTransferred() = %d, want %d (only the winner should Add)", got, len(plain))
+	}
+}
+
+func TestIsNotFound(t *testing.T) {
+	notFound := errors.Join(errors.New("404 GET /x"), &proton.APIError{Status: http.StatusNotFound, Message: "not found"})
+	if !IsNotFound(notFound) {
+		t.Error("expected a wrapped 404 APIError to be reported as not found")
+	}
+
+	forbidden := errors.Join(errors.New("403 GET /x"), &proton.APIError{Status: http.StatusForbidden, Message: "forbidden"})
+	if IsNotFound(forbidden) {
+		t.Error("expected a 403 APIError to not be reported as not found")
+	}
+
+	if IsNotFound(errors.New("boom")) {
+		t.Error("expected a plain error to not be reported as not found")
 	}
 }
 

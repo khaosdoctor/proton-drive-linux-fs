@@ -11,6 +11,7 @@ import (
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/about"
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/api"
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/auth"
+	"github.com/khaosdoctor/proton-drive-linux-fs/internal/config"
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/state"
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/tray"
 )
@@ -58,11 +59,20 @@ func runAbout() int {
 }
 
 func runTray(args []string) int {
+	configPath := resolveConfigPath(args)
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: loading config:", err)
+		return 1
+	}
+
 	fs := flag.NewFlagSet("tray", flag.ContinueOnError)
-	mountpoint := fs.String("mountpoint", "", "mountpoint the tray manages (default: the last one used, else ~/ProtonDrive)")
+	fs.String("config", configPath, "path to config.toml")
+	mountpoint := fs.String("mountpoint", cfg.Mountpoint, "mountpoint the tray manages (default: the config file's mountpoint, else the last one used, else ~/ProtonDrive)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	config.ApplyFlags(fs, &cfg)
 
 	mp := resolveTrayMountpoint(*mountpoint)
 	if err := tray.SaveMountpoint(mp); err != nil {

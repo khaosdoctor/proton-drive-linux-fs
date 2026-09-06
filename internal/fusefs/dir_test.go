@@ -2,7 +2,9 @@ package fusefs
 
 import (
 	"context"
+	"fmt"
 	"slices"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -183,6 +185,109 @@ func TestLoadSurvivesLeaderCancel(t *testing.T) {
 	}
 	if want := []string{"a"}; !slices.Equal(names(waiterChildren), want) {
 		t.Errorf("waiter children = %v, want %v", names(waiterChildren), want)
+	}
+}
+
+// TestServeFromDiskCacheTriggersImmediateBackgroundRefresh checks a cold directory's disk-cached
+// listing is served right away, and that it kicks off the normal network fetch immediately in the
+// background instead of waiting for a later TTL expiry: without that, a disk-served listing (with
+// no automatic staleness check of its own) could sit unrefreshed indefinitely.
+func TestServeFromDiskCacheTriggersImmediateBackgroundRefresh(t *testing.T) {
+	origCached, origFetch := cachedChildren, fetchChildren
+	defer func() { cachedChildren, fetchChildren = origCached, origFetch }()
+
+	cachedChildren = func(c *drive.Client, n *drive.Node) ([]*drive.Node, bool) {
+		return []*drive.Node{node("l1", "cached")}, true
+	}
+
+	fetchCalled := make(chan struct{}, 1)
+	fetchChildren = func(ctx context.Context, c *drive.Client, n *drive.Node) ([]*drive.Node, error) {
+		fetchCalled <- struct{}{}
+		return []*drive.Node{node("l1", "fresh")}, nil
+	}
+
+	d := &dirNode{
+		ttl:  time.Minute,
+		st:   &mountState{opTimeout: time.Second, parentOf: make(map[string]string)},
+		node: node("root", "root"),
+	}
+
+	children, errno := d.load(context.Background())
+	if errno != 0 {
+		t.Fatalf("errno = %v, want 0", errno)
+	}
+	if want := []string{"cached"}; !slices.Equal(names(children), want) {
+		t.Fatalf("children = %v, want the disk-cached listing served immediately: %v", names(children), want)
+	}
+
+	select {
+	case <-fetchCalled:
+	case <-time.After(time.Second):
+		t.Fatal("expected the network refresh to start immediately after the disk-cache serve")
+	}
+}
+
+// newTestDirNodeWithCache builds a dirNode backed by a real, temp-dir-rooted on-disk listing
+// cache, so persistListing's writes can be read back with cache.GetListing directly - no keyring
+// needed for that, unlike going through Client.CachedChildren.
+func newTestDirNodeWithCache(t *testing.T) (*dirNode, *drive.BlockCache) {
+	t.Helper()
+
+	cache, err := drive.OpenBlockCache(t.TempDir(), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &drive.Client{}
+	client.SetBlockCache(cache, 0)
+
+	return &dirNode{client: client, node: node("root", "root"), ttl: time.Minute}, cache
+}
+
+// TestPersistListingDropsOutOfOrderWrites checks a persist for an older gen is dropped once a
+// newer gen has already won, instead of clobbering it - the out-of-order write two concurrent
+// upsertChild/removeChild patches (or a patch racing a network fetch's own persist) could produce.
+func TestPersistListingDropsOutOfOrderWrites(t *testing.T) {
+	d, cache := newTestDirNodeWithCache(t)
+
+	d.persistListing(d.node, []*drive.Node{node("l1", "newer")}, 5)
+	d.persistListing(d.node, []*drive.Node{node("l1", "older")}, 2) // stale: must not win
+
+	entries, ok := cache.GetListing("root")
+	if !ok {
+		t.Fatal("expected a persisted listing")
+	}
+	if len(entries) != 1 || entries[0].Name != "newer" {
+		t.Fatalf("entries = %+v, want the gen-5 write to have won over the stale gen-2 one", entries)
+	}
+}
+
+// TestPersistListingConcurrentWritesStayInGenOrder fires many persistListing calls at once, each
+// for a distinct gen, and checks the write for the highest gen is what survives regardless of
+// goroutine scheduling: persistedGen only moves forward, so once the highest-gen write lands, every
+// other one is guaranteed stale.
+func TestPersistListingConcurrentWritesStayInGenOrder(t *testing.T) {
+	d, cache := newTestDirNodeWithCache(t)
+
+	const highest = 20
+	var wg sync.WaitGroup
+	for gen := uint64(1); gen <= highest; gen++ {
+		wg.Add(1)
+		go func(gen uint64) {
+			defer wg.Done()
+			d.persistListing(d.node, []*drive.Node{node("l1", fmt.Sprintf("gen%d", gen))}, gen)
+		}(gen)
+	}
+	wg.Wait()
+
+	entries, ok := cache.GetListing("root")
+	if !ok {
+		t.Fatal("expected a persisted listing")
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries = %+v, want exactly one persisted entry", entries)
+	}
+	if want := fmt.Sprintf("gen%d", highest); entries[0].Name != want {
+		t.Fatalf("entries[0].Name = %q, want %q (the highest gen must always win)", entries[0].Name, want)
 	}
 }
 

@@ -9,6 +9,7 @@ require (
 	github.com/coreos/go-systemd/v22 v22.5.0
 	github.com/hanwen/go-fuse/v2 v2.11.0
 	github.com/henrybear327/go-proton-api v1.0.0
+	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/zalando/go-keyring v0.2.8
 	golang.org/x/image v0.45.0
 	golang.org/x/term v0.45.0

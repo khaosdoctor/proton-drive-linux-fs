@@ -8,6 +8,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/khaosdoctor/proton-drive-linux-fs/internal/config"
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/state"
 )
 
@@ -46,7 +47,7 @@ func TestParseLogLevel(t *testing.T) {
 	}
 }
 
-func TestParseDenyReaders(t *testing.T) {
+func TestSplitDenyReaders(t *testing.T) {
 	tests := []struct {
 		in   string
 		want []string
@@ -58,8 +59,8 @@ func TestParseDenyReaders(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		if got := parseDenyReaders(tt.in); !slices.Equal(got, tt.want) {
-			t.Errorf("parseDenyReaders(%q) = %v, want %v", tt.in, got, tt.want)
+		if got := config.SplitDenyReaders(tt.in); !slices.Equal(got, tt.want) {
+			t.Errorf("SplitDenyReaders(%q) = %v, want %v", tt.in, got, tt.want)
 		}
 	}
 }

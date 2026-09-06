@@ -56,12 +56,14 @@ Requirements: Linux, FUSE 3 (the `fuse3` package on most distributions), and acc
 
 ## Usage
 
-proton-drive-fs is one binary with seven subcommands: `login`, `mount`, `status`, `unmount`, `tray`, `logout`, `version`.
+proton-drive-fs is one binary with eight subcommands: `login`, `mount`, `status`, `unmount`, `tray`, `logout`, `version`, `config`.
+
+Every flag below also has a matching key in the [config file](#configuration); a flag passed on the command line always wins.
 
 ### Log in
 
 ```
-proton-drive-fs login
+proton-drive-fs login [-config path]
 ```
 
 Prompts for username, password, and a TOTP code if two-factor is enabled. On first login Proton may require human verification (CAPTCHA, email code, or SMS code); for a CAPTCHA the CLI prints the verify.proton.me URL and opens it unless you pass `-no-browser` (default: false), in which case open the URL yourself. Solve the CAPTCHA there, then press Enter in the terminal. Force a specific method with `-hv-method captcha|email|sms` (default: none forced, tried in the order email, sms, captcha).
@@ -73,17 +75,17 @@ A successful login writes a session file to `$XDG_CONFIG_HOME/proton-drive-fs/se
 ### Mount
 
 ```
-proton-drive-fs mount <mountpoint> [-debug] [-ttl 30s] [-poll 10s] [-op-timeout 60s] [-cache-dir path] [-cache-size 1GiB] [-large-file 300MiB] [-thumbnails] [-thumbnail-dir path] [-deny-readers names] [-max-uploads 5] [-max-downloads 8] [-foreground] [-log-level info] [-log-stderr]
+proton-drive-fs mount [<mountpoint>] [-config path] [-debug] [-ttl 30s] [-poll 10s] [-op-timeout 60s] [-cache-dir path] [-cache-size 2GiB] [-large-file 300MiB] [-thumbnails] [-thumbnail-dir path] [-deny-readers names] [-max-uploads 5] [-max-downloads 8] [-foreground] [-log-level info] [-log-stderr]
 ```
 
-If the mountpoint does not exist, mount says so and creates it. By default mount detaches into the background and waits until the filesystem is mounted. The daemon logs to the systemd journal itself under the identifier `proton-drive-fs`, readable with `journalctl --user -t proton-drive-fs`; see [Logs](#logs) for levels and the file fallback when there's no journal.
+`<mountpoint>` is required unless the config file sets `mountpoint`. If it does not exist, mount says so and creates it. By default mount detaches into the background and waits until the filesystem is mounted. The daemon logs to the systemd journal itself under the identifier `proton-drive-fs`, readable with `journalctl --user -t proton-drive-fs`; see [Logs](#logs) for levels and the file fallback when there's no journal.
 
 - `-debug` (default: false): enable FUSE debug logging.
 - `-ttl` (default: 30s): how long a directory listing stays cached before it is fetched again.
 - `-poll` (default: 10s): how often the event feed is polled for remote changes.
 - `-op-timeout` (default: 60s): deadline for one filesystem operation's network calls (listing, open, read, upload, mkdir, remove, rename); an operation stuck past this returns an error instead of hanging the caller. Uploads scale past this for large files.
-- `-cache-dir` (default: `$XDG_CACHE_HOME/proton-drive-fs/blocks`, falls back to `~/.cache/proton-drive-fs/blocks`): where downloaded, decrypted file blocks are stored on disk so they survive a remount.
-- `-cache-size` (default: 1GiB): the total size the on-disk block cache is allowed to use; accepts suffixes like `512MiB` or `2GiB`. A value of 0 or less disables the on-disk cache.
+- `-cache-dir` (default: `$XDG_CACHE_HOME/proton-drive-fs`, falls back to `~/.cache/proton-drive-fs`): where downloaded, decrypted file blocks (under `blocks/`) and persisted directory listings (under `listings/`) are stored on disk so they survive a remount.
+- `-cache-size` (default: 2GiB): the total size the on-disk cache is allowed to use, shared by blocks and persisted listings together; accepts suffixes like `512MiB` or `2GiB`. A value of 0 or less disables the on-disk cache entirely (both kinds).
 - `-large-file` (default: 300MiB): files larger than this are still read lazily block by block but their blocks are not stored in the on-disk cache, so one large file cannot evict everything else; 0 disables the threshold.
 - `-thumbnails` (default: true): write the preview image Proton stores for a file into the freedesktop thumbnail cache when a folder is listed.
 - `-thumbnail-dir` (default: `$XDG_CACHE_HOME/thumbnails`, falls back to `~/.cache/thumbnails`): the thumbnail cache directory to write into. This is the shared directory file managers read, not a directory of its own.
@@ -95,6 +97,8 @@ If the mountpoint does not exist, mount says so and creates it. By default mount
 - `-log-stderr` (default: false): force logging to stderr instead of the systemd journal, useful with `-foreground` when working at a terminal.
 
 `mount` refuses to attach to a mountpoint that is already mounted, printing the running daemon's pid and version when the status file has them, so a rebuild whose earlier unmount failed as busy never gets mistaken for actually running the new binary; `make restart` (optionally `MP=<mountpoint>`, default `~/ProtonDrive`) unmounts, rebuilds, and remounts in one step.
+
+A cold directory (nothing cached in memory yet, for example right after mount) is served from the persisted listing cache when one exists, so a folder you've listed before shows up instantly instead of waiting on the network; a background refresh follows the same TTL and event-driven invalidation as everything else, and refreshes the persisted copy once it lands.
 
 ### Previews
 
@@ -111,10 +115,10 @@ Runs `fusermount3 -u` (or `fusermount -u` if `fusermount3` is not on `PATH`); if
 ### Status
 
 ```
-proton-drive-fs status [mountpoint]
+proton-drive-fs status [-config path] [mountpoint]
 ```
 
-Prints whether the mountpoint is mounted, the running daemon's pid and version, this binary's version, transfers in flight, and whether syncing is paused; with a version mismatch it also prints the unmount-then-mount command to fix it. With no argument it uses the tray's remembered mountpoint, falling back to `~/ProtonDrive`.
+Prints whether the mountpoint is mounted, the running daemon's pid and version, this binary's version, transfers in flight, and whether syncing is paused; with a version mismatch it also prints the unmount-then-mount command to fix it. With no argument it uses the config file's `mountpoint`, then the tray's remembered mountpoint, then falls back to `~/ProtonDrive`.
 
 ### Log out
 
@@ -135,10 +139,43 @@ systemctl --user enable --now proton-drive-fs-tray
 
 Both units run the binary from `~/.local/bin`; edit `ExecStart` if yours lives elsewhere. The mount unit runs `mount -foreground`; either way the daemon logs straight to the journal under the identifier `proton-drive-fs`, see [Logs](#logs).
 
+## Configuration
+
+Every flag `login`, `mount` and `tray` accept also has a key in a TOML config file at `$XDG_CONFIG_HOME/proton-drive-fs/config.toml` (falls back to `~/.config/proton-drive-fs/config.toml`), or wherever `-config <path>` points instead. `status` also reads it for `mountpoint`, when no mountpoint is given on the command line. Values are resolved in this order, each one overriding the last: **built-in defaults** < **config file** < **flag explicitly passed on the command line**.
+
+```
+proton-drive-fs config init [-config path] [-force]
+proton-drive-fs config show [-config path] [flags...]
+```
+
+`config init` writes a fully commented config file with every key at its default value and a one-line explanation; uncomment a line to set it. It refuses to overwrite an existing file unless `-force` is passed. `config show` prints the effective configuration after merging defaults, the file, and any flag passed to `config show` itself, with a trailing comment naming where each value came from (`default`, `file`, or `flag`) — useful to check what `mount` or `login` would actually resolve to before running them.
+
+| Key | Flag | Default | Description |
+| --- | --- | --- | --- |
+| `mountpoint` | (positional for `mount`, `-mountpoint` for `tray`) | (none) | Default mountpoint `mount` and `tray` use when none is given on the command line. |
+| `ttl` | `-ttl` | `30s` | How long a directory listing stays cached before it is fetched again. |
+| `poll` | `-poll` | `10s` | How often the event feed is polled for remote changes. |
+| `op_timeout` | `-op-timeout` | `60s` | Deadline for one filesystem operation's network calls. |
+| `cache_dir` | `-cache-dir` | `$XDG_CACHE_HOME/proton-drive-fs` | Where downloaded file blocks and persisted directory listings are stored on disk. |
+| `cache_size` | `-cache-size` | `2GiB` | Total size the on-disk cache (blocks and listings together) may use; `"0"` disables both. |
+| `large_file` | `-large-file` | `300MiB` | Files larger than this bypass the on-disk block cache; `"0"` disables the threshold. |
+| `thumbnails` | `-thumbnails` | `true` | Write Proton's stored previews into the freedesktop thumbnail cache. |
+| `thumbnail_dir` | `-thumbnail-dir` | `$XDG_CACHE_HOME/thumbnails` | Freedesktop thumbnail cache directory. |
+| `deny_readers` | `-deny-readers` | see [Mount](#mount) | Process names refused a read of a file above `large_file`; empty allows all. |
+| `max_uploads` | `-max-uploads` | `5` | How many files upload at once. |
+| `max_downloads` | `-max-downloads` | `8` | How many file blocks download at once. |
+| `log_level` | `-log-level` | `info` | Log verbosity: `debug`, `info`, `warn` or `error`. |
+| `log_stderr` | `-log-stderr` | `false` | Force logging to stderr instead of the systemd journal. |
+| `foreground` | `-foreground` | `false` | Stay attached to the terminal instead of detaching into the background. |
+| `hv_method` | `-hv-method` | (none) | Force a human verification method at login: `captcha`, `email` or `sms`. |
+| `no_browser` | `-no-browser` | `false` | Do not open a browser for human verification at login. |
+
+The persisted listing cache stores decrypted file and folder names on disk (under `cache_dir/listings/`, mode 0600) so a folder listed once loads instantly on the next cold start, same trade-off the session file already makes for the account password. It shares `cache_size`'s byte budget with the block cache (under `cache_dir/blocks/`); set `cache_size = "0"` to disable both. See [Troubleshooting](https://oss.lsantos.dev/proton-drive-linux-fs/troubleshooting/#logs) for where the cache files live and log levels for cache hits and misses.
+
 ## Tray
 
 ```
-proton-drive-fs tray [-mountpoint ~/ProtonDrive]
+proton-drive-fs tray [-config path] [-mountpoint ~/ProtonDrive]
 ```
 
 Runs a status icon in the system tray over StatusNotifierItem, which is what Waybar, KDE Plasma and the GNOME AppIndicator extension speak. The icon shows one of four states (no session or nothing mounted, paused, a transfer in flight, or idle and mounted), and the menu offers mount, unmount, pause, open folder, open logs, open debug logs, log in, log out, and quit. See [Tray](https://oss.lsantos.dev/proton-drive-linux-fs/tray/) for the full menu, icon states, and pause semantics.

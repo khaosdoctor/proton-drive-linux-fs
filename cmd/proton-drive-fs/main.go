@@ -21,6 +21,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/auth"
+	"github.com/khaosdoctor/proton-drive-linux-fs/internal/config"
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/drive"
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/fusefs"
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/logx"
@@ -32,7 +33,7 @@ import (
 var version = "dev"
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: proton-drive-fs <login|mount|status|unmount|tray|logout|version|about> [args]")
+	fmt.Fprintln(os.Stderr, "usage: proton-drive-fs <login|mount|status|unmount|tray|logout|version|about|config> [args]")
 }
 
 func main() {
@@ -67,6 +68,8 @@ func run(args []string) int {
 		return runVersion()
 	case "about":
 		return runAbout()
+	case "config":
+		return runConfigCmd(args[1:])
 	default:
 		usage()
 		return 2
@@ -84,12 +87,20 @@ func prompt(reader *bufio.Reader, label string) (string, error) {
 }
 
 func runLogin(args []string) int {
+	configPath := resolveConfigPath(args)
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: loading config:", err)
+		return 1
+	}
+
 	fs := flag.NewFlagSet("login", flag.ContinueOnError)
-	noBrowser := fs.Bool("no-browser", false, "do not open a browser for human verification")
-	hvMethod := fs.String("hv-method", "", "force a human verification method: captcha, email or sms")
+	fs.String("config", configPath, "path to config.toml")
+	lf := registerLoginConfigFlags(fs, cfg)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	config.ApplyFlags(fs, &cfg)
 
 	reader := bufio.NewReader(os.Stdin)
 
@@ -120,7 +131,7 @@ func runLogin(args []string) int {
 
 	var hv *auth.HumanVerificationRequired
 	if errors.As(err, &hv) {
-		session, err = verifyHuman(ctx, reader, hv, username, password, *hvMethod, !*noBrowser, promptTOTP)
+		session, err = verifyHuman(ctx, reader, hv, username, password, *lf.hvMethod, !*lf.noBrowser, promptTOTP)
 	}
 
 	if err != nil {
@@ -218,56 +229,6 @@ func verifyHuman(ctx context.Context, reader *bufio.Reader, hv *auth.HumanVerifi
 	return auth.LoginWithHV(ctx, username, password, method, auth.FormatCodeToken(destination, code), promptTOTP)
 }
 
-// defaultCacheDir returns the default on-disk block cache directory, or "" if the user
-// cache directory can't be determined (the -cache-dir flag can still override it).
-func defaultCacheDir() string {
-	base, err := os.UserCacheDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(base, "proton-drive-fs", "blocks")
-}
-
-// defaultThumbnailDir returns the freedesktop thumbnail cache directory, where file managers
-// look for previews: $XDG_CACHE_HOME/thumbnails, falling back to ~/.cache/thumbnails.
-func defaultThumbnailDir() string {
-	base, err := os.UserCacheDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(base, "thumbnails")
-}
-
-// defaultDenyReaders are the dedicated thumbnailer and indexer binaries refused a read of a
-// large file. Only processes that walk a folder on their own are listed: an application the
-// user launches to open a file, a slicer for example, must keep working.
-var defaultDenyReaders = []string{
-	"tracker-miner-fs",
-	"tracker-extract",
-	"localsearch",
-	"baloo_file",
-	"baloo_file_extractor",
-	"tumblerd",
-	"ffmpegthumbnailer",
-	"totem-video-thumbnailer",
-	"gdk-pixbuf-thumbnailer",
-	"gnome-desktop-thumbnailer",
-	"evince-thumbnailer",
-}
-
-// parseDenyReaders splits a comma-separated -deny-readers value, dropping blank entries. An
-// empty value disables the denylist.
-func parseDenyReaders(s string) []string {
-	var names []string
-	for _, name := range strings.Split(s, ",") {
-		if trimmed := strings.TrimSpace(name); trimmed != "" {
-			names = append(names, trimmed)
-		}
-	}
-
-	return names
-}
-
 // parseCacheSize parses a byte size like "512MiB", "2GiB", "100M", or a bare byte count.
 // A result <= 0 disables the cache.
 func parseCacheSize(s string) (int64, error) {
@@ -319,25 +280,30 @@ func parseLogLevel(s string) (slog.Level, error) {
 }
 
 func runMount(args []string) int {
+	configPath := resolveConfigPath(args)
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: loading config:", err)
+		return 1
+	}
+
 	fs := flag.NewFlagSet("mount", flag.ContinueOnError)
+	fs.String("config", configPath, "path to config.toml")
 	debug := fs.Bool("debug", false, "enable FUSE debug logging")
-	ttl := fs.Duration("ttl", 30*time.Second, "directory listing cache TTL")
-	poll := fs.Duration("poll", 10*time.Second, "remote change polling interval")
-	opTimeout := fs.Duration("op-timeout", 60*time.Second, "deadline for one filesystem operation's network calls; a stuck operation returns an error after this instead of hanging")
-	cacheDir := fs.String("cache-dir", defaultCacheDir(), "on-disk block cache directory")
-	cacheSize := fs.String("cache-size", "1GiB", "on-disk block cache size limit (e.g. 512MiB, 2GiB); <=0 disables it")
-	largeFile := fs.String("large-file", "300MiB", "files larger than this bypass the on-disk block cache; 0 disables")
-	thumbnails := fs.Bool("thumbnails", true, "write Proton's stored previews into the freedesktop thumbnail cache")
-	thumbnailDir := fs.String("thumbnail-dir", defaultThumbnailDir(), "freedesktop thumbnail cache directory")
-	denyReaders := fs.String("deny-readers", strings.Join(defaultDenyReaders, ","), "comma-separated process names refused a read of a file above -large-file; empty allows all")
-	maxUploads := fs.Int("max-uploads", 5, "how many files upload at once; the rest wait in line")
-	maxDownloads := fs.Int("max-downloads", 8, "how many file blocks download at once")
-	foreground := fs.Bool("foreground", false, "stay attached to the terminal instead of detaching into the background; used by the systemd unit")
-	logLevel := fs.String("log-level", "info", "log verbosity: debug, info, warn or error")
-	logStderr := fs.Bool("log-stderr", false, "force logging to stderr instead of the systemd journal; useful with -foreground")
+	mf, err := registerMountConfigFlags(fs, cfg)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 2
+	}
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	config.ApplyFlags(fs, &cfg)
+	ttl, poll, opTimeout := mf.ttl, mf.poll, mf.opTimeout
+	cacheDir, cacheSize, largeFile := mf.cacheDir, mf.cacheSize, mf.largeFile
+	thumbnails, thumbnailDir, denyReaders := mf.thumbnails, mf.thumbnailDir, mf.denyReaders
+	maxUploads, maxDownloads := mf.maxUploads, mf.maxDownloads
+	foreground, logLevel, logStderr := mf.foreground, mf.logLevel, mf.logStderr
 
 	level, err := parseLogLevel(*logLevel)
 	if err != nil {
@@ -345,11 +311,15 @@ func runMount(args []string) int {
 		return 2
 	}
 
-	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs mount <mountpoint> [-debug] [-ttl 30s] [-poll 10s] [-op-timeout 60s] [-cache-dir path] [-cache-size 1GiB] [-large-file 300MiB] [-thumbnails] [-thumbnail-dir path] [-deny-readers names] [-max-uploads 5] [-max-downloads 8] [-foreground] [-log-level info] [-log-stderr]")
+	mountpoint := cfg.Mountpoint
+	if fs.NArg() >= 1 {
+		mountpoint = fs.Arg(0)
+	}
+	if mountpoint == "" {
+		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs mount [<mountpoint>] [-config path] [-debug] [-ttl 30s] [-poll 10s] [-op-timeout 60s] [-cache-dir path] [-cache-size 2GiB] [-large-file 300MiB] [-thumbnails] [-thumbnail-dir path] [-deny-readers names] [-max-uploads 5] [-max-downloads 8] [-foreground] [-log-level info] [-log-stderr]")
+		fmt.Fprintln(os.Stderr, "mountpoint is required unless the config file sets one (see: proton-drive-fs config init)")
 		return 2
 	}
-	mountpoint := fs.Arg(0)
 
 	if !checkNotAlreadyMounted(mountpoint) {
 		return 1
@@ -381,13 +351,13 @@ func runMount(args []string) int {
 	_, stopLog := logx.Setup(logx.Options{Level: level, Tag: journalTag, ForceStderr: *logStderr})
 	defer stopLog()
 
-	cacheLimit, err := parseCacheSize(*cacheSize)
+	cacheLimit, err := parseCacheSize(cacheSize.String())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error: invalid -cache-size:", err)
 		return 2
 	}
 
-	largeFileLimit, err := parseCacheSize(*largeFile)
+	largeFileLimit, err := parseCacheSize(largeFile.String())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error: invalid -large-file:", err)
 		return 2
@@ -441,7 +411,7 @@ func runMount(args []string) int {
 		PollInterval: *poll,
 		OpTimeout:    *opTimeout,
 		Thumbnails:   thumbStore,
-		DenyReaders:  parseDenyReaders(*denyReaders),
+		DenyReaders:  config.SplitDenyReaders(*denyReaders),
 		MaxUploads:   *maxUploads,
 	}
 
@@ -963,25 +933,38 @@ func runVersion() int {
 // runStatus reports whether a mountpoint is mounted, which daemon is serving it, and whether
 // that daemon is this binary, so a stale daemon left running after a rebuild is easy to spot.
 func runStatus(args []string) int {
+	configPath := resolveConfigPath(args)
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: loading config:", err)
+		return 1
+	}
+
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	fs.String("config", configPath, "path to config.toml")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	config.ApplyFlags(fs, &cfg)
 	if fs.NArg() > 1 {
-		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs status [mountpoint]")
+		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs status [-config path] [mountpoint]")
 		return 2
 	}
 
-	mountpoint := statusMountpoint(fs.Arg(0))
+	mountpoint := statusMountpoint(fs.Arg(0), cfg.Mountpoint)
 	printStatus(mountpoint)
 	return 0
 }
 
 // statusMountpoint resolves the mountpoint "status" reports on: the argument when given, else
-// the tray's remembered mountpoint, else the default under the home directory.
-func statusMountpoint(arg string) string {
+// the config file's mountpoint, else the tray's remembered mountpoint, else the default under the
+// home directory.
+func statusMountpoint(arg, cfgMountpoint string) string {
 	if arg != "" {
 		return absOrSelf(arg)
+	}
+	if cfgMountpoint != "" {
+		return absOrSelf(cfgMountpoint)
 	}
 	if saved := tray.LoadMountpoint(); saved != "" {
 		return saved
