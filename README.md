@@ -1,5 +1,7 @@
 # proton-drive-linux-fs
 
+Docs: https://oss.lsantos.dev/proton-drive-linux-fs/
+
 FUSE virtual filesystem for Proton Drive on Linux.
 
 ## What it does
@@ -8,20 +10,12 @@ proton-drive-fs mounts Proton Drive as a local folder through FUSE. Files and fo
 
 ## Status
 
-Early and unofficial. Not affiliated with, endorsed by, or supported by Proton AG. The tested surface is small: basic read, write, create, delete, rename and move operations on one Proton Drive share. Expect bugs. Report them on the [issue tracker](https://github.com/khaosdoctor/proton-drive-linux-fs/issues).
+Early and unofficial. Not affiliated with, endorsed by, or supported by Proton AG. Used live, on one Proton Drive share: login, mount, read, create, and rename. Write, delete, move, the tray, and thumbnail previews have not seen the same real-world use yet. Expect bugs. Report them on the [issue tracker](https://github.com/khaosdoctor/proton-drive-linux-fs/issues).
 
 ## Install
 
-From source:
-
-```
-git clone https://github.com/khaosdoctor/proton-drive-linux-fs
-cd proton-drive-linux-fs
-make build
-make install
-```
-
-The `make build` command places the binary in the repository root. Run `make help` to see all available targets.
+Four ways to get the binary. Full requirements and the container run command are in
+the [install docs](https://oss.lsantos.dev/proton-drive-linux-fs/install/).
 
 From a [GitHub Release](https://github.com/khaosdoctor/proton-drive-linux-fs/releases):
 
@@ -35,6 +29,18 @@ With Go:
 ```
 go install github.com/khaosdoctor/proton-drive-linux-fs/cmd/proton-drive-fs@latest
 ```
+
+From source:
+
+```
+git clone https://github.com/khaosdoctor/proton-drive-linux-fs
+cd proton-drive-linux-fs
+make build
+make install
+```
+
+`make install` also sets up the desktop entry and the systemd user units. Run
+`make help` to see every target.
 
 Container image:
 
@@ -90,9 +96,7 @@ If the mountpoint does not exist, mount says so and creates it. By default mount
 
 ### Previews
 
-Proton stores a small thumbnail next to each file it has one for. When a folder is listed, the mount downloads those thumbnails and writes them into the freedesktop thumbnail cache (the directory `-thumbnail-dir` points at), so file managers show previews without opening the files themselves. A thumbnail is a few kilobytes regardless of how large the file is, and it is fetched in the background, so listing a folder is not held up by it.
-
-Some desktops also run thumbnailers and search indexers that open every file they find. On a network filesystem that means downloading everything in a folder just to look at it. Files above `-large-file` are refused to the processes in `-deny-readers`, which are the dedicated thumbnailer and indexer binaries; those opens fail with a permission error and nothing is downloaded. Applications the user launches to open a file are not on the list and are unaffected.
+Proton stores a small thumbnail next to each file it has one for; the mount writes it into the freedesktop thumbnail cache when a folder is listed, so file managers show previews without opening the file itself. Thumbnailers and search indexers that would otherwise open every file in a folder are refused a read of anything above `-large-file`. See [How it works](https://oss.lsantos.dev/proton-drive-linux-fs/how-it-works/#previews) for the full explanation.
 
 ### Unmount
 
@@ -129,55 +133,13 @@ systemctl --user enable --now proton-drive-fs-tray
 
 Both units run the binary from `~/.local/bin`; edit `ExecStart` if yours lives elsewhere. The mount unit runs `mount -foreground`; either way the daemon logs straight to the journal under the identifier `proton-drive-fs`, see [Logs](#logs).
 
-## Logs
-
-The daemon logs structured entries to the systemd user journal under the identifier `proton-drive-fs`, asynchronously so a slow or backed-up log write never stalls a filesystem operation. When there's no journal to write to (no `systemd`, or `-log-stderr`), it falls back to plain text on stderr, which lands in `$XDG_STATE_HOME/proton-drive-fs/mount.log` (falling back to `~/.local/state/proton-drive-fs/mount.log`) for a detached mount.
-
-Two levels matter day to day:
-
-- **info**: human-readable, one line per event: mounting and unmounting, opening a file, uploading and uploaded (with size and how long it took), creating a folder, renaming, moving, deleting, a remote change applied to a directory, a thumbnail written, pause and resume, login and logout, a token refresh, and the version and pid at startup.
-- **debug**: the technical detail behind those: block-level cache hits and misses and decrypt timing on reads, API call names and how long they took, listing page counts, keyring unlocks, XAttr resolution, volume event ids, waits on an in-flight fetch another goroutine already started, semaphore waits over 100ms, watchdog checks, and thumbnail queue drops.
-
-Warnings cover recoverable oddities: a denied reader open, a retry, dropped log records, a stale daemon. Errors are operations that failed and were returned to the kernel or the user, carrying the underlying error. Nothing here ever logs a token, password, key material, or file content; paths and file names are fine and do show up.
-
-Read the log with:
-
-```
-journalctl --user -t proton-drive-fs -f       # follow, info and above
-journalctl --user -t proton-drive-fs -p debug -f   # follow, debug and above
-journalctl --user -t proton-drive-fs -o verbose -n 20   # see every field on the last 20 entries
-```
-
-`-o verbose` is worth knowing about: every attr on a log line (path, size, elapsed, err, and so on) is a journal field, uppercased with dots turned into underscores (`op` becomes `OP`, `cache.hit` becomes `CACHE_HIT`), and the plain `journalctl` view hides them.
-
-`-log-level` on `mount` controls what gets logged, `debug` down to `error` (default `info`); `-log-stderr` forces the stderr/file fallback even when the journal is available, which is handy with `-foreground` at a terminal.
-
 ## Tray
 
 ```
 proton-drive-fs tray [-mountpoint ~/ProtonDrive]
 ```
 
-Runs a status icon in the system tray over StatusNotifierItem, which is what Waybar, KDE Plasma and the GNOME AppIndicator extension speak. With no `-mountpoint` the tray reuses the last mountpoint it was given and falls back to `~/ProtonDrive`; the choice is stored in `$XDG_CONFIG_HOME/proton-drive-fs/tray.json` so the menu keeps working after a restart.
-
-The icon is a cloud in one of four states, picked in this order:
-
-- Hollow outline: no saved session, or nothing mounted. The status line in the menu says which of the two it is.
-- Two bars in the corner: polling is paused.
-- A dot in the corner: a download or an upload is in flight.
-- Solid: mounted, logged in, nothing moving.
-
-While uploads are queued the status line counts them, as in `Mounted at ~/ProtonDrive, syncing 312/10000`, and appends `, N failed` when some of them could not be uploaded. The counts go back to zero half a minute after the queue drains.
-
-The menu holds a status line (`Mounted at <path>`, `Not mounted` or `Not logged in`), then items shown only when they apply: `Mount` when logged in but not mounted, `Unmount` and `Restart mount` when mounted, `Pause syncing` or `Resume syncing` when mounted, `Open folder` when mounted, `Open logs`, `Open debug logs`, `Log in` when logged out, `Log out` when logged in, and `Quit`. `Mount` and `Unmount` run this same binary, so a mount started from the menu is the same detached mount you get from a shell and it survives the tray closing. `Quit` only closes the icon; it never unmounts.
-
-When the status line gets a ` (daemon X, restart needed)` suffix, the running daemon is an older build than the tray itself, usually because a rebuild's earlier unmount failed as busy; click `Restart mount` to unmount and remount with the current binary.
-
-`Log in` needs a terminal because it prompts for the password. The tray starts the first terminal it finds on `PATH`, trying `$TERMINAL` first and then `x-terminal-emulator`, `kitty`, `alacritty`, `foot`, `gnome-terminal`, `konsole`, `xterm`. When none of them is installed, the status line shows the command to run yourself for ten seconds. `Open logs` follows the journal in a terminal when the mount logs there, and otherwise opens the log file with `xdg-open`; `Open debug logs` does the same at debug verbosity (`journalctl --user -t proton-drive-fs -p debug -f`).
-
-Pause stops one thing: the poll of Proton's event feed. Remote changes stop reaching the mount until you resume, while reads and writes keep working throughout. It is a marker file at `$XDG_RUNTIME_DIR/proton-drive-fs/paused` (falling back to `$XDG_STATE_HOME/proton-drive-fs/paused`) that the mount checks on every poll tick, so it also applies to a mount the tray did not start.
-
-For the syncing state the mount writes `$XDG_RUNTIME_DIR/proton-drive-fs/status.json` (same fallback) once a second with its pid, version, and the number of transfers in flight. A snapshot older than ten seconds counts as no mount running; whether the filesystem is mounted always comes from `/proc/self/mounts` instead.
+Runs a status icon in the system tray over StatusNotifierItem, which is what Waybar, KDE Plasma and the GNOME AppIndicator extension speak. The icon shows one of four states (no session or nothing mounted, paused, a transfer in flight, or idle and mounted), and the menu offers mount, unmount, pause, open folder, open logs, open debug logs, log in, log out, and quit. See [Tray](https://oss.lsantos.dev/proton-drive-linux-fs/tray/) for the full menu, icon states, and pause semantics.
 
 ### Desktop entry
 
@@ -196,11 +158,15 @@ To start the tray with the session instead, use the `proton-drive-fs-tray.servic
 
 ## How it works
 
-The auth layer logs in against Proton's API, handling two-factor codes and human verification challenges. It derives the account's key password from the login password and Proton's stored salts, then persists everything needed to restore the session, including that key password, to the local session file.
+Three layers: auth logs in against Proton's API and derives the key password that unlocks the drive's encryption keys; drive wraps Proton's Drive API into a tree of files and folders and polls the event feed for remote changes; FUSE publishes that tree as a mount with go-fuse, reading files lazily in blocks and buffering writes locally until the file closes. See [How it works](https://oss.lsantos.dev/proton-drive-linux-fs/how-it-works/) for the full description of each layer.
 
-The drive layer wraps Proton's Drive API into a tree of nodes (files and folders), exposing operations to list children, open a file for streamed reading, upload a new revision, create a folder, move, and trash. It also polls Proton's event feed and turns raw events into a normalized stream the FUSE layer reacts to.
+## Logs
 
-The FUSE layer publishes that tree as a mounted filesystem with go-fuse. Directory listings are cached per folder for the configured TTL and refetched on expiry or on a matching remote event. Opening a file for reading streams and caches its blocks on demand instead of downloading the whole file up front. Opening a file for writing buffers the new content to a local temp file and uploads it as a new revision when the file closes.
+The daemon logs structured entries to the systemd user journal under `proton-drive-fs`, asynchronously so a slow or backed-up log write never stalls a filesystem operation. `-log-stderr`, or no journal to write to, falls back to a plain log file instead. See [Troubleshooting](https://oss.lsantos.dev/proton-drive-linux-fs/troubleshooting/#logs) for levels, reading commands, and the file fallback.
+
+## Troubleshooting
+
+CAPTCHA and locked-account prompts during login, a mountpoint stuck "busy" on unmount, and a stale daemon left running after a rebuild are the most common issues; see [Troubleshooting](https://oss.lsantos.dev/proton-drive-linux-fs/troubleshooting/) for the fix for each, plus where the session, cache, and log files live.
 
 ## Docker
 

@@ -1,0 +1,57 @@
+site_name: proton-drive-linux-fs
+site_description: FUSE virtual filesystem for Proton Drive on Linux.
+site_url: https://oss.lsantos.dev/proton-drive-linux-fs/
+repo_url: https://github.com/khaosdoctor/proton-drive-linux-fs
+repo_name: khaosdoctor/proton-drive-linux-fs
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  logo: assets/logo.svg
+  favicon: assets/logo.svg
+  font: false
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.top
+    - navigation.instant
+    - content.code.copy
+    - content.action.edit
+
+extra_css:
+  - stylesheets/extra.css
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - tables
+  - toc:
+      permalink: true
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - Install: install.md
+  - Usage: usage.md
+  - Configuration: configuration.md
+  - Tray: tray.md
+  - How it works: how-it-works.md
+  - Troubleshooting: troubleshooting.md
+  - FAQ: faq.md
+  - Contributing: contributing.md
