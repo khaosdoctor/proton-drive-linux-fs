@@ -6,6 +6,7 @@ package tray
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -67,10 +68,12 @@ func icon(s State) []byte {
 }
 
 // Options is what the tray needs from the command layer: which mountpoint it manages, where
-// the fallback log file is, and how to check whether the mount and the session are live.
+// the fallback log file is, this build's version, and how to check whether the mount and the
+// session are live.
 type Options struct {
 	Mountpoint string
 	LogPath    string
+	Version    string
 	Mounted    func() bool
 	LoggedIn   func() bool
 }
@@ -82,10 +85,21 @@ type snapshot struct {
 	paused    bool
 	transfers int64
 	fresh     bool
+
+	// ownVersion is this tray's build; daemonVersion is the running daemon's, from the status
+	// file. A mismatch means a rebuild left an older daemon running.
+	ownVersion    string
+	daemonVersion string
 }
 
 func (sn snapshot) state() State {
 	return pickState(sn.loggedIn, sn.mounted, sn.paused, sn.transfers, sn.fresh)
+}
+
+// daemonMismatch reports whether the daemon serving the mount is a different build than this
+// tray, trustworthy only while the status snapshot is fresh.
+func (sn snapshot) daemonMismatch() bool {
+	return sn.fresh && sn.daemonVersion != "" && sn.ownVersion != "" && sn.daemonVersion != sn.ownVersion
 }
 
 func (sn snapshot) statusLine(mountpoint string) string {
@@ -97,12 +111,17 @@ func (sn snapshot) statusLine(mountpoint string) string {
 	}
 
 	line := "Mounted at " + mountpoint
-	if sn.paused {
-		return line + " (paused)"
+	switch {
+	case sn.paused:
+		line += " (paused)"
+	case sn.fresh && sn.transfers > 0:
+		line += " (syncing)"
 	}
-	if sn.fresh && sn.transfers > 0 {
-		return line + " (syncing)"
+
+	if sn.daemonMismatch() {
+		line += fmt.Sprintf(" (daemon %s, restart needed)", sn.daemonVersion)
 	}
+
 	return line
 }
 
@@ -113,6 +132,7 @@ type app struct {
 
 	status               *systray.MenuItem
 	mount, unmount       *systray.MenuItem
+	restart              *systray.MenuItem
 	pause, resume        *systray.MenuItem
 	openFolder, openLogs *systray.MenuItem
 	login, logout        *systray.MenuItem
@@ -135,6 +155,7 @@ func (a *app) onReady() {
 
 	a.mount = systray.AddMenuItem("Mount", "Mount Proton Drive at "+a.opts.Mountpoint)
 	a.unmount = systray.AddMenuItem("Unmount", "Unmount "+a.opts.Mountpoint)
+	a.restart = systray.AddMenuItem("Restart mount", "Unmount and remount, to pick up a rebuild")
 	a.pause = systray.AddMenuItem("Pause syncing", "Stop polling Proton for remote changes")
 	a.resume = systray.AddMenuItem("Resume syncing", "Poll Proton for remote changes again")
 	a.openFolder = systray.AddMenuItem("Open folder", "Open "+a.opts.Mountpoint+" in the file manager")
@@ -147,6 +168,7 @@ func (a *app) onReady() {
 
 	onClick(a.mount, func() { a.runSelf("mount", a.opts.Mountpoint) })
 	onClick(a.unmount, func() { a.runSelf("unmount", a.opts.Mountpoint) })
+	onClick(a.restart, a.restartMount)
 	onClick(a.pause, func() { a.setPaused(true) })
 	onClick(a.resume, func() { a.setPaused(false) })
 	onClick(a.openFolder, a.showFolder)
@@ -185,11 +207,13 @@ func (a *app) poll() {
 
 		st, ok := state.ReadStatus()
 		a.apply(snapshot{
-			loggedIn:  loggedIn,
-			mounted:   a.opts.Mounted(),
-			paused:    state.Paused(),
-			transfers: st.Transfers,
-			fresh:     ok && st.Fresh(),
+			loggedIn:      loggedIn,
+			mounted:       a.opts.Mounted(),
+			paused:        state.Paused(),
+			transfers:     st.Transfers,
+			fresh:         ok && st.Fresh(),
+			ownVersion:    a.opts.Version,
+			daemonVersion: st.Version,
 		})
 
 		select {
@@ -215,6 +239,7 @@ func (a *app) apply(sn snapshot) {
 	v := visibilityFor(sn.loggedIn, sn.mounted)
 	showIf(a.mount, v.Mount)
 	showIf(a.unmount, v.Unmount)
+	showIf(a.restart, v.Restart)
 	showIf(a.pause, v.Pause && !sn.paused)
 	showIf(a.resume, v.Pause && sn.paused)
 	showIf(a.openFolder, v.OpenFolder)
@@ -223,13 +248,14 @@ func (a *app) apply(sn snapshot) {
 }
 
 type menuVisibility struct {
-	Mount, Unmount, Pause, OpenFolder, Login, Logout bool
+	Mount, Unmount, Restart, Pause, OpenFolder, Login, Logout bool
 }
 
 func visibilityFor(loggedIn, mounted bool) menuVisibility {
 	return menuVisibility{
 		Mount:      loggedIn && !mounted,
 		Unmount:    mounted,
+		Restart:    mounted,
 		Pause:      mounted,
 		OpenFolder: mounted,
 		Login:      !loggedIn,
@@ -281,6 +307,13 @@ func (a *app) runSelf(args ...string) {
 	}
 
 	a.signal()
+}
+
+// restartMount unmounts and remounts, for when the running daemon is an older build than this
+// tray: a plain "mount" would refuse because the mountpoint is still busy with the old one.
+func (a *app) restartMount() {
+	a.runSelf("unmount", a.opts.Mountpoint)
+	a.runSelf("mount", a.opts.Mountpoint)
 }
 
 // firstLine returns s up to its first newline, or "(no output)" when there was none.

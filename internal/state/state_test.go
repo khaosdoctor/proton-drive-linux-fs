@@ -69,7 +69,7 @@ func TestStatusRoundTrip(t *testing.T) {
 		t.Fatal("no status should be readable yet")
 	}
 
-	want := Status{Mountpoint: "/home/u/ProtonDrive", Transfers: 2, Paused: true, Updated: time.Now().Unix()}
+	want := Status{Mountpoint: "/home/u/ProtonDrive", Version: "1.2.3", PID: 4242, Transfers: 2, Paused: true, Updated: time.Now().Unix()}
 	if err := WriteStatus(want); err != nil {
 		t.Fatal(err)
 	}

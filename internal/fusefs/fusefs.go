@@ -28,6 +28,10 @@ const defaultOpTimeout = 60 * time.Second
 
 // Options configures the mount.
 type Options struct {
+	// Version is this binary's version, logged at startup and published in the status
+	// snapshot so a stale daemon left running after a rebuild is easy to spot.
+	Version string
+
 	Debug        bool
 	TTL          time.Duration
 	PollInterval time.Duration
@@ -85,8 +89,10 @@ func Mount(ctx context.Context, mountpoint string, c *drive.Client, root *drive.
 		return err
 	}
 
+	log.Printf("proton-drive-fs %s (pid %d) mounting %s", opts.Version, os.Getpid(), mountpoint)
+
 	go c.Events(ctx, opts.PollInterval, st.handle, state.Paused)
-	go publishStatus(ctx, mountpoint, c)
+	go publishStatus(ctx, mountpoint, opts.Version, c)
 	go st.watchdog(ctx)
 
 	if st.thumbs != nil {
@@ -136,15 +142,16 @@ func Mount(ctx context.Context, mountpoint string, c *drive.Client, root *drive.
 // publishStatus writes a status snapshot for the tray once a second, and only when something
 // changed, so a mount nobody watches costs one comparison per second. The snapshot is removed
 // on shutdown; a reader that finds a stale one treats the mount as gone.
-func publishStatus(ctx context.Context, mountpoint string, c *drive.Client) {
+func publishStatus(ctx context.Context, mountpoint string, version string, c *drive.Client) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	defer state.RemoveStatus()
 
 	var last state.Status
+	pid := os.Getpid()
 
 	for {
-		current := state.Status{Mountpoint: mountpoint, Transfers: c.Transfers(), Paused: state.Paused()}
+		current := state.Status{Mountpoint: mountpoint, Version: version, PID: pid, Transfers: c.Transfers(), Paused: state.Paused()}
 		if current != last {
 			last = current
 			current.Updated = time.Now().Unix()

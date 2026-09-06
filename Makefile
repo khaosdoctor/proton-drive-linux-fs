@@ -3,9 +3,10 @@ PKG := ./cmd/proton-drive-fs
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 PREFIX ?= $(HOME)/.local
+MP ?= $(HOME)/ProtonDrive
 GOLANGCI := go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
 
-.PHONY: all build test race lint check generate install uninstall clean help
+.PHONY: all build test race lint check generate install uninstall clean restart status help
 
 all: build
 
@@ -52,6 +53,14 @@ clean:
 	rm -f $(BIN)
 	rm -rf bin/
 
+restart:
+	-./$(BIN) unmount $(MP)
+	$(MAKE) build
+	./$(BIN) mount $(MP)
+
+status:
+	./$(BIN) status $(MP)
+
 help:
 	@printf "Usage: make [target]\n\nTargets:\n"
 	@printf "  all\t\tBuild the project (default)\n"
@@ -64,4 +73,6 @@ help:
 	@printf "  install\tBuild and install to \$$PREFIX (default: \$$HOME/.local)\n"
 	@printf "  uninstall\tRemove installed files\n"
 	@printf "  clean\t\tRemove built binary and bin/ directory\n"
+	@printf "  restart\tUnmount, rebuild, and remount MP (default: \$$HOME/ProtonDrive)\n"
+	@printf "  status\tShow proton-drive-fs status for MP (default: \$$HOME/ProtonDrive)\n"
 	@printf "  help\t\tShow this message\n"

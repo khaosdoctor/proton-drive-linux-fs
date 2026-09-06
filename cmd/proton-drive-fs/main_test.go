@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"slices"
 	"testing"
+
+	"github.com/khaosdoctor/proton-drive-linux-fs/internal/state"
 )
 
 func TestParseDenyReaders(t *testing.T) {
@@ -151,6 +153,42 @@ func TestMountedAt(t *testing.T) {
 			got := mountedAt(tt.procMounts, tt.mountpoint)
 			if got != tt.want {
 				t.Errorf("mountedAt(%q, %q) = %v, want %v", tt.procMounts, tt.mountpoint, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDescribeRunning(t *testing.T) {
+	tests := []struct {
+		name string
+		st   *state.Status
+		this string
+		want string
+	}{
+		{
+			name: "nil status",
+			st:   nil,
+			this: "1.2.0",
+			want: "; this binary is version 1.2.0",
+		},
+		{
+			name: "same version",
+			st:   &state.Status{PID: 4242, Version: "1.2.0"},
+			this: "1.2.0",
+			want: " (pid 4242, daemon version 1.2.0); this binary is version 1.2.0",
+		},
+		{
+			name: "different version",
+			st:   &state.Status{PID: 4242, Version: "1.1.0"},
+			this: "1.2.0",
+			want: " (pid 4242, daemon version 1.1.0); this binary is version 1.2.0",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := describeRunning(tt.st, tt.this); got != tt.want {
+				t.Errorf("describeRunning() = %q, want %q", got, tt.want)
 			}
 		})
 	}

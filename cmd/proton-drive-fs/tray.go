@@ -31,6 +31,7 @@ func runTray(args []string) int {
 	tray.Run(tray.Options{
 		Mountpoint: mp,
 		LogPath:    logPath,
+		Version:    version,
 		Mounted:    func() bool { return isMounted(mp) },
 		LoggedIn:   func() bool { _, err := auth.Load(); return err == nil },
 	})

@@ -18,25 +18,25 @@ func TestVisibilityFor(t *testing.T) {
 			"logged out, not mounted",
 			false,
 			false,
-			menuVisibility{Mount: false, Unmount: false, Pause: false, OpenFolder: false, Login: true, Logout: false},
+			menuVisibility{Mount: false, Unmount: false, Restart: false, Pause: false, OpenFolder: false, Login: true, Logout: false},
 		},
 		{
 			"logged out, mounted",
 			false,
 			true,
-			menuVisibility{Mount: false, Unmount: true, Pause: true, OpenFolder: true, Login: true, Logout: false},
+			menuVisibility{Mount: false, Unmount: true, Restart: true, Pause: true, OpenFolder: true, Login: true, Logout: false},
 		},
 		{
 			"logged in, not mounted",
 			true,
 			false,
-			menuVisibility{Mount: true, Unmount: false, Pause: false, OpenFolder: false, Login: false, Logout: true},
+			menuVisibility{Mount: true, Unmount: false, Restart: false, Pause: false, OpenFolder: false, Login: false, Logout: true},
 		},
 		{
 			"logged in, mounted",
 			true,
 			true,
-			menuVisibility{Mount: false, Unmount: true, Pause: true, OpenFolder: true, Login: false, Logout: true},
+			menuVisibility{Mount: false, Unmount: true, Restart: true, Pause: true, OpenFolder: true, Login: false, Logout: true},
 		},
 	}
 
@@ -166,6 +166,21 @@ func TestStatusLine(t *testing.T) {
 		{"mounted", snapshot{loggedIn: true, mounted: true}, "Mounted at /m"},
 		{"paused", snapshot{loggedIn: true, mounted: true, paused: true}, "Mounted at /m (paused)"},
 		{"syncing", snapshot{loggedIn: true, mounted: true, transfers: 2, fresh: true}, "Mounted at /m (syncing)"},
+		{
+			"daemon version mismatch",
+			snapshot{loggedIn: true, mounted: true, fresh: true, ownVersion: "1.2.0", daemonVersion: "1.1.0"},
+			"Mounted at /m (daemon 1.1.0, restart needed)",
+		},
+		{
+			"stale snapshot hides the mismatch",
+			snapshot{loggedIn: true, mounted: true, fresh: false, ownVersion: "1.2.0", daemonVersion: "1.1.0"},
+			"Mounted at /m",
+		},
+		{
+			"same version, no hint",
+			snapshot{loggedIn: true, mounted: true, fresh: true, ownVersion: "1.2.0", daemonVersion: "1.2.0"},
+			"Mounted at /m",
+		},
 	}
 
 	for _, tt := range tests {

@@ -17,6 +17,8 @@ const StaleAfter = 10 * time.Second
 // Status is the snapshot the mount process publishes once per second.
 type Status struct {
 	Mountpoint string `json:"mountpoint"`
+	Version    string `json:"version"`
+	PID        int    `json:"pid"`
 	Transfers  int64  `json:"transfers"`
 	Paused     bool   `json:"paused"`
 	Updated    int64  `json:"updated"`

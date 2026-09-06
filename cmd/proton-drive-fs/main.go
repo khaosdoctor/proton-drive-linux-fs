@@ -22,13 +22,15 @@ import (
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/auth"
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/drive"
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/fusefs"
+	"github.com/khaosdoctor/proton-drive-linux-fs/internal/state"
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/thumbs"
+	"github.com/khaosdoctor/proton-drive-linux-fs/internal/tray"
 )
 
 var version = "dev"
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: proton-drive-fs <login|mount|unmount|tray|logout|version> [args]")
+	fmt.Fprintln(os.Stderr, "usage: proton-drive-fs <login|mount|status|unmount|tray|logout|version> [args]")
 }
 
 func main() {
@@ -46,6 +48,8 @@ func run(args []string) int {
 		return runLogin(args[1:])
 	case "mount":
 		return runMount(args[1:])
+	case "status":
+		return runStatus(args[1:])
 	case "unmount":
 		return runUnmount(args[1:])
 	case "tray":
@@ -311,6 +315,10 @@ func runMount(args []string) int {
 	}
 	mountpoint := fs.Arg(0)
 
+	if !checkNotAlreadyMounted(mountpoint) {
+		return 1
+	}
+
 	stat, err := os.Stat(mountpoint)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		fmt.Fprintf(os.Stderr, "error: checking mountpoint: %v\n", err)
@@ -385,6 +393,7 @@ func runMount(args []string) int {
 	fmt.Printf("mounting %s; unmount with: proton-drive-fs unmount %s\n", mountpoint, mountpoint)
 
 	opts := fusefs.Options{
+		Version:      version,
 		Debug:        *debug,
 		TTL:          *ttl,
 		PollInterval: *poll,
@@ -399,6 +408,40 @@ func runMount(args []string) int {
 	}
 
 	return 0
+}
+
+// checkNotAlreadyMounted refuses to proceed when mountpoint is already mounted by us. Without
+// this, a rebuild whose unmount failed as busy leaves the old daemon serving the mount while the
+// new binary reports success without ever replacing it. It prints which daemon is running, when
+// the status file says so, and how to unmount it.
+func checkNotAlreadyMounted(mountpoint string) bool {
+	absMountpoint, err := filepath.Abs(mountpoint)
+	if err != nil {
+		absMountpoint = mountpoint
+	}
+
+	mounts, err := os.ReadFile("/proc/self/mounts")
+	if err != nil || !mountedAt(string(mounts), absMountpoint) {
+		return true
+	}
+
+	var running *state.Status
+	if st, ok := state.ReadStatus(); ok && st.Fresh() {
+		running = &st
+	}
+
+	fmt.Fprintf(os.Stderr, "error: %s is already mounted%s. Run: proton-drive-fs unmount %s\n", mountpoint, describeRunning(running, version), mountpoint)
+	return false
+}
+
+// describeRunning formats the clause of the mount guard's error message between "is already
+// mounted" and the trailing "Run: ...": the running daemon's pid and version when st is fresh,
+// otherwise nothing beyond this binary's own version.
+func describeRunning(st *state.Status, thisVersion string) string {
+	if st == nil {
+		return fmt.Sprintf("; this binary is version %s", thisVersion)
+	}
+	return fmt.Sprintf(" (pid %d, daemon version %s); this binary is version %s", st.PID, st.Version, thisVersion)
 }
 
 func detachedArgs(args []string) []string {
@@ -869,4 +912,64 @@ func runLogout() int {
 func runVersion() int {
 	fmt.Println(version)
 	return 0
+}
+
+// runStatus reports whether a mountpoint is mounted, which daemon is serving it, and whether
+// that daemon is this binary, so a stale daemon left running after a rebuild is easy to spot.
+func runStatus(args []string) int {
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 1 {
+		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs status [mountpoint]")
+		return 2
+	}
+
+	mountpoint := statusMountpoint(fs.Arg(0))
+	printStatus(mountpoint)
+	return 0
+}
+
+// statusMountpoint resolves the mountpoint "status" reports on: the argument when given, else
+// the tray's remembered mountpoint, else the default under the home directory.
+func statusMountpoint(arg string) string {
+	if arg != "" {
+		return absOrSelf(arg)
+	}
+	if saved := tray.LoadMountpoint(); saved != "" {
+		return saved
+	}
+	return tray.DefaultMountpoint()
+}
+
+func printStatus(mountpoint string) {
+	fmt.Printf("mounted: %s\n", yesNo(isMounted(mountpoint)))
+
+	st, ok := state.ReadStatus()
+	fresh := ok && st.Fresh()
+	if fresh {
+		fmt.Printf("daemon: pid %d version %s\n", st.PID, st.Version)
+	} else {
+		fmt.Println("daemon: unknown")
+	}
+	fmt.Printf("binary: version %s\n", version)
+
+	var transfers int64
+	if fresh {
+		transfers = st.Transfers
+	}
+	fmt.Printf("transfers: %d\n", transfers)
+	fmt.Printf("paused: %s\n", yesNo(state.Paused()))
+
+	if fresh && st.Version != version {
+		fmt.Printf("warning: the running daemon is not this binary; run: proton-drive-fs unmount %s && proton-drive-fs mount %s\n", mountpoint, mountpoint)
+	}
+}
+
+func yesNo(b bool) string {
+	if b {
+		return "yes"
+	}
+	return "no"
 }

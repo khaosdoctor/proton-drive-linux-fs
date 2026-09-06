@@ -48,7 +48,7 @@ Requirements: Linux, FUSE 3 (the `fuse3` package on most distributions), and acc
 
 ## Usage
 
-proton-drive-fs is one binary with six subcommands: `login`, `mount`, `unmount`, `tray`, `logout`, `version`.
+proton-drive-fs is one binary with seven subcommands: `login`, `mount`, `status`, `unmount`, `tray`, `logout`, `version`.
 
 ### Log in
 
@@ -82,6 +82,8 @@ If the mountpoint does not exist, mount says so and creates it. By default mount
 - `-deny-readers` (default: `tracker-miner-fs,tracker-extract,localsearch,baloo_file,baloo_file_extractor,tumblerd,ffmpegthumbnailer,totem-video-thumbnailer,gdk-pixbuf-thumbnailer,gnome-desktop-thumbnailer,evince-thumbnailer`): comma-separated process names refused a read of a file above `-large-file`. Passing a value replaces the default list; `-deny-readers ""` turns the refusal off.
 - `-foreground` (default: false): stay attached to the terminal and log to stderr; used by the systemd unit.
 
+`mount` refuses to attach to a mountpoint that is already mounted, printing the running daemon's pid and version when the status file has them, so a rebuild whose earlier unmount failed as busy never gets mistaken for actually running the new binary; `make restart` (optionally `MP=<mountpoint>`, default `~/ProtonDrive`) unmounts, rebuilds, and remounts in one step.
+
 ### Previews
 
 Proton stores a small thumbnail next to each file it has one for. When a folder is listed, the mount downloads those thumbnails and writes them into the freedesktop thumbnail cache (the directory `-thumbnail-dir` points at), so file managers show previews without opening the files themselves. A thumbnail is a few kilobytes regardless of how large the file is, and it is fetched in the background, so listing a folder is not held up by it.
@@ -95,6 +97,14 @@ proton-drive-fs unmount [-force] [-wait 5s] <mountpoint>
 ```
 
 Runs `fusermount3 -u` (or `fusermount -u` if `fusermount3` is not on `PATH`); if the mountpoint is busy, it retries every 500ms for up to `-wait` (default 5s). If it is still busy after that, it falls back to a lazy unmount, which detaches the mount right away and lets the kernel drop it once every process still using it lets go, and prints the pid and command name of each of those processes. When the daemon has died or deadlocked and programs are stuck on the mount, `-force` lazily unmounts and aborts the kernel-side FUSE connection so blocked programs get errors instead of hanging; it needs no root for mounts you own.
+
+### Status
+
+```
+proton-drive-fs status [mountpoint]
+```
+
+Prints whether the mountpoint is mounted, the running daemon's pid and version, this binary's version, transfers in flight, and whether syncing is paused; with a version mismatch it also prints the unmount-then-mount command to fix it. With no argument it uses the tray's remembered mountpoint, falling back to `~/ProtonDrive`.
 
 ### Log out
 
@@ -130,13 +140,15 @@ The icon is a cloud in one of four states, picked in this order:
 - A dot in the corner: a download or an upload is in flight.
 - Solid: mounted, logged in, nothing moving.
 
-The menu holds a status line (`Mounted at <path>`, `Not mounted` or `Not logged in`), then items shown only when they apply: `Mount` when logged in but not mounted, `Unmount` when mounted, `Pause syncing` or `Resume syncing` when mounted, `Open folder` when mounted, `Open logs`, `Log in` when logged out, `Log out` when logged in, and `Quit`. `Mount` and `Unmount` run this same binary, so a mount started from the menu is the same detached mount you get from a shell and it survives the tray closing. `Quit` only closes the icon; it never unmounts.
+The menu holds a status line (`Mounted at <path>`, `Not mounted` or `Not logged in`), then items shown only when they apply: `Mount` when logged in but not mounted, `Unmount` and `Restart mount` when mounted, `Pause syncing` or `Resume syncing` when mounted, `Open folder` when mounted, `Open logs`, `Log in` when logged out, `Log out` when logged in, and `Quit`. `Mount` and `Unmount` run this same binary, so a mount started from the menu is the same detached mount you get from a shell and it survives the tray closing. `Quit` only closes the icon; it never unmounts.
+
+When the status line gets a ` (daemon X, restart needed)` suffix, the running daemon is an older build than the tray itself, usually because a rebuild's earlier unmount failed as busy; click `Restart mount` to unmount and remount with the current binary.
 
 `Log in` needs a terminal because it prompts for the password. The tray starts the first terminal it finds on `PATH`, trying `$TERMINAL` first and then `x-terminal-emulator`, `kitty`, `alacritty`, `foot`, `gnome-terminal`, `konsole`, `xterm`. When none of them is installed, the status line shows the command to run yourself for ten seconds. `Open logs` follows the journal in a terminal when the mount logs there, and otherwise opens the log file with `xdg-open`.
 
 Pause stops one thing: the poll of Proton's event feed. Remote changes stop reaching the mount until you resume, while reads and writes keep working throughout. It is a marker file at `$XDG_RUNTIME_DIR/proton-drive-fs/paused` (falling back to `$XDG_STATE_HOME/proton-drive-fs/paused`) that the mount checks on every poll tick, so it also applies to a mount the tray did not start.
 
-For the syncing state the mount writes `$XDG_RUNTIME_DIR/proton-drive-fs/status.json` (same fallback) once a second with the number of transfers in flight. A snapshot older than ten seconds counts as no mount running; whether the filesystem is mounted always comes from `/proc/self/mounts` instead.
+For the syncing state the mount writes `$XDG_RUNTIME_DIR/proton-drive-fs/status.json` (same fallback) once a second with its pid, version, and the number of transfers in flight. A snapshot older than ten seconds counts as no mount running; whether the filesystem is mounted always comes from `/proc/self/mounts` instead.
 
 ### Desktop entry
 
