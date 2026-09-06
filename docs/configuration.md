@@ -1,38 +1,68 @@
 # Configuration
 
-Today, configuration is command-line flags only. There is no environment variable or
-file-based configuration for `mount`, `login`, `unmount`, `status`, or `tray` yet.
+Every flag `login`, `mount`, and `tray` accept also has a key in a TOML config file at
+`$XDG_CONFIG_HOME/proton-drive-fs/config.toml` (falls back to
+`~/.config/proton-drive-fs/config.toml`), or wherever `-config <path>` points instead.
+`status` also reads it for `mountpoint` when none is given on the command line.
 
-## Flags
+## Precedence
 
-| Flag | Command | Default | Meaning |
-|---|---|---|---|
-| `-no-browser` | login | `false` | Do not open a browser for human verification. |
-| `-hv-method` | login | none forced | Force a verification method: `captcha`, `email`, or `sms`. |
-| `-debug` | mount | `false` | Enable FUSE debug logging. |
-| `-ttl` | mount | `30s` | Directory listing cache TTL. |
-| `-poll` | mount | `10s` | Event feed polling interval. |
-| `-op-timeout` | mount | `60s` | Deadline for one filesystem operation's network calls. |
-| `-cache-dir` | mount | `$XDG_CACHE_HOME/proton-drive-fs/blocks` | On-disk block cache directory. |
-| `-cache-size` | mount | `1GiB` | On-disk block cache size limit. |
-| `-large-file` | mount | `300MiB` | Threshold above which blocks bypass the on-disk cache. |
-| `-thumbnails` | mount | `true` | Write previews into the freedesktop thumbnail cache. |
-| `-thumbnail-dir` | mount | `$XDG_CACHE_HOME/thumbnails` | Thumbnail cache directory. |
-| `-deny-readers` | mount | see [Usage](usage.md#mount) | Process names refused a read of a large file. |
-| `-max-uploads` | mount | `5` | Concurrent uploads. |
-| `-max-downloads` | mount | `8` | Concurrent block downloads. |
-| `-foreground` | mount | `false` | Stay attached to the terminal. |
-| `-log-level` | mount | `info` | Log verbosity: `debug`, `info`, `warn`, or `error`. |
-| `-log-stderr` | mount | `false` | Force logging to stderr instead of the systemd journal. |
-| `-force` | unmount | `false` | Lazily unmount and abort the FUSE connection. |
-| `-wait` | unmount | `5s` | How long to retry a busy unmount before falling back to lazy. |
-| `-mountpoint` | tray | last used, else `~/ProtonDrive` | Mountpoint the tray manages. |
+Values resolve in one direction only: a flag passed on the command line always wins
+over the config file, and the config file always wins over the built-in default.
+
+```mermaid
+flowchart LR
+    Defaults["Built-in defaults"] --> File["config.toml"]
+    File --> Flag["Flag on the command line"]
+    Flag --> Effective["Effective value"]
+```
+
+## config init and config show
+
+```
+proton-drive-fs config init [-config path] [-force]
+proton-drive-fs config show [-config path] [flags...]
+```
+
+`config init` writes a fully commented config file with every key at its default value
+and a one-line explanation; uncomment a line to set it. It refuses to overwrite an
+existing file unless `-force` is passed.
+
+`config show` prints the effective configuration after merging defaults, the file, and
+any flag passed to `config show` itself, with a trailing comment naming where each
+value came from (`default`, `file`, or `flag`): useful to check what `mount` or `login`
+would actually resolve to before running them.
+
+## Keys
+
+| Key | Flag | Default | Meaning |
+| --- | --- | --- | --- |
+| `mountpoint` | (positional for `mount`, `-mountpoint` for `tray`) | (none) | Default mountpoint `mount` and `tray` use when none is given on the command line. |
+| `ttl` | `-ttl` | `30s` | How long a directory listing stays cached before it is fetched again. |
+| `poll` | `-poll` | `10s` | How often the event feed is polled for remote changes. |
+| `op_timeout` | `-op-timeout` | `60s` | Deadline for one filesystem operation's network calls. |
+| `cache_dir` | `-cache-dir` | `$XDG_CACHE_HOME/proton-drive-fs` | Where downloaded file blocks and persisted directory listings are stored on disk. |
+| `cache_size` | `-cache-size` | `2GiB` | Total size the on-disk cache (blocks and listings together) may use; `"0"` disables both. |
+| `large_file` | `-large-file` | `300MiB` | Files larger than this bypass the on-disk block cache; `"0"` disables the threshold. |
+| `thumbnails` | `-thumbnails` | `true` | Write Proton's stored previews into the freedesktop thumbnail cache. |
+| `thumbnail_dir` | `-thumbnail-dir` | `$XDG_CACHE_HOME/thumbnails` | Freedesktop thumbnail cache directory. |
+| `deny_readers` | `-deny-readers` | see [Usage](usage.md#mount) | Process names refused a read of a file above `large_file`; empty allows all. |
+| `max_uploads` | `-max-uploads` | `5` | How many files upload at once. |
+| `max_downloads` | `-max-downloads` | `8` | How many file blocks download at once. |
+| `log_level` | `-log-level` | `info` | Log verbosity: `debug`, `info`, `warn`, or `error`. |
+| `log_stderr` | `-log-stderr` | `false` | Force logging to stderr instead of the systemd journal. |
+| `foreground` | `-foreground` | `false` | Stay attached to the terminal instead of detaching into the background. |
+| `hv_method` | `-hv-method` | (none) | Force a human verification method at login: `captcha`, `email`, or `sms`. |
+| `no_browser` | `-no-browser` | `false` | Do not open a browser for human verification at login. |
 
 See [Usage](usage.md) for the full description of each flag.
 
-## Configuration file (upcoming)
+## Cache directory
 
-A `config.toml` file under `$XDG_CONFIG_HOME/proton-drive-fs/` is in progress. It is
-not available yet. Once it ships, flags will keep precedence over the file: a flag
-passed on the command line overrides whatever the file sets for that same option. This
-page will list the file's keys once the feature ships.
+The persisted listing cache stores decrypted file and folder names on disk (under
+`cache_dir/listings/`, mode 0600) so a folder listed once loads instantly on the next
+cold start, the same trade-off the session file already makes for the account
+password. It shares `cache_size`'s byte budget with the block cache (under
+`cache_dir/blocks/`); set `cache_size = "0"` to disable both. See
+[Where things live](troubleshooting.md#where-things-live) for the exact paths and
+[Logs](troubleshooting.md#logs) for cache hit and miss log levels.

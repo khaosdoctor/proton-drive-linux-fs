@@ -12,6 +12,14 @@ proton-drive-fs mounts Proton Drive as a local folder through FUSE. Files and fo
 
 Early and unofficial. Not affiliated with, endorsed by, or supported by Proton AG. Used live, on one Proton Drive share: login, mount, read, create, and rename. Write, delete, move, the tray, and thumbnail previews have not seen the same real-world use yet. Expect bugs. Report them on the [issue tracker](https://github.com/khaosdoctor/proton-drive-linux-fs/issues).
 
+## Quick start
+
+Full copy-paste flows are in the [quick start guide](https://oss.lsantos.dev/proton-drive-linux-fs/quickstart/):
+
+- Installed package, `go install`, or `make install`: `proton-drive-fs login`, then `proton-drive-fs mount ~/ProtonDrive`.
+- systemd user units: `systemctl --user enable --now proton-drive-fs` (and `-tray` for the icon).
+- Docker: `docker run ... login`, then `docker run ... mount -foreground /mnt/protondrive`, both with the same bind mounts.
+
 ## Install
 
 Four ways to get the binary. Full requirements and the container run command are in
@@ -85,7 +93,7 @@ proton-drive-fs mount [<mountpoint>] [-config path] [-debug] [-ttl 30s] [-poll 1
 - `-poll` (default: 10s): how often the event feed is polled for remote changes.
 - `-op-timeout` (default: 60s): deadline for one filesystem operation's network calls (listing, open, read, upload, mkdir, remove, rename); an operation stuck past this returns an error instead of hanging the caller. Uploads scale past this for large files.
 - `-cache-dir` (default: `$XDG_CACHE_HOME/proton-drive-fs`, falls back to `~/.cache/proton-drive-fs`): where downloaded, decrypted file blocks (under `blocks/`) and persisted directory listings (under `listings/`) are stored on disk so they survive a remount.
-- `-cache-size` (default: 2GiB): the total size the on-disk cache is allowed to use, shared by blocks and persisted listings together; accepts suffixes like `512MiB` or `2GiB`. A value of 0 or less disables the on-disk cache entirely (both kinds).
+- `-cache-size` (default: 2GiB): the total size the on-disk cache is allowed to use, shared by blocks and persisted listings together; accepts suffixes like `512MiB` or `2GiB`. A value of 0 or less disables the on-disk cache, both kinds.
 - `-large-file` (default: 300MiB): files larger than this are still read lazily block by block but their blocks are not stored in the on-disk cache, so one large file cannot evict everything else; 0 disables the threshold.
 - `-thumbnails` (default: true): write the preview image Proton stores for a file into the freedesktop thumbnail cache when a folder is listed.
 - `-thumbnail-dir` (default: `$XDG_CACHE_HOME/thumbnails`, falls back to `~/.cache/thumbnails`): the thumbnail cache directory to write into. This is the shared directory file managers read, not a directory of its own.
@@ -148,7 +156,7 @@ proton-drive-fs config init [-config path] [-force]
 proton-drive-fs config show [-config path] [flags...]
 ```
 
-`config init` writes a fully commented config file with every key at its default value and a one-line explanation; uncomment a line to set it. It refuses to overwrite an existing file unless `-force` is passed. `config show` prints the effective configuration after merging defaults, the file, and any flag passed to `config show` itself, with a trailing comment naming where each value came from (`default`, `file`, or `flag`) — useful to check what `mount` or `login` would actually resolve to before running them.
+`config init` writes a fully commented config file with every key at its default value and a one-line explanation; uncomment a line to set it. It refuses to overwrite an existing file unless `-force` is passed. `config show` prints the effective configuration after merging defaults, the file, and any flag passed to `config show` itself, with a trailing comment naming where each value came from (`default`, `file`, or `flag`), useful to check what `mount` or `login` would actually resolve to before running them.
 
 | Key | Flag | Default | Description |
 | --- | --- | --- | --- |

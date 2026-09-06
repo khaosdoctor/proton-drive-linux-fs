@@ -1,12 +1,16 @@
 # Usage
 
-proton-drive-fs is one binary with seven subcommands: `login`, `mount`, `unmount`,
-`status`, `tray`, `logout`, `version`.
+proton-drive-fs is one binary with eight subcommands: `login`, `mount`, `unmount`,
+`status`, `tray`, `logout`, `version`, `config`.
+
+Every flag `login`, `mount`, and `tray` accept also has a matching key in a config
+file; see [Configuration](configuration.md) for the file location, its keys, and how a
+flag and the file resolve together.
 
 ## login
 
 ```
-proton-drive-fs login [-no-browser] [-hv-method captcha|email|sms]
+proton-drive-fs login [-config path] [-no-browser] [-hv-method captcha|email|sms]
 ```
 
 Prompts for username, password, and a TOTP code if two-factor is enabled.
@@ -29,10 +33,11 @@ session file with mode 0600. `logout` removes both.
 ## mount
 
 ```
-proton-drive-fs mount <mountpoint> [flags]
+proton-drive-fs mount [<mountpoint>] [-config path] [flags]
 ```
 
-If the mountpoint does not exist, mount creates it. By default mount detaches into the
+`<mountpoint>` is required unless the config file sets `mountpoint`. If it does not
+exist, mount creates it. By default mount detaches into the
 background and waits until the filesystem is mounted. The daemon logs structured
 entries to the systemd journal itself under the identifier `proton-drive-fs`, readable
 with `journalctl --user -t proton-drive-fs`; see
@@ -45,8 +50,8 @@ journal.
 | `-ttl` | `30s` | How long a directory listing stays cached before it is fetched again. |
 | `-poll` | `10s` | How often the event feed is polled for remote changes. |
 | `-op-timeout` | `60s` | Deadline for one filesystem operation's network calls (listing, open, read, upload, mkdir, remove, rename). An operation stuck past this returns an error instead of hanging the caller. Uploads scale past this for large files. |
-| `-cache-dir` | `$XDG_CACHE_HOME/proton-drive-fs/blocks` (falls back to `~/.cache/proton-drive-fs/blocks`) | Where downloaded, decrypted file blocks are stored on disk so they survive a remount. |
-| `-cache-size` | `1GiB` | Total size the on-disk block cache is allowed to use. Accepts suffixes like `512MiB` or `2GiB`. A value of 0 or less disables the on-disk cache. |
+| `-cache-dir` | `$XDG_CACHE_HOME/proton-drive-fs` (falls back to `~/.cache/proton-drive-fs`) | Where downloaded, decrypted file blocks (under `blocks/`) and persisted directory listings (under `listings/`) are stored on disk so they survive a remount. |
+| `-cache-size` | `2GiB` | Total size the on-disk cache is allowed to use, shared by blocks and persisted listings together. Accepts suffixes like `512MiB` or `2GiB`. A value of 0 or less disables the on-disk cache, both kinds. |
 | `-large-file` | `300MiB` | Files larger than this are still read lazily block by block, but their blocks are not stored in the on-disk cache, so one large file cannot evict everything else. 0 disables the threshold. |
 | `-thumbnails` | `true` | Write the preview image Proton stores for a file into the freedesktop thumbnail cache when a folder is listed. |
 | `-thumbnail-dir` | `$XDG_CACHE_HOME/thumbnails` (falls back to `~/.cache/thumbnails`) | The thumbnail cache directory to write into. This is the shared directory file managers read, not a directory of its own. |
@@ -71,6 +76,13 @@ unmount failed as busy never gets mistaken for actually running the new binary.
 `make restart` (optionally `MP=<mountpoint>`, default `~/ProtonDrive`) unmounts,
 rebuilds, and remounts in one step.
 
+A cold directory (nothing cached in memory yet, for example right after mount) is
+served from the persisted listing cache when one exists, so a folder listed before
+shows up instantly instead of waiting on the network; a background refresh follows the
+same TTL and event-driven invalidation as everything else, and refreshes the persisted
+copy once it lands. See [Cache layout](how-it-works.md#cache-layout) for how blocks
+and listings share the cache directory.
+
 ## unmount
 
 ```
@@ -90,18 +102,19 @@ Runs `fusermount3 -u` (or `fusermount -u` if `fusermount3` is not on `PATH`).
 ## status
 
 ```
-proton-drive-fs status [mountpoint]
+proton-drive-fs status [-config path] [mountpoint]
 ```
 
 Prints whether the mountpoint is mounted, the running daemon's pid and version, this
 binary's version, transfers in flight, and whether syncing is paused; with a version
 mismatch it also prints the unmount-then-mount command to fix it. With no argument it
-uses the tray's remembered mountpoint, falling back to `~/ProtonDrive`.
+uses the config file's `mountpoint`, then the tray's remembered mountpoint, then falls
+back to `~/ProtonDrive`.
 
 ## tray
 
 ```
-proton-drive-fs tray [-mountpoint ~/ProtonDrive]
+proton-drive-fs tray [-config path] [-mountpoint ~/ProtonDrive]
 ```
 
 Runs a status icon in the system tray. See [Tray](tray.md) for the menu, icon states,
@@ -122,6 +135,17 @@ proton-drive-fs version
 ```
 
 Prints the binary's version.
+
+## config
+
+```
+proton-drive-fs config init [-config path] [-force]
+proton-drive-fs config show [-config path] [flags...]
+```
+
+Manages the TOML config file every `login`, `mount`, and `tray` flag also has a key
+in. See [Configuration](configuration.md) for the precedence between defaults, the
+file, and a flag, the full key table, and what `config init` and `config show` print.
 
 ## Systemd user units
 

@@ -45,6 +45,20 @@ proton-drive-fs unmount -force ~/ProtonDrive
 This lazily unmounts and aborts the kernel-side FUSE connection, so anything blocked
 on the mount gets an error instead of hanging. It needs no root for a mount you own.
 
+```mermaid
+flowchart TD
+    Start["proton-drive-fs unmount"] --> Busy{"Busy?"}
+    Busy -- no --> Done["Unmounted"]
+    Busy -- yes --> Wait["Retry every 500ms for -wait (default 5s)"]
+    Wait --> StillBusy{"Still busy?"}
+    StillBusy -- no --> Done
+    StillBusy -- yes --> Lazy["Lazy unmount: detach now, kernel drops it once every holder lets go"]
+    Lazy --> Stuck{"A process is stuck, not just holding it open?"}
+    Stuck -- yes --> Force["unmount -force: abort the kernel-side FUSE connection"]
+    Stuck -- no --> Done
+    Force --> Done
+```
+
 ## Stale daemon after a rebuild
 
 If an earlier unmount failed as busy, the old daemon can keep serving a mountpoint
@@ -63,6 +77,15 @@ same in one step:
 
 ```
 make restart
+```
+
+```mermaid
+flowchart LR
+    Rebuild["Rebuild the binary"] --> Status["proton-drive-fs status"]
+    Status --> Mismatch{"Version mismatch?"}
+    Mismatch -- no --> Fine["Running daemon matches the binary"]
+    Mismatch -- yes --> Restart["make restart: unmount, rebuild, remount"]
+    Restart --> Fine
 ```
 
 ## Logs

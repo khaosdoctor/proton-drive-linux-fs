@@ -26,23 +26,28 @@ on one Proton Drive share. Expect bugs. Report them on the
 
 ## Quick start
 
-Log in once:
+See [Quick start](quickstart.md) for a complete copy-paste flow, whether you installed
+a package, run the systemd user units, or use the container image.
 
-```
-proton-drive-fs login
-```
+## Components
 
-Mount the drive:
+A user application never talks to Proton directly; every read and write goes through the
+kernel's FUSE layer to the mount daemon, which is the only piece that speaks to Proton's
+API. The tray, and any future GUI, talk to that same daemon over its local unix socket,
+falling back to a status file when the socket is not available.
 
-```
-proton-drive-fs mount ~/ProtonDrive
-```
+```mermaid
+flowchart LR
+    App["User application"] --> Kernel["Kernel FUSE"]
+    Kernel --> Daemon
 
-Run the tray icon to see mount and sync status at a glance:
+    subgraph Daemon["proton-drive-fs daemon"]
+        direction LR
+        FS["fusefs"] --> Drive["drive"] --> Auth["auth"]
+    end
 
-```
-proton-drive-fs tray
-```
+    Daemon --> API["Proton API"]
 
-See [Install](install.md) for the four ways to get the binary onto your machine, and
-[Usage](usage.md) for every subcommand and flag.
+    Tray["Tray"] -->|"unix socket, status file"| Daemon
+    GUI["Future GUI"] -.->|"unix socket, status file"| Daemon
+```

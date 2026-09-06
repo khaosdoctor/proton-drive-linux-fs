@@ -20,6 +20,25 @@ The icon is a cloud in one of four states, checked in this order:
 3. **A dot in the corner**: a download or an upload is in flight.
 4. **Solid**: mounted, logged in, nothing moving.
 
+Each check short-circuits the next: being logged out hides everything else, a pause
+marker outranks activity, and a transfer only counts while the mount's status snapshot
+is fresh enough to trust.
+
+```mermaid
+stateDiagram-v2
+    [*] --> NotLoggedIn: no saved session
+    [*] --> Paused: logged in, polling paused
+    [*] --> NotMounted: logged in, not paused, nothing mounted
+    [*] --> Syncing: mounted, not paused, transfer in flight
+    [*] --> Online: mounted, not paused, nothing moving
+
+    NotLoggedIn: Hollow outline
+    NotMounted: Hollow outline
+    Paused: Two bars in the corner
+    Syncing: A dot in the corner
+    Online: Solid
+```
+
 While uploads are queued the status line counts them, as in
 `Mounted at ~/ProtonDrive, syncing 312/10000`, and appends `, N failed` when some of
 them could not be uploaded. The counts go back to zero half a minute after the queue
@@ -68,6 +87,29 @@ For the syncing state the mount writes `$XDG_RUNTIME_DIR/proton-drive-fs/status.
 (same fallback) once a second with its pid, version, and the number of transfers in
 flight. A snapshot older than ten seconds counts as no mount running; whether the
 filesystem is mounted always comes from `/proc/self/mounts` instead.
+
+Reading the status and setting the pause marker both go through the same local API
+first, falling back to the status file or the pause marker directly when no daemon
+answers on the socket, for example an older build without the API.
+
+```mermaid
+sequenceDiagram
+    participant Tray
+    participant Client as api.Client
+    participant Daemon as Mount daemon (unix socket)
+    participant File as status.json / pause marker
+
+    Tray->>Client: Status() or SetPaused()
+    Client->>Daemon: request over the unix socket
+    alt daemon answers
+        Daemon-->>Client: live status, or pause acknowledged
+        Client-->>Tray: result
+    else socket unavailable
+        Client--xTray: dial fails
+        Tray->>File: read status.json, or write the pause marker directly
+        File-->>Tray: snapshot (stale after 10s), or marker written
+    end
+```
 
 ## Waybar, KDE, and GNOME
 
