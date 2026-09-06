@@ -1,7 +1,8 @@
 BIN := proton-drive-fs
 PKG := ./cmd/proton-drive-fs
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-LDFLAGS := -s -w -X main.version=$(VERSION)
+COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
+LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT)
 PREFIX ?= $(HOME)/.local
 MP ?= $(HOME)/ProtonDrive
 GOLANGCI := go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
@@ -27,7 +28,7 @@ lint:
 check: test lint
 
 generate:
-	go generate ./internal/tray
+	go generate ./internal/tray ./internal/about
 
 install: build
 	install -Dm755 $(BIN) $(PREFIX)/bin/$(BIN)
@@ -72,7 +73,7 @@ help:
 	@printf "  race\t\tRun tests with race detector\n"
 	@printf "  lint\t\tRun linters (gofmt, go vet, golangci-lint)\n"
 	@printf "  check\t\tRun tests and linters\n"
-	@printf "  generate\tRun go generate for internal/tray icons\n"
+	@printf "  generate\tRun go generate for internal/tray icons and internal/about licenses\n"
 	@printf "  install\tBuild and install to \$$PREFIX (default: \$$HOME/.local)\n"
 	@printf "  uninstall\tRemove installed files\n"
 	@printf "  clean\t\tRemove built binary and bin/ directory\n"

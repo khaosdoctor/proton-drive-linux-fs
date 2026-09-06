@@ -1,6 +1,7 @@
 package state
 
 import (
+	"reflect"
 	"testing"
 	"time"
 )
@@ -69,7 +70,11 @@ func TestStatusRoundTrip(t *testing.T) {
 		t.Fatal("no status should be readable yet")
 	}
 
-	want := Status{Mountpoint: "/home/u/ProtonDrive", Version: "1.2.3", PID: 4242, Transfers: 2, Paused: true, Updated: time.Now().Unix()}
+	want := Status{
+		Mountpoint: "/home/u/ProtonDrive", Version: "1.2.3", PID: 4242, Transfers: 2, Paused: true, Updated: time.Now().Unix(),
+		Current: []CurrentTransfer{{Path: "a.txt", Action: "upload", Bytes: 10, Total: 20, Started: 1}},
+		Recent:  []RecentTransfer{{Path: "b.txt", Action: "download", Status: "done", Bytes: 5, Finished: 2}},
+	}
 	if err := WriteStatus(want); err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +83,7 @@ func TestStatusRoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatal("status should be readable after WriteStatus")
 	}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ReadStatus() = %+v, want %+v", got, want)
 	}
 

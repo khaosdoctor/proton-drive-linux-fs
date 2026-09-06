@@ -5,6 +5,7 @@ package tray
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,14 +14,44 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"fyne.io/systray"
 
+	"github.com/khaosdoctor/proton-drive-linux-fs/internal/about"
+	"github.com/khaosdoctor/proton-drive-linux-fs/internal/api"
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/logx"
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/state"
 )
+
+// maxCurrentLines bounds how many in-progress transfers the menu lists directly.
+const maxCurrentLines = 3
+
+// maxRecentItems bounds how many finished transfers the Recent submenu lists.
+const maxRecentItems = 10
+
+// apiDialTimeout bounds how long the tray waits for the local API's unix socket to answer
+// before falling back to the status.json file or the pause file directly.
+const apiDialTimeout = 500 * time.Millisecond
+
+// readStatus prefers the local API, which answers with a live snapshot straight from the running
+// daemon, and falls back to the status.json file (stale after state.StaleAfter) when no daemon is
+// listening on the socket, e.g. an older build without the API.
+func readStatus() (state.Status, bool) {
+	if client, err := api.NewClient(); err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), apiDialTimeout)
+		st, apiErr := client.Status(ctx)
+		cancel()
+		if apiErr == nil {
+			return st, true
+		}
+	}
+
+	st, ok := state.ReadStatus()
+	return st, ok && st.Fresh()
+}
 
 //go:generate go run ./gen
 
@@ -69,12 +100,13 @@ func icon(s State) []byte {
 }
 
 // Options is what the tray needs from the command layer: which mountpoint it manages, where
-// the fallback log file is, this build's version, and how to check whether the mount and the
-// session are live.
+// the fallback log file is, this build's version and commit, and how to check whether the mount
+// and the session are live.
 type Options struct {
 	Mountpoint string
 	LogPath    string
 	Version    string
+	Commit     string
 	Mounted    func() bool
 	LoggedIn   func() bool
 }
@@ -91,6 +123,10 @@ type snapshot struct {
 	uploadsQueued int64
 	uploadsDone   int64
 	uploadsFailed int64
+
+	// current and recent mirror state.Status's transfer lists, for the tooltip and the menu.
+	current []state.CurrentTransfer
+	recent  []state.RecentTransfer
 
 	// ownVersion is this tray's build; daemonVersion is the running daemon's, from the status
 	// file. A mismatch means a rebuild left an older daemon running.
@@ -142,19 +178,77 @@ func (sn snapshot) statusLine(mountpoint string) string {
 	return line
 }
 
+// tooltipFor is the tray icon's tooltip: the first active transfer's action, path and percent
+// complete, plus how many more are running, or the status line when nothing is moving.
+func tooltipFor(sn snapshot, mountpoint string) string {
+	if len(sn.current) == 0 {
+		return sn.statusLine(mountpoint)
+	}
+
+	line := transferLine(sn.current[0])
+	if more := len(sn.current) - 1; more > 0 {
+		line += fmt.Sprintf(" and %d more", more)
+	}
+	return line
+}
+
+// transferLine formats one in-progress transfer as "Uploading path 40%", or without the percent
+// when its total size isn't known.
+func transferLine(t state.CurrentTransfer) string {
+	verb := "Uploading"
+	if t.Action == "download" {
+		verb = "Downloading"
+	}
+
+	if t.Total <= 0 {
+		return verb + " " + t.Path
+	}
+
+	pct := t.Bytes * 100 / t.Total
+	return fmt.Sprintf("%s %s %d%%", verb, t.Path, pct)
+}
+
+// recentLine formats one finished transfer for the Recent submenu: a checkmark and its size on
+// success, a cross and the error on failure.
+func recentLine(rt state.RecentTransfer) string {
+	if rt.Status == "failed" {
+		return fmt.Sprintf("✗ %s: %s", rt.Path, rt.Err)
+	}
+	return fmt.Sprintf("✓ %s (%s)", rt.Path, logx.FormatSize(rt.Bytes))
+}
+
+// refreshInterval is how often poll re-checks status: every second while a transfer is active,
+// so the tooltip's percentage keeps up, otherwise every two.
+func refreshInterval(sn snapshot) time.Duration {
+	if len(sn.current) > 0 {
+		return time.Second
+	}
+	return 2 * time.Second
+}
+
 type app struct {
 	opts    Options
 	refresh chan struct{}
 	shown   State
 
 	status               *systray.MenuItem
+	current              [maxCurrentLines]*systray.MenuItem
+	recentSub            *systray.MenuItem
+	recentItems          [maxRecentItems]*systray.MenuItem
 	mount, unmount       *systray.MenuItem
 	restart              *systray.MenuItem
 	pause, resume        *systray.MenuItem
 	openFolder, openLogs *systray.MenuItem
 	openDebugLogs        *systray.MenuItem
 	login, logout        *systray.MenuItem
+	about, openDashboard *systray.MenuItem
 	hintUntil            atomic.Int64
+
+	// recentMu guards recentPaths, the path each Recent submenu slot currently shows, so a click
+	// opens whatever folder that slot is showing right now, not whatever it showed when the menu
+	// was built.
+	recentMu    sync.Mutex
+	recentPaths [maxRecentItems]string
 }
 
 // Run shows the icon and blocks until Quit is chosen.
@@ -169,6 +263,22 @@ func (a *app) onReady() {
 
 	a.status = systray.AddMenuItem("Checking", "")
 	a.status.Disable()
+
+	for i := range a.current {
+		item := systray.AddMenuItem("", "")
+		item.Disable()
+		item.Hide()
+		a.current[i] = item
+	}
+
+	a.recentSub = systray.AddMenuItem("Recent", "The last few finished transfers")
+	a.recentSub.Hide()
+	for i := range a.recentItems {
+		item := a.recentSub.AddSubMenuItem("", "")
+		item.Hide()
+		a.recentItems[i] = item
+		onClick(item, a.openRecentAt(i))
+	}
 	systray.AddSeparator()
 
 	a.mount = systray.AddMenuItem("Mount", "Mount Proton Drive at "+a.opts.Mountpoint)
@@ -183,6 +293,13 @@ func (a *app) onReady() {
 
 	a.login = systray.AddMenuItem("Log in", "Log in to Proton in a terminal")
 	a.logout = systray.AddMenuItem("Log out", "Revoke the saved session")
+	systray.AddSeparator()
+
+	a.about = systray.AddMenuItem("About proton-drive-fs", "Version, links and third-party licenses")
+	if _, err := exec.LookPath("proton-drive-fs-gui"); err == nil {
+		a.openDashboard = systray.AddMenuItem("Open dashboard", "Open the proton-drive-fs-gui dashboard")
+		onClick(a.openDashboard, func() { start([]string{"proton-drive-fs-gui"}) })
+	}
 	quit := systray.AddMenuItem("Quit", "Close the tray icon; the mount keeps running")
 
 	onClick(a.mount, func() { a.runSelf("mount", a.opts.Mountpoint) })
@@ -195,9 +312,36 @@ func (a *app) onReady() {
 	onClick(a.openDebugLogs, a.showDebugLogs)
 	onClick(a.login, a.startLogin)
 	onClick(a.logout, func() { a.runSelf("logout") })
+	onClick(a.about, a.showAbout)
 	onClick(quit, systray.Quit)
 
 	go a.poll()
+}
+
+// showAbout displays the About dialog; a failure (no zenity and no xdg-open, say) only gets a
+// log line since there is nowhere else in a tray click to report it.
+func (a *app) showAbout() {
+	if err := about.Show(a.opts.Version, a.opts.Commit); err != nil {
+		slog.Warn("showing about dialog failed", "err", err)
+	}
+}
+
+// openRecentAt returns the click handler for Recent submenu slot i: it opens whatever folder
+// that slot currently shows, read fresh at click time since slots are reused as the list changes.
+func (a *app) openRecentAt(i int) func() {
+	return func() {
+		a.recentMu.Lock()
+		p := a.recentPaths[i]
+		a.recentMu.Unlock()
+		if p == "" {
+			return
+		}
+
+		dir := filepath.Dir(filepath.Join(a.opts.Mountpoint, p))
+		if err := exec.Command("xdg-open", dir).Start(); err != nil {
+			slog.Warn("xdg-open failed", "path", dir, "err", err)
+		}
+	}
 }
 
 func onClick(item *systray.MenuItem, fn func()) {
@@ -208,8 +352,9 @@ func onClick(item *systray.MenuItem, fn func()) {
 	}()
 }
 
-// poll refreshes the icon and menu every two seconds, and re-checks the session (which can
-// reach the OS keyring) at most every five.
+// poll refreshes the icon and menu every two seconds, or every one while a transfer is active
+// (see refreshInterval), and re-checks the session (which can reach the OS keyring) at most
+// every five.
 func (a *app) poll() {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
@@ -225,19 +370,23 @@ func (a *app) poll() {
 			lastCheck = time.Now()
 		}
 
-		st, ok := state.ReadStatus()
-		a.apply(snapshot{
+		st, fresh := readStatus()
+		sn := snapshot{
 			loggedIn:      loggedIn,
 			mounted:       a.opts.Mounted(),
 			paused:        state.Paused(),
 			transfers:     st.Transfers,
-			fresh:         ok && st.Fresh(),
+			fresh:         fresh,
 			uploadsQueued: st.UploadsQueued,
 			uploadsDone:   st.UploadsDone,
 			uploadsFailed: st.UploadsFailed,
+			current:       st.Current,
+			recent:        st.Recent,
 			ownVersion:    a.opts.Version,
 			daemonVersion: st.Version,
-		})
+		}
+		a.apply(sn)
+		ticker.Reset(refreshInterval(sn))
 
 		select {
 		case <-ticker.C:
@@ -258,6 +407,7 @@ func (a *app) apply(sn snapshot) {
 	if time.Now().UnixNano() >= a.hintUntil.Load() {
 		a.status.SetTitle(sn.statusLine(a.opts.Mountpoint))
 	}
+	systray.SetTooltip(tooltipFor(sn, a.opts.Mountpoint))
 
 	v := visibilityFor(sn.loggedIn, sn.mounted)
 	showIf(a.mount, v.Mount)
@@ -268,6 +418,46 @@ func (a *app) apply(sn snapshot) {
 	showIf(a.openFolder, v.OpenFolder)
 	showIf(a.login, v.Login)
 	showIf(a.logout, v.Logout)
+
+	a.applyCurrent(sn.current)
+	a.applyRecent(sn.recent)
+}
+
+// applyCurrent updates the up-to-3 disabled lines showing transfers in progress, hiding whatever
+// slots aren't in use.
+func (a *app) applyCurrent(current []state.CurrentTransfer) {
+	for i, item := range a.current {
+		if i >= len(current) {
+			item.Hide()
+			continue
+		}
+		item.SetTitle(transferLine(current[i]))
+		item.Show()
+	}
+}
+
+// applyRecent updates the Recent submenu's up-to-10 items, hiding the submenu entirely when
+// there is nothing finished yet.
+func (a *app) applyRecent(recent []state.RecentTransfer) {
+	if len(recent) == 0 {
+		a.recentSub.Hide()
+		return
+	}
+	a.recentSub.Show()
+
+	a.recentMu.Lock()
+	defer a.recentMu.Unlock()
+
+	for i, item := range a.recentItems {
+		if i >= len(recent) {
+			item.Hide()
+			a.recentPaths[i] = ""
+			continue
+		}
+		item.SetTitle(recentLine(recent[i]))
+		item.Show()
+		a.recentPaths[i] = recent[i].Path
+	}
 }
 
 type menuVisibility struct {
@@ -350,7 +540,7 @@ func firstLine(s string) string {
 }
 
 func (a *app) setPaused(paused bool) {
-	if err := state.SetPaused(paused); err != nil {
+	if err := setPausedViaAPIOrFile(paused); err != nil {
 		slog.Warn("setting pause marker failed", "err", err)
 	} else if paused {
 		slog.Info("paused")
@@ -358,6 +548,21 @@ func (a *app) setPaused(paused bool) {
 		slog.Info("resumed")
 	}
 	a.signal()
+}
+
+// setPausedViaAPIOrFile prefers the local API, so a pause set from the tray reaches whichever
+// daemon process is actually running even after a remount, and falls back to writing the pause
+// file directly (today's behavior) when no daemon answers on the socket.
+func setPausedViaAPIOrFile(paused bool) error {
+	if client, err := api.NewClient(); err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), apiDialTimeout)
+		apiErr := client.SetPaused(ctx, paused)
+		cancel()
+		if apiErr == nil {
+			return nil
+		}
+	}
+	return state.SetPaused(paused)
 }
 
 func (a *app) showFolder() {

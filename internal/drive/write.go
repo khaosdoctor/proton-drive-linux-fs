@@ -172,21 +172,25 @@ func (c *Client) Trash(ctx context.Context, parent *Node, n *Node) error {
 func (c *Client) Upload(ctx context.Context, parent *Node, name string, existing *Node, r io.Reader, size int64, modTime time.Time) (*Node, error) {
 	newFile := existing == nil
 
-	c.beginTransfer()
-	defer c.endTransfer()
+	t := c.begin(name, "upload", size)
+	var uploadErr error
+	defer func() { c.end(t, uploadErr) }()
 
 	linkID, revisionID, nodeKR, sessionKey, err := c.startRevision(ctx, parent, name, existing)
 	if err != nil {
+		uploadErr = err
 		return nil, err
 	}
 
-	blockSizes, hashes, err := c.uploadBlocks(ctx, linkID, revisionID, sessionKey, nodeKR, r)
+	blockSizes, hashes, err := c.uploadBlocks(ctx, linkID, revisionID, sessionKey, nodeKR, r, t)
 	if err != nil {
+		uploadErr = err
 		c.cleanupFailedUpload(ctx, parent, linkID, revisionID, newFile)
 		return nil, err
 	}
 
 	if err := c.commitRevision(ctx, linkID, revisionID, nodeKR, blockSizes, hashes, size, modTime); err != nil {
+		uploadErr = err
 		c.cleanupFailedUpload(ctx, parent, linkID, revisionID, newFile)
 		return nil, err
 	}
@@ -281,8 +285,8 @@ func (c *Client) createFile(ctx context.Context, parent *Node, name string) (lin
 
 // uploadBlocks reads r in blockSize plaintext chunks, uploading each as one encrypted, signed
 // block, and returns the per-block plaintext sizes and raw sha256 digests in upload order —
-// the inputs to the revision manifest.
-func (c *Client) uploadBlocks(ctx context.Context, linkID, revisionID string, sessionKey *crypto.SessionKey, nodeKR *crypto.KeyRing, r io.Reader) ([]int64, [][]byte, error) {
+// the inputs to the revision manifest. t.Add reports progress as each block is committed.
+func (c *Client) uploadBlocks(ctx context.Context, linkID, revisionID string, sessionKey *crypto.SessionKey, nodeKR *crypto.KeyRing, r io.Reader, t *Transfer) ([]int64, [][]byte, error) {
 	var (
 		blockSizes []int64
 		hashes     [][]byte
@@ -300,6 +304,7 @@ func (c *Client) uploadBlocks(ctx context.Context, linkID, revisionID string, se
 
 			blockSizes = append(blockSizes, int64(n))
 			hashes = append(hashes, hash)
+			t.Add(int64(n))
 			index++
 		}
 

@@ -46,8 +46,12 @@ type Client struct {
 	// <= 0 means no threshold.
 	largeFile int64
 
-	// transfers counts block downloads and uploads in flight; see activity.go.
+	// transfers counts uploads and downloads in flight; see activity.go.
 	transfers atomic.Int64
+
+	// current holds the in-flight transfers themselves (uint64 ID -> *Transfer), for the tray
+	// and the local API to show what is moving right now; see activity.go.
+	current sync.Map
 
 	// downloads bounds concurrent block downloads; nil means unbounded.
 	downloads chan struct{}

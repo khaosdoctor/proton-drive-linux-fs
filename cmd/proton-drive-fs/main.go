@@ -32,7 +32,7 @@ import (
 var version = "dev"
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: proton-drive-fs <login|mount|status|unmount|tray|logout|version> [args]")
+	fmt.Fprintln(os.Stderr, "usage: proton-drive-fs <login|mount|status|unmount|tray|logout|version|about> [args]")
 }
 
 func main() {
@@ -65,6 +65,8 @@ func run(args []string) int {
 		return runLogout()
 	case "version":
 		return runVersion()
+	case "about":
+		return runAbout()
 	default:
 		usage()
 		return 2
@@ -990,8 +992,7 @@ func statusMountpoint(arg string) string {
 func printStatus(mountpoint string) {
 	fmt.Printf("mounted: %s\n", yesNo(isMounted(mountpoint)))
 
-	st, ok := state.ReadStatus()
-	fresh := ok && st.Fresh()
+	st, fresh := statusFromAPIOrFile()
 	if fresh {
 		fmt.Printf("daemon: pid %d version %s\n", st.PID, st.Version)
 	} else {

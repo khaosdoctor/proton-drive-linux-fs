@@ -1,6 +1,75 @@
 package drive
 
-import "testing"
+import (
+	"context"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/ProtonMail/gopenpgp/v2/crypto"
+	proton "github.com/henrybear327/go-proton-api"
+)
+
+// TestGetBlockSingleflight checks that two concurrent misses on the same block only download it
+// once: the second caller waits for the first instead of racing it, so the fetch and the
+// transfer's byte count both happen exactly once.
+func TestGetBlockSingleflight(t *testing.T) {
+	sk, err := crypto.GenerateSessionKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	plain := []byte("hello block")
+	ciphertext, err := sk.Encrypt(crypto.NewPlainMessage(plain))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f := &File{
+		client:     &Client{},
+		sessionKey: sk,
+		blocks:     map[int]proton.Block{1: {Index: 1, BareURL: "http://example.invalid", Token: "tok"}},
+		size:       int64(len(plain)),
+		cache:      make(map[int][]byte),
+	}
+
+	var calls atomic.Int64
+	orig := fetchBlock
+	fetchBlock = func(_ context.Context, _ *Client, _, _ string) ([]byte, error) {
+		calls.Add(1)
+		time.Sleep(20 * time.Millisecond) // give the other goroutine a chance to race in
+		return ciphertext, nil
+	}
+	defer func() { fetchBlock = orig }()
+
+	var wg sync.WaitGroup
+	results := make([][]byte, 2)
+	errs := make([]error, 2)
+	for i := range 2 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			results[i], errs[i] = f.getBlock(context.Background(), 1)
+		}(i)
+	}
+	wg.Wait()
+
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("fetchBlock called %d times, want 1", got)
+	}
+	for i := range 2 {
+		if errs[i] != nil {
+			t.Fatalf("goroutine %d: %v", i, errs[i])
+		}
+		if string(results[i]) != string(plain) {
+			t.Fatalf("goroutine %d: got %q, want %q", i, results[i], plain)
+		}
+	}
+	if got := f.BytesTransferred(); got != int64(len(plain)) {
+		t.Fatalf("BytesTransferred() = %d, want %d (only the winner should Add)", got, len(plain))
+	}
+}
 
 func TestBlockIndexForOffset(t *testing.T) {
 	cases := []struct {

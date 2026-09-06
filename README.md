@@ -143,6 +143,14 @@ proton-drive-fs tray [-mountpoint ~/ProtonDrive]
 
 Runs a status icon in the system tray over StatusNotifierItem, which is what Waybar, KDE Plasma and the GNOME AppIndicator extension speak. The icon shows one of four states (no session or nothing mounted, paused, a transfer in flight, or idle and mounted), and the menu offers mount, unmount, pause, open folder, open logs, open debug logs, log in, log out, and quit. See [Tray](https://oss.lsantos.dev/proton-drive-linux-fs/tray/) for the full menu, icon states, and pause semantics.
 
+While a transfer is in progress the tray's tooltip shows it: `Uploading Files/report.pdf 40%` for the first one, with `and N more` appended when several are running at once. With nothing moving, the tooltip falls back to the same status line the menu shows. The tray polls once a second while a transfer is active, and once every two seconds otherwise.
+
+The menu lists up to three of the transfers in progress as disabled lines, in the same format as the tooltip: `Uploading <path> 40%` or `Downloading <path>`. Below them, a `Recent` submenu lists the last ten finished transfers, oldest at the bottom: `✓ <path> (<size>)` for one that finished, `✗ <path>: <error>` for one that failed. Clicking a `Recent` entry opens its containing folder. Both sections are hidden when there is nothing to show.
+
+`About proton-drive-fs` opens a dialog with the project name, version and commit, links to the repository, the docs and the issue tracker, and every third-party dependency's license. It uses `zenity --text-info` when zenity is installed, and falls back to writing an HTML file and opening it with `xdg-open` otherwise. The same text is available without a GUI: `proton-drive-fs about` prints it to stdout.
+
+The license list is generated, not hand-maintained: `go generate ./internal/about` walks the module's dependencies, copies each one's `LICENSE` file out of the local module cache into `internal/about/licenses/`, and writes an index the About dialog reads at runtime. Run it again after adding or upgrading a dependency and commit the result.
+
 ### Desktop entry
 
 ```

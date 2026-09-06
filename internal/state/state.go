@@ -28,6 +28,31 @@ type Status struct {
 	UploadsQueued int64 `json:"uploads_queued"`
 	UploadsDone   int64 `json:"uploads_done"`
 	UploadsFailed int64 `json:"uploads_failed"`
+
+	// Current is every upload or download in flight right now. Recent is the last few finished
+	// ones. Both are for the tray's tooltip/menu and the local API; see internal/api and
+	// internal/tray.
+	Current []CurrentTransfer `json:"current,omitempty"`
+	Recent  []RecentTransfer  `json:"recent,omitempty"`
+}
+
+// CurrentTransfer is one upload or download in progress.
+type CurrentTransfer struct {
+	Path    string `json:"path"`
+	Action  string `json:"action"` // "upload" or "download"
+	Bytes   int64  `json:"bytes"`
+	Total   int64  `json:"total"`
+	Started int64  `json:"started"` // unix seconds
+}
+
+// RecentTransfer is one finished upload or download.
+type RecentTransfer struct {
+	Path     string `json:"path"`
+	Action   string `json:"action"` // "upload" or "download"
+	Status   string `json:"status"` // "done" or "failed"
+	Bytes    int64  `json:"bytes"`
+	Finished int64  `json:"finished"` // unix seconds
+	Err      string `json:"error,omitempty"`
 }
 
 // Fresh reports whether the snapshot is recent enough to trust.
@@ -54,6 +79,12 @@ func dir() (string, error) {
 		return "", err
 	}
 	return resolveDir(os.Getenv("XDG_RUNTIME_DIR"), os.Getenv("XDG_STATE_HOME"), home), nil
+}
+
+// Dir returns the runtime directory the mount process's local files live in: the status
+// snapshot, the pause marker, and the local API's unix socket.
+func Dir() (string, error) {
+	return dir()
 }
 
 // PausePath returns the path of the pause marker.

@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ProtonMail/gopenpgp/v2/crypto"
@@ -31,16 +32,43 @@ type File struct {
 	linkID     string
 	revID      string
 
+	// path is this file's display path, used only for the Transfer this file's downloads are
+	// reported under (see ensureTransfer).
+	path string
+
 	mu       sync.Mutex
 	cache    map[int][]byte
 	cacheLRU []int
+
+	// inflight serializes concurrent misses on the same block index (int -> *blockFetch): only
+	// the caller that wins the LoadOrStore actually downloads it, everyone else waits on its
+	// result, so a block is never downloaded, decrypted or counted against the transfer's
+	// progress more than once. Mirrors dirNode's loading/finishLoad pattern in fusefs.go.
+	inflight sync.Map
+
+	// transferMu guards transfer, lazily created on this file's first real network fetch so a
+	// file served entirely from cache never shows up as "downloading".
+	transferMu sync.Mutex
+	transfer   *Transfer
+	failed     atomic.Bool
 }
 
-// OpenFile fetches the session key and full block list for n's active revision.
+// blockFetch is the in-flight record one claimBlock winner publishes for a block index; every
+// other caller waits on done and then reads err (valid only once done is closed).
+type blockFetch struct {
+	done chan struct{}
+	err  error
+}
+
+// OpenFile fetches the session key and full block list for n's active revision. path is where
+// this file's downloads are reported under (see Transfer); an empty path falls back to n.Name.
 // ponytail: fetches the whole block list at open; paginate with GetRevision if huge files are slow.
-func (c *Client) OpenFile(ctx context.Context, n *Node) (*File, error) {
+func (c *Client) OpenFile(ctx context.Context, n *Node, path string) (*File, error) {
 	if n.Link.Type != proton.LinkTypeFile || n.Link.FileProperties == nil {
 		return nil, errors.New("node is not a file")
+	}
+	if path == "" {
+		path = n.Name
 	}
 
 	kr, err := n.Keyring()
@@ -76,8 +104,51 @@ func (c *Client) OpenFile(ctx context.Context, n *Node) (*File, error) {
 		size:       n.Size(),
 		linkID:     n.Link.LinkID,
 		revID:      revID,
+		path:       path,
 		cache:      make(map[int][]byte),
 	}, nil
+}
+
+// ensureTransfer lazily starts this file's tracked download transfer on its first real network
+// fetch, so a file served entirely from cache never shows up as "downloading".
+func (f *File) ensureTransfer() *Transfer {
+	f.transferMu.Lock()
+	defer f.transferMu.Unlock()
+	if f.transfer == nil {
+		f.transfer = f.client.begin(f.path, "download", f.size)
+	}
+	return f.transfer
+}
+
+// BytesTransferred reports how many bytes this file's tracked download has moved so far, or 0 if
+// it never touched the network (served entirely from cache).
+func (f *File) BytesTransferred() int64 {
+	f.transferMu.Lock()
+	defer f.transferMu.Unlock()
+	if f.transfer == nil {
+		return 0
+	}
+	return f.transfer.Bytes()
+}
+
+// Close ends this file's tracked download transfer, if one was ever started, and reports whether
+// any block fetch failed. Safe to call once per open File; a second call is a no-op.
+func (f *File) Close() error {
+	f.transferMu.Lock()
+	t := f.transfer
+	f.transfer = nil
+	f.transferMu.Unlock()
+
+	if t == nil {
+		return nil
+	}
+
+	var err error
+	if f.failed.Load() {
+		err = errors.New("a block download failed")
+	}
+	f.client.end(t, err)
+	return err
 }
 
 // ReadAt fills p with data starting at off, downloading and decrypting blocks on demand.
@@ -118,19 +189,73 @@ func (f *File) ReadAt(ctx context.Context, p []byte, off int64) (int, error) {
 	return n, nil
 }
 
+// getBlock returns block idx's decrypted content, from the in-memory cache, the on-disk cache, or
+// the network in that order. Concurrent callers asking for the same block never both hit the
+// network: only the first (the "winner", see claimBlock) fetches it, and the rest wait for that
+// result instead of duplicating the download and its progress.
 func (f *File) getBlock(ctx context.Context, idx int) ([]byte, error) {
 	debug := logx.DebugEnabled(ctx)
 
-	f.mu.Lock()
-	if data, ok := f.cache[idx]; ok {
-		f.mu.Unlock()
+	if data, ok := f.cachedBlock(idx); ok {
 		if debug {
 			slog.Debug("block cache hit", "link", f.linkID, "block", idx, "cache", "memory")
 		}
 		return data, nil
 	}
-	f.mu.Unlock()
 
+	fetch, winner := f.claimBlock(idx)
+	if !winner {
+		select {
+		case <-fetch.done:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		if fetch.err != nil {
+			return nil, fetch.err
+		}
+		if data, ok := f.cachedBlock(idx); ok {
+			return data, nil
+		}
+		return nil, errors.New("block fetch result missing from cache")
+	}
+
+	data, err := f.fetchAndCacheBlock(ctx, idx, debug)
+	f.releaseBlock(idx, fetch, err)
+	return data, err
+}
+
+// cachedBlock reads block idx from the in-memory cache.
+func (f *File) cachedBlock(idx int) ([]byte, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	data, ok := f.cache[idx]
+	return data, ok
+}
+
+// claimBlock reports whether this call is the one that fetches block idx: true with the record
+// to fill in and close when done, or false with the record to wait on for whoever already claimed
+// it.
+func (f *File) claimBlock(idx int) (fetch *blockFetch, winner bool) {
+	bf := &blockFetch{done: make(chan struct{})}
+	actual, loaded := f.inflight.LoadOrStore(idx, bf)
+	if !loaded {
+		return bf, true
+	}
+	return actual.(*blockFetch), false
+}
+
+// releaseBlock publishes the winner's result to every waiter and un-claims the block so a later
+// retry (e.g. after a failure) can claim it again.
+func (f *File) releaseBlock(idx int, fetch *blockFetch, err error) {
+	f.inflight.Delete(idx)
+	fetch.err = err
+	close(fetch.done)
+}
+
+// fetchAndCacheBlock does the actual disk-cache lookup or network fetch for block idx and caches
+// the result. Only claimBlock's winner calls this, so it never runs twice at once for the same
+// block.
+func (f *File) fetchAndCacheBlock(ctx context.Context, idx int, debug bool) ([]byte, error) {
 	// ponytail: big files skip the disk cache so one video does not evict everything else; blocks are still fetched lazily
 	useDisk := f.client.cache != nil && cacheOnDisk(f.size, f.client.largeFile)
 
@@ -156,22 +281,25 @@ func (f *File) getBlock(ctx context.Context, idx int) ([]byte, error) {
 		return nil, err
 	}
 
+	transfer := f.ensureTransfer()
+
 	dlStart := time.Now()
-	f.client.beginTransfer()
-	ciphertext, err := f.client.getBlockBytes(ctx, blk.BareURL, blk.Token)
-	f.client.endTransfer()
+	ciphertext, err := fetchBlock(ctx, f.client, blk.BareURL, blk.Token)
 	releaseSlot()
 	if err != nil {
+		f.failed.Store(true)
 		return nil, err
 	}
 
 	decStart := time.Now()
 	plain, err := f.sessionKey.Decrypt(ciphertext)
 	if err != nil {
+		f.failed.Store(true)
 		return nil, err
 	}
 
 	data := plain.GetBinary()
+	transfer.Add(int64(len(data)))
 	if debug {
 		slog.Debug("block cache miss, downloaded", "link", f.linkID, "block", idx, "size", len(data),
 			"download_elapsed", decStart.Sub(dlStart), "decrypt_elapsed", time.Since(decStart))
@@ -186,6 +314,12 @@ func (f *File) getBlock(ctx context.Context, idx int) ([]byte, error) {
 	f.mu.Unlock()
 
 	return data, nil
+}
+
+// fetchBlock downloads one encrypted block; overridden in tests to fake or count downloads
+// without a real Proton API client.
+var fetchBlock = func(ctx context.Context, c *Client, bareURL, token string) ([]byte, error) {
+	return c.getBlockBytes(ctx, bareURL, token)
 }
 
 // cachePut stores a decrypted block, evicting the oldest entry once the cache is full.

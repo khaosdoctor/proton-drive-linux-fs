@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -18,6 +19,7 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 	proton "github.com/henrybear327/go-proton-api"
 
+	"github.com/khaosdoctor/proton-drive-linux-fs/internal/api"
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/drive"
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/logx"
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/state"
@@ -105,6 +107,30 @@ func Mount(ctx context.Context, mountpoint string, c *drive.Client, root *drive.
 
 	slog.Info("mounted", "path", mountpoint, "version", opts.Version, "pid", os.Getpid())
 
+	if apiSrv, err := api.Start(api.Deps{
+		// buildStatus leaves Updated zero so publishStatus can exclude it from its own
+		// change-detection compare; a status built for a live API response needs it set, since
+		// it's fresh by definition at the moment this runs.
+		Status: func() state.Status {
+			s := st.buildStatus(mountpoint, opts.Version)
+			s.Updated = time.Now().Unix()
+			return s
+		},
+		CacheDir: c.CacheDir(),
+		ClearCache: func() (int64, error) {
+			freed, err := api.ClearCacheDir(c.CacheDir())
+			c.ResetCacheSize()
+			return freed, err
+		},
+	}); err != nil {
+		slog.Warn("starting local api failed", "err", err)
+	} else {
+		go func() {
+			<-ctx.Done()
+			_ = apiSrv.Close()
+		}()
+	}
+
 	go c.Events(ctx, opts.PollInterval, st.handle, state.Paused)
 	go st.publishStatus(ctx, mountpoint, opts.Version)
 	go st.watchdog(ctx)
@@ -164,21 +190,10 @@ func (st *mountState) publishStatus(ctx context.Context, mountpoint string, vers
 	defer state.RemoveStatus()
 
 	var last state.Status
-	pid := os.Getpid()
 
 	for {
-		queued, done, failed := st.uploadCounters(time.Now())
-		current := state.Status{
-			Mountpoint:    mountpoint,
-			Version:       version,
-			PID:           pid,
-			Transfers:     st.client.Transfers(),
-			Paused:        state.Paused(),
-			UploadsQueued: queued,
-			UploadsDone:   done,
-			UploadsFailed: failed,
-		}
-		if current != last {
+		current := st.buildStatus(mountpoint, version)
+		if !reflect.DeepEqual(current, last) {
 			last = current
 			current.Updated = time.Now().Unix()
 			if err := state.WriteStatus(current); err != nil {
@@ -193,6 +208,51 @@ func (st *mountState) publishStatus(ctx context.Context, mountpoint string, vers
 			return
 		case <-ticker.C:
 		}
+	}
+}
+
+// buildStatus assembles a live status snapshot: upload counters, transfer count, every transfer
+// in flight and the last few finished ones, and the pause marker. Updated is left zero; the
+// caller sets it only once it decides the snapshot is worth publishing (see publishStatus).
+// Shared with the local API's GET /v1/status, which calls this directly instead of reading the
+// file back.
+func (st *mountState) buildStatus(mountpoint, version string) state.Status {
+	queued, done, failed := st.uploadCounters(time.Now())
+
+	var current []state.CurrentTransfer
+	for _, t := range st.client.CurrentTransfers() {
+		current = append(current, state.CurrentTransfer{
+			Path:    t.Path,
+			Action:  t.Action,
+			Bytes:   t.Bytes(),
+			Total:   t.Total,
+			Started: t.Started.Unix(),
+		})
+	}
+
+	var recent []state.RecentTransfer
+	for _, rt := range st.recentTransfers() {
+		recent = append(recent, state.RecentTransfer{
+			Path:     rt.Path,
+			Action:   rt.Action,
+			Status:   rt.Status,
+			Bytes:    rt.Bytes,
+			Finished: rt.Finished.Unix(),
+			Err:      rt.Err,
+		})
+	}
+
+	return state.Status{
+		Mountpoint:    mountpoint,
+		Version:       version,
+		PID:           os.Getpid(),
+		Transfers:     st.client.Transfers(),
+		Paused:        state.Paused(),
+		UploadsQueued: queued,
+		UploadsDone:   done,
+		UploadsFailed: failed,
+		Current:       current,
+		Recent:        recent,
 	}
 }
 
@@ -237,10 +297,52 @@ type mountState struct {
 
 	inflight sync.Map // *int -> inflightOp; the watchdog reports whatever is still here well past its deadline
 
+	// recentMu guards recent, a ring of the last recentCap finished transfers, oldest first, for
+	// the tray's Recent submenu and the local API's GET /v1/transfers.
+	recentMu sync.Mutex
+	recent   []recentTransfer
+
 	mu            sync.Mutex
 	dirs          map[string]*dirNode // folder LinkID -> its inode
 	parentOf      map[string]string   // child LinkID -> parent LinkID
 	thumbInflight map[string]bool     // revision key -> queued, being fetched, or given up on
+}
+
+// recentTransfer is one finished upload or download, kept for the tray's Recent submenu and the
+// local API.
+type recentTransfer struct {
+	Path     string
+	Action   string // "upload" or "download"
+	Status   string // "done" or "failed"
+	Bytes    int64
+	Finished time.Time
+	Err      string
+}
+
+// recentCap bounds how many finished transfers mountState.recent remembers.
+const recentCap = 50
+
+// recordFinished appends a finished transfer to the recent ring, dropping the oldest entry once
+// full.
+func (st *mountState) recordFinished(rt recentTransfer) {
+	st.recentMu.Lock()
+	st.recent = append(st.recent, rt)
+	if len(st.recent) > recentCap {
+		st.recent = st.recent[len(st.recent)-recentCap:]
+	}
+	st.recentMu.Unlock()
+}
+
+// recentTransfers returns the finished transfers, most recent first.
+func (st *mountState) recentTransfers() []recentTransfer {
+	st.recentMu.Lock()
+	defer st.recentMu.Unlock()
+
+	out := make([]recentTransfer, len(st.recent))
+	for i, rt := range st.recent {
+		out[len(st.recent)-1-i] = rt
+	}
+	return out
 }
 
 func newMountState(ctx context.Context, c *drive.Client, uid, gid uint32, opts Options) *mountState {
@@ -1147,6 +1249,14 @@ func (f *fileNode) mountState() *mountState {
 	return f.parent.st
 }
 
+// displayPath returns this file's path relative to the mountpoint, for the tray and the local
+// API to show which file a transfer belongs to.
+func (f *fileNode) displayPath() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return path.Join(f.parent.path, f.name)
+}
+
 func (f *fileNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	f.mu.Lock()
 	node := f.node
@@ -1256,7 +1366,7 @@ func (f *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 		opCtx, cancel := context.WithTimeout(ctx, parent.st.opTimeout)
 		defer cancel()
 
-		file, err := f.client.OpenFile(opCtx, node)
+		file, err := f.client.OpenFile(opCtx, node, f.displayPath())
 		if err != nil {
 			if timedOut(opCtx) {
 				slog.Error("opening file timed out", "path", f.currentName(), "timeout", parent.st.opTimeout)
@@ -1287,15 +1397,21 @@ func (f *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 		opCtx, cancel := context.WithTimeout(ctx, parent.st.opTimeout)
 		defer cancel()
 
-		if err := downloadInto(opCtx, f.client, node, tmp); err != nil {
+		displayPath := f.displayPath()
+		moved, err := downloadInto(opCtx, f.client, node, tmp, displayPath)
+		if err != nil {
 			_ = tmp.Close()
 			_ = os.Remove(tmp.Name())
+			parent.st.recordFinished(recentTransfer{Path: displayPath, Action: "download", Status: "failed", Bytes: moved, Finished: time.Now(), Err: err.Error()})
 			if timedOut(opCtx) {
 				slog.Error("opening file timed out", "path", f.currentName(), "timeout", parent.st.opTimeout)
 				return nil, 0, syscall.ETIMEDOUT
 			}
 			slog.Error("downloading file failed", "path", f.currentName(), "err", err)
 			return nil, 0, syscall.EIO
+		}
+		if moved > 0 {
+			parent.st.recordFinished(recentTransfer{Path: displayPath, Action: "download", Status: "done", Bytes: moved, Finished: time.Now()})
 		}
 	}
 
@@ -1330,12 +1446,14 @@ func uploadTimeout(size int64, base time.Duration) time.Duration {
 }
 
 // downloadInto streams node's full active-revision content into tmp, reusing the same
-// block-caching ReadAt path as read-only opens.
-func downloadInto(ctx context.Context, client *drive.Client, node *drive.Node, tmp *os.File) error {
-	file, err := client.OpenFile(ctx, node)
+// block-caching ReadAt path as read-only opens. It returns the bytes actually moved over the
+// network (0 if everything came from cache), for the caller to record as a finished transfer.
+func downloadInto(ctx context.Context, client *drive.Client, node *drive.Node, tmp *os.File, path string) (int64, error) {
+	file, err := client.OpenFile(ctx, node, path)
 	if err != nil {
-		return err
+		return 0, err
 	}
+	defer func() { _ = file.Close() }()
 
 	buf := make([]byte, 256*1024)
 	var off int64
@@ -1343,15 +1461,15 @@ func downloadInto(ctx context.Context, client *drive.Client, node *drive.Node, t
 		n, err := file.ReadAt(ctx, buf, off)
 		if n > 0 {
 			if _, werr := tmp.WriteAt(buf[:n], off); werr != nil {
-				return werr
+				return file.BytesTransferred(), werr
 			}
 			off += int64(n)
 		}
 		if err == io.EOF {
-			return nil
+			return file.BytesTransferred(), nil
 		}
 		if err != nil {
-			return err
+			return file.BytesTransferred(), err
 		}
 	}
 }
@@ -1484,6 +1602,24 @@ func (h *fileHandle) Flush(ctx context.Context) syscall.Errno {
 // link into the parent listing and into this node so subsequent Getattr/Open see it. The temp
 // file is always removed.
 func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
+	// A real read-only handle (wrapping a drive.File) ends its tracked download transfer here
+	// and records it as finished, if it ever touched the network.
+	if h.file != nil {
+		st := h.node.mountState()
+		path := h.node.displayPath()
+		moved := h.file.BytesTransferred()
+		err := h.file.Close()
+		if moved == 0 {
+			return 0
+		}
+		if err != nil {
+			st.recordFinished(recentTransfer{Path: path, Action: "download", Status: "failed", Bytes: moved, Finished: time.Now(), Err: err.Error()})
+			return 0
+		}
+		st.recordFinished(recentTransfer{Path: path, Action: "download", Status: "done", Bytes: moved, Finished: time.Now()})
+		return 0
+	}
+
 	h.mu.Lock()
 	tmp := h.tmp
 	dirty := h.dirty
@@ -1517,6 +1653,8 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 	name := fn.name
 	parent := fn.parent
 	fn.mu.Unlock()
+
+	displayPath := path.Join(parent.path, name)
 
 	info, err := tmp.Stat()
 	if err != nil {
@@ -1555,6 +1693,7 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 	uploaded, err := fn.client.Upload(opCtx, parent.node, name, existing, tmp, info.Size(), time.Now())
 	if err != nil {
 		st.uploadsFailed.Add(1)
+		st.recordFinished(recentTransfer{Path: displayPath, Action: "upload", Status: "failed", Bytes: info.Size(), Finished: time.Now(), Err: err.Error()})
 		if timedOut(opCtx) {
 			slog.Error("uploading file timed out", "path", name, "timeout", timeout)
 			return syscall.ETIMEDOUT
@@ -1564,6 +1703,7 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 	}
 
 	st.uploadsDone.Add(1)
+	st.recordFinished(recentTransfer{Path: displayPath, Action: "upload", Status: "done", Bytes: info.Size(), Finished: time.Now()})
 	slog.Info("uploaded file", "path", name, "size", logx.FormatSize(info.Size()), logx.Elapsed(uploadStart))
 
 	// Re-read parent/name: a concurrent Rename during the upload may have moved this file, and
