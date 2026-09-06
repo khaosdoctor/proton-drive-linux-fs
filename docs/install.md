@@ -69,21 +69,6 @@ yay -S proton-drive-fs-git
 All three packages pull in `fuse3` as a dependency and enable the tray the
 same way as the native packages above.
 
-### Maintainer note: publishing to the AUR
-
-The release workflow pushes both AUR packages automatically, but the AUR
-account and the repo secret that authorizes it are set up once, by hand:
-
-1. Create an account on [aur.archlinux.org](https://aur.archlinux.org) and add
-   an SSH public key to it.
-2. Add the matching private key as the `AUR_KEY` secret on the GitHub repo:
-   `gh secret set AUR_KEY < ~/.ssh/aur`.
-
-The first release after that claims both `proton-drive-fs-bin` and
-`proton-drive-fs` on the AUR. Every release after that updates them
-automatically. Until `AUR_KEY` is set, the release workflow still runs; it
-just skips the AUR publish step instead of failing.
-
 ## Container image
 
 ```
