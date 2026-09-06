@@ -39,10 +39,19 @@ func (c *Client) OpenFile(ctx context.Context, n *Node) (*File, error) {
 		return nil, errors.New("node is not a file")
 	}
 
-	sessionKey, err := n.Link.GetSessionKey(n.KR)
+	kr, err := n.Keyring()
 	if err != nil {
 		return nil, err
 	}
+
+	sessionKey, err := n.Link.GetSessionKey(kr)
+	if err != nil {
+		return nil, err
+	}
+
+	// An open reads real bytes, so the plaintext size has to be the real one, not the encrypted
+	// Link size a fresh listing starts with.
+	n.ResolveAttrs()
 
 	revID := n.Link.FileProperties.ActiveRevision.ID
 
@@ -60,7 +69,7 @@ func (c *Client) OpenFile(ctx context.Context, n *Node) (*File, error) {
 		client:     c,
 		sessionKey: sessionKey,
 		blocks:     blocks,
-		size:       n.Size,
+		size:       n.Size(),
 		linkID:     n.Link.LinkID,
 		revID:      revID,
 		cache:      make(map[int][]byte),
@@ -130,9 +139,15 @@ func (f *File) getBlock(ctx context.Context, idx int) ([]byte, error) {
 		return nil, errors.New("block not found")
 	}
 
+	releaseSlot, err := f.client.acquireDownload(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	f.client.beginTransfer()
 	ciphertext, err := f.client.getBlockBytes(ctx, blk.BareURL, blk.Token)
 	f.client.endTransfer()
+	releaseSlot()
 	if err != nil {
 		return nil, err
 	}
@@ -200,7 +215,12 @@ func (c *Client) Thumbnail(ctx context.Context, n *Node) ([]byte, error) {
 		return nil, errors.New("revision has no thumbnail")
 	}
 
-	sessionKey, err := n.Link.GetSessionKey(n.KR)
+	kr, err := n.Keyring()
+	if err != nil {
+		return nil, err
+	}
+
+	sessionKey, err := n.Link.GetSessionKey(kr)
 	if err != nil {
 		return nil, err
 	}

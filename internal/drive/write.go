@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"io"
+	"log"
 	"mime"
 	"path"
 	"time"
@@ -15,11 +16,17 @@ import (
 	proton "github.com/henrybear327/go-proton-api"
 )
 
-// CreateDir creates a new folder named name under parent.
-func (c *Client) CreateDir(ctx context.Context, parent *Node, name string) error {
-	nodeKey, nodePassphrase, nodePassphraseSig, err := generateNodeKeys(parent.KR, c.signKR)
+// CreateDir creates a new folder named name under parent and returns it, so the caller can add
+// it to a cached listing instead of re-listing the parent.
+func (c *Client) CreateDir(ctx context.Context, parent *Node, name string) (*Node, error) {
+	parentKR, err := parent.Keyring()
 	if err != nil {
-		return err
+		return nil, err
+	}
+
+	nodeKey, nodePassphrase, nodePassphraseSig, err := generateNodeKeys(parentKR, c.signKR)
+	if err != nil {
+		return nil, err
 	}
 
 	req := proton.CreateFolderReq{
@@ -30,30 +37,34 @@ func (c *Client) CreateDir(ctx context.Context, parent *Node, name string) error
 		NodePassphraseSignature: nodePassphraseSig,
 	}
 
-	if err := req.SetName(name, c.signKR, parent.KR); err != nil {
-		return err
+	if err := req.SetName(name, c.signKR, parentKR); err != nil {
+		return nil, err
 	}
 
-	parentHashKey, err := parent.Link.GetHashKey(parent.KR, c.addrKR)
+	parentHashKey, err := parent.Link.GetHashKey(parentKR, c.addrKR)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if err := req.SetHash(name, parentHashKey); err != nil {
-		return err
+		return nil, err
 	}
 
-	folderKR, err := unlockNodeKR(parent.KR, c.signKR, nodeKey, nodePassphrase, nodePassphraseSig)
+	folderKR, err := unlockNodeKR(parentKR, c.signKR, nodeKey, nodePassphrase, nodePassphraseSig)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if err := req.SetNodeHashKey(folderKR); err != nil {
-		return err
+		return nil, err
 	}
 
-	_, err = c.api.CreateFolder(ctx, c.shareID, req)
-	return err
+	res, err := c.api.CreateFolder(ctx, c.shareID, req)
+	if err != nil {
+		return nil, err
+	}
+
+	return c.fetchNode(ctx, res.ID, parent)
 }
 
 // moveLinkReq is the PUT .../links/{id}/move payload, matching WebClients' baseRequestBody
@@ -80,8 +91,20 @@ type moveLinkReq struct {
 	NameSignatureEmail string
 }
 
-// Move relocates and/or renames n from oldParent to newParent as newName.
-func (c *Client) Move(ctx context.Context, n *Node, oldParent, newParent *Node, newName string) error {
+// Move relocates and/or renames n from oldParent to newParent as newName, and returns n as it
+// now exists there: same link, new name, and a passphrase re-encrypted to the new parent, so a
+// caller can move the entry between two cached listings without re-listing either.
+func (c *Client) Move(ctx context.Context, n *Node, oldParent, newParent *Node, newName string) (*Node, error) {
+	oldParentKR, err := oldParent.Keyring()
+	if err != nil {
+		return nil, err
+	}
+
+	newParentKR, err := newParent.Keyring()
+	if err != nil {
+		return nil, err
+	}
+
 	// SetName/SetHash do the crypto (encrypt the new name, hash it under the new parent's hash
 	// key); go-proton-api's own MoveLinkReq is used only as a place to call them, its request is
 	// never sent.
@@ -89,22 +112,22 @@ func (c *Client) Move(ctx context.Context, n *Node, oldParent, newParent *Node, 
 		ParentLinkID: newParent.Link.LinkID,
 	}
 
-	if err := req.SetName(newName, c.signKR, newParent.KR); err != nil {
-		return err
+	if err := req.SetName(newName, c.signKR, newParentKR); err != nil {
+		return nil, err
 	}
 
-	newParentHashKey, err := newParent.Link.GetHashKey(newParent.KR, c.addrKR)
+	newParentHashKey, err := newParent.Link.GetHashKey(newParentKR, c.addrKR)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if err := req.SetHash(newName, newParentHashKey); err != nil {
-		return err
+		return nil, err
 	}
 
-	nodePassphrase, err := reencryptPassphrase(oldParent.KR, newParent.KR, n.Link.NodePassphrase)
+	nodePassphrase, err := reencryptPassphrase(oldParentKR, newParentKR, n.Link.NodePassphrase)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	body := moveLinkReq{
@@ -115,7 +138,20 @@ func (c *Client) Move(ctx context.Context, n *Node, oldParent, newParent *Node, 
 		NameSignatureEmail: c.signEmail,
 	}
 
-	return c.putJSON(ctx, "/drive/shares/"+c.shareID+"/links/"+n.Link.LinkID+"/move", body)
+	if err := c.putJSON(ctx, "/drive/shares/"+c.shareID+"/links/"+n.Link.LinkID+"/move", body); err != nil {
+		return nil, err
+	}
+
+	link := n.Link
+	link.Name = req.Name
+	link.Hash = req.Hash
+	link.ParentLinkID = req.ParentLinkID
+	link.NodePassphrase = nodePassphrase
+
+	moved := c.newNode(link, newName, newParentKR)
+	moved.inheritAttrs(n)
+
+	return moved, nil
 }
 
 // Trash moves n (a file or folder) into the trash. Proton trashes non-empty folders
@@ -129,7 +165,11 @@ func (c *Client) Trash(ctx context.Context, parent *Node, n *Node) error {
 // block, then the revision is committed with a signed manifest and XAttr metadata (size and
 // modTime).  On any failure after the link/revision was created, the partial upload is
 // best-effort cleaned up.
-func (c *Client) Upload(ctx context.Context, parent *Node, name string, existing *Node, r io.Reader, size int64, modTime time.Time) error {
+//
+// The committed link is read back and returned, so the caller can patch it into a cached listing
+// rather than re-list the parent folder. A nil node with a nil error means the upload itself
+// succeeded but the read-back did not; the caller has to expire its listing instead.
+func (c *Client) Upload(ctx context.Context, parent *Node, name string, existing *Node, r io.Reader, size int64, modTime time.Time) (*Node, error) {
 	newFile := existing == nil
 
 	c.beginTransfer()
@@ -137,21 +177,27 @@ func (c *Client) Upload(ctx context.Context, parent *Node, name string, existing
 
 	linkID, revisionID, nodeKR, sessionKey, err := c.startRevision(ctx, parent, name, existing)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	blockSizes, hashes, err := c.uploadBlocks(ctx, linkID, revisionID, sessionKey, nodeKR, r)
 	if err != nil {
 		c.cleanupFailedUpload(ctx, parent, linkID, revisionID, newFile)
-		return err
+		return nil, err
 	}
 
 	if err := c.commitRevision(ctx, linkID, revisionID, nodeKR, blockSizes, hashes, size, modTime); err != nil {
 		c.cleanupFailedUpload(ctx, parent, linkID, revisionID, newFile)
-		return err
+		return nil, err
 	}
 
-	return nil
+	uploaded, err := c.fetchNode(ctx, linkID, parent)
+	if err != nil {
+		log.Printf("drive: reading back uploaded link %s (%q): %v", linkID, name, err)
+		return nil, nil
+	}
+
+	return uploaded, nil
 }
 
 // startRevision creates a fresh file (existing == nil) or a new revision on an existing file,
@@ -162,7 +208,12 @@ func (c *Client) startRevision(ctx context.Context, parent *Node, name string, e
 		return c.createFile(ctx, parent, name)
 	}
 
-	sessionKey, err = existing.Link.GetSessionKey(existing.KR)
+	existingKR, err := existing.Keyring()
+	if err != nil {
+		return "", "", nil, nil, err
+	}
+
+	sessionKey, err = existing.Link.GetSessionKey(existingKR)
 	if err != nil {
 		return "", "", nil, nil, err
 	}
@@ -172,18 +223,23 @@ func (c *Client) startRevision(ctx context.Context, parent *Node, name string, e
 		return "", "", nil, nil, err
 	}
 
-	return existing.Link.LinkID, res.ID, existing.KR, sessionKey, nil
+	return existing.Link.LinkID, res.ID, existingKR, sessionKey, nil
 }
 
 // createFile creates a new, empty file (an initial draft revision) under parent and returns
 // the identifiers and keys needed to upload its content.
 func (c *Client) createFile(ctx context.Context, parent *Node, name string) (linkID, revisionID string, nodeKR *crypto.KeyRing, sessionKey *crypto.SessionKey, err error) {
-	nodeKey, nodePassphrase, nodePassphraseSig, err := generateNodeKeys(parent.KR, c.signKR)
+	parentKR, err := parent.Keyring()
 	if err != nil {
 		return "", "", nil, nil, err
 	}
 
-	nodeKR, err = unlockNodeKR(parent.KR, c.signKR, nodeKey, nodePassphrase, nodePassphraseSig)
+	nodeKey, nodePassphrase, nodePassphraseSig, err := generateNodeKeys(parentKR, c.signKR)
+	if err != nil {
+		return "", "", nil, nil, err
+	}
+
+	nodeKR, err = unlockNodeKR(parentKR, c.signKR, nodeKey, nodePassphrase, nodePassphraseSig)
 	if err != nil {
 		return "", "", nil, nil, err
 	}
@@ -202,11 +258,11 @@ func (c *Client) createFile(ctx context.Context, parent *Node, name string) (lin
 		return "", "", nil, nil, err
 	}
 
-	if err := req.SetName(name, c.signKR, parent.KR); err != nil {
+	if err := req.SetName(name, c.signKR, parentKR); err != nil {
 		return "", "", nil, nil, err
 	}
 
-	parentHashKey, err := parent.Link.GetHashKey(parent.KR, c.addrKR)
+	parentHashKey, err := parent.Link.GetHashKey(parentKR, c.addrKR)
 	if err != nil {
 		return "", "", nil, nil, err
 	}
@@ -344,11 +400,15 @@ func (c *Client) commitRevision(ctx context.Context, linkID, revisionID string, 
 // failed partway through Upload, so it doesn't linger as a broken draft.
 func (c *Client) cleanupFailedUpload(ctx context.Context, parent *Node, linkID, revisionID string, newFile bool) {
 	if newFile {
-		_ = c.api.DeleteChildren(ctx, c.shareID, parent.Link.LinkID, linkID)
+		if err := c.api.DeleteChildren(ctx, c.shareID, parent.Link.LinkID, linkID); err != nil {
+			log.Printf("drive: cleanup after failed upload of %q: %v", linkID, err)
+		}
 		return
 	}
 
-	_ = c.api.DeleteRevision(ctx, c.shareID, linkID, revisionID)
+	if err := c.api.DeleteRevision(ctx, c.shareID, linkID, revisionID); err != nil {
+		log.Printf("drive: cleanup after failed upload of %q: %v", linkID, err)
+	}
 }
 
 // blockManifest concatenates block digests in upload order to build the plaintext that gets

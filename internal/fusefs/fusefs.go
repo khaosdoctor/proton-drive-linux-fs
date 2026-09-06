@@ -47,7 +47,13 @@ type Options struct {
 	// DenyReaders are process names refused a read of a file above the client's large-file
 	// threshold. Empty allows every reader.
 	DenyReaders []string
+
+	// MaxUploads caps how many files upload at once. <=0 uses the default.
+	MaxUploads int
 }
+
+// defaultMaxUploads matches what Proton's own clients keep in flight.
+const defaultMaxUploads = 5
 
 // Mount publishes c's drive tree, rooted at root, at mountpoint and blocks until it is unmounted
 // or ctx is cancelled.
@@ -60,6 +66,9 @@ func Mount(ctx context.Context, mountpoint string, c *drive.Client, root *drive.
 	}
 	if opts.OpTimeout <= 0 {
 		opts.OpTimeout = defaultOpTimeout
+	}
+	if opts.MaxUploads <= 0 {
+		opts.MaxUploads = defaultMaxUploads
 	}
 
 	// FUSE's kernel-side permission check compares these against the caller; 0:0 made every write ACCESS fail.
@@ -92,7 +101,7 @@ func Mount(ctx context.Context, mountpoint string, c *drive.Client, root *drive.
 	log.Printf("proton-drive-fs %s (pid %d) mounting %s", opts.Version, os.Getpid(), mountpoint)
 
 	go c.Events(ctx, opts.PollInterval, st.handle, state.Paused)
-	go publishStatus(ctx, mountpoint, opts.Version, c)
+	go st.publishStatus(ctx, mountpoint, opts.Version)
 	go st.watchdog(ctx)
 
 	if st.thumbs != nil {
@@ -142,7 +151,7 @@ func Mount(ctx context.Context, mountpoint string, c *drive.Client, root *drive.
 // publishStatus writes a status snapshot for the tray once a second, and only when something
 // changed, so a mount nobody watches costs one comparison per second. The snapshot is removed
 // on shutdown; a reader that finds a stale one treats the mount as gone.
-func publishStatus(ctx context.Context, mountpoint string, version string, c *drive.Client) {
+func (st *mountState) publishStatus(ctx context.Context, mountpoint string, version string) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	defer state.RemoveStatus()
@@ -151,7 +160,17 @@ func publishStatus(ctx context.Context, mountpoint string, version string, c *dr
 	pid := os.Getpid()
 
 	for {
-		current := state.Status{Mountpoint: mountpoint, Version: version, PID: pid, Transfers: c.Transfers(), Paused: state.Paused()}
+		queued, done, failed := st.uploadCounters(time.Now())
+		current := state.Status{
+			Mountpoint:    mountpoint,
+			Version:       version,
+			PID:           pid,
+			Transfers:     st.client.Transfers(),
+			Paused:        state.Paused(),
+			UploadsQueued: queued,
+			UploadsDone:   done,
+			UploadsFailed: failed,
+		}
 		if current != last {
 			last = current
 			current.Updated = time.Now().Unix()
@@ -190,6 +209,17 @@ type mountState struct {
 	thumbJobs   chan thumbJob
 	denyReaders []string
 
+	// uploads bounds how many files upload at once, so a bulk copy does not open one connection
+	// per file it was handed.
+	uploads sem
+
+	// Upload progress the tray shows as "syncing done/total". drainedAt is when the queue first
+	// looked finished, so the counters can go back to zero once nothing is left.
+	uploadsQueued atomic.Int64
+	uploadsDone   atomic.Int64
+	uploadsFailed atomic.Int64
+	drainedAt     atomic.Int64
+
 	inflight sync.Map // *int -> inflightOp; the watchdog reports whatever is still here well past its deadline
 
 	mu            sync.Mutex
@@ -207,6 +237,7 @@ func newMountState(c *drive.Client, uid, gid uint32, opts Options) *mountState {
 		opTimeout:     opts.OpTimeout,
 		thumbs:        opts.Thumbnails,
 		denyReaders:   opts.DenyReaders,
+		uploads:       newSem(opts.MaxUploads),
 		dirs:          make(map[string]*dirNode),
 		parentOf:      make(map[string]string),
 		thumbInflight: make(map[string]bool),
@@ -217,6 +248,71 @@ func newMountState(c *drive.Client, uid, gid uint32, opts Options) *mountState {
 	}
 
 	return st
+}
+
+// sem is a counting semaphore. A buffered channel is the whole implementation; a nil sem lets
+// everything through.
+type sem chan struct{}
+
+func newSem(n int) sem {
+	if n <= 0 {
+		return nil
+	}
+	return make(sem, n)
+}
+
+// acquire takes a slot, or reports false when ctx is done first.
+func (s sem) acquire(ctx context.Context) bool {
+	if s == nil {
+		return true
+	}
+
+	select {
+	case s <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (s sem) release() {
+	if s == nil {
+		return
+	}
+	<-s
+}
+
+// counterResetIdle is how long the upload queue has to stay drained before the progress counters
+// go back to zero, so a finished bulk copy stops reading "10000/10000" forever.
+const counterResetIdle = 30 * time.Second
+
+// uploadCounters returns the progress to publish, zeroing the counters once the queue has been
+// drained for counterResetIdle.
+func (st *mountState) uploadCounters(now time.Time) (queued, done, failed int64) {
+	queued = st.uploadsQueued.Load()
+	done = st.uploadsDone.Load()
+	failed = st.uploadsFailed.Load()
+
+	if queued == 0 || queued > done+failed {
+		st.drainedAt.Store(0)
+		return queued, done, failed
+	}
+
+	since := st.drainedAt.Load()
+	if since == 0 {
+		st.drainedAt.Store(now.UnixNano())
+		return queued, done, failed
+	}
+	if now.UnixNano()-since < int64(counterResetIdle) {
+		return queued, done, failed
+	}
+
+	st.uploadsQueued.Add(-queued)
+	st.uploadsDone.Add(-done)
+	st.uploadsFailed.Add(-failed)
+	st.drainedAt.Store(0)
+
+	return 0, 0, 0
 }
 
 func (st *mountState) register(d *dirNode) {
@@ -417,6 +513,10 @@ type dirNode struct {
 	node     *drive.Node
 	children []*drive.Node
 	expires  time.Time
+
+	// loading is non-nil while one goroutine fetches this listing, and closed when it is done;
+	// everybody else waits on it instead of issuing the same ListChildren again.
+	loading chan struct{}
 }
 
 // setNode replaces the node backing this directory, e.g. after a remote listing refresh.
@@ -431,7 +531,7 @@ func (d *dirNode) setNode(n *drive.Node) {
 // the directory locked for the duration of a Mkdir/Create/Unlink/Rmdir/Rename/Release and waits
 // for our reply before releasing that lock, while NotifyEntry blocks writing to /dev/fuse until
 // the same lock is free — calling it from inside a handler for its own directory deadlocks the
-// handler against itself (goroutine dump: Mkdir -> refresh -> invalidate -> NotifyEntry, stuck
+// handler against itself (goroutine dump: Mkdir -> re-list -> invalidate -> NotifyEntry, stuck
 // behind the event loop's own invalidate of the same dir). The handler's own reply already tells
 // the kernel about the entry it just created/removed/renamed, so no notification is needed here.
 func (d *dirNode) expire() {
@@ -503,33 +603,84 @@ func (d *dirNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno
 	return 0
 }
 
-// load returns the cached children, refetching them once ttl has elapsed.
+// load returns the cached children, refetching them once ttl has elapsed. The fetch and its
+// crypto run with d.mu released: a folder with 10k entries takes long enough that holding the
+// lock across it would block every Lookup on this directory for the whole listing.
 func (d *dirNode) load(ctx context.Context) ([]*drive.Node, syscall.Errno) {
+	for {
+		children, done, wait := d.beginLoad()
+		if children != nil {
+			return children, 0
+		}
+
+		if done != nil {
+			return d.finishLoad(ctx, done)
+		}
+
+		select {
+		case <-wait:
+		case <-ctx.Done():
+			return nil, syscall.EINTR
+		}
+	}
+}
+
+// beginLoad says how this caller gets the listing: children when the cache is still fresh, done
+// when this caller owns the fetch, or wait when another goroutine is already fetching.
+func (d *dirNode) beginLoad() (children []*drive.Node, done, wait chan struct{}) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
 	if d.children != nil && time.Now().Before(d.expires) {
-		return d.children, 0
+		return d.children, nil, nil
+	}
+	if d.loading != nil {
+		return nil, nil, d.loading
 	}
 
-	defer d.st.track("readdir", d.node.Name)()
+	d.loading = make(chan struct{})
+	return nil, d.loading, nil
+}
+
+// publish swaps a freshly fetched listing in and wakes everyone waiting on the fetch. children
+// nil means the fetch failed and the cache stays as it was.
+func (d *dirNode) publish(children []*drive.Node, done chan struct{}) {
+	d.mu.Lock()
+	d.loading = nil
+	if children != nil {
+		d.children = children
+		d.expires = time.Now().Add(d.ttl)
+	}
+	d.mu.Unlock()
+
+	close(done)
+}
+
+// finishLoad fetches the listing this caller took ownership of in beginLoad.
+func (d *dirNode) finishLoad(ctx context.Context, done chan struct{}) ([]*drive.Node, syscall.Errno) {
+	d.mu.Lock()
+	node := d.node
+	d.mu.Unlock()
+
+	defer d.st.track("readdir", node.Name)()
 	opCtx, cancel := context.WithTimeout(ctx, d.st.opTimeout)
 	defer cancel()
 
-	children, err := d.client.Children(opCtx, d.node)
+	children, err := d.client.Children(opCtx, node)
 	if err != nil {
+		d.publish(nil, done)
+
 		if timedOut(opCtx) {
-			log.Printf("fusefs: readdir %q timed out after %s", d.node.Name, d.st.opTimeout)
+			log.Printf("fusefs: readdir %q timed out after %s", node.Name, d.st.opTimeout)
 			return nil, syscall.ETIMEDOUT
 		}
-		log.Printf("fusefs: readdir %q: %v", d.node.Name, err)
+		log.Printf("fusefs: readdir %q: %v", node.Name, err)
 		return nil, syscall.EIO
 	}
 
-	d.children = children
-	d.expires = time.Now().Add(d.ttl)
+	d.publish(children, done)
 
-	parentID := d.node.Link.LinkID
+	parentID := node.Link.LinkID
 	for _, ch := range children {
 		d.st.setParent(ch.Link.LinkID, parentID)
 	}
@@ -541,13 +692,65 @@ func (d *dirNode) load(ctx context.Context) ([]*drive.Node, syscall.Errno) {
 	return children, 0
 }
 
-// refresh drops the cached listing and forces an immediate refetch, so a just-made local change
-// (create, delete, move) is visible to the next Lookup/Readdir without waiting for ttl. Called
-// from request handlers (Mkdir, Unlink, Rmdir, Rename, Release), so it only expires the cache;
-// see expire's doc for why it must not notify the kernel.
-func (d *dirNode) refresh(ctx context.Context) ([]*drive.Node, syscall.Errno) {
-	d.expire()
-	return d.load(ctx)
+// upsertChild patches one entry into the cached listing, replacing an entry with the same link or
+// the same name. Handlers do this instead of re-listing the parent after a write: a re-list per
+// written file makes a bulk copy quadratic (10k files into one folder is ~340k listing requests
+// at 150 links per page).
+func (d *dirNode) upsertChild(n *drive.Node) {
+	d.mu.Lock()
+	d.children = upsertNode(d.children, n)
+	parentID := d.node.Link.LinkID
+	d.mu.Unlock()
+
+	d.st.setParent(n.Link.LinkID, parentID)
+}
+
+// removeChild drops the entry named name from the cached listing.
+func (d *dirNode) removeChild(name string) {
+	d.mu.Lock()
+	removed, children := removeNode(d.children, name)
+	d.children = children
+	d.mu.Unlock()
+
+	if removed != nil {
+		d.st.forgetParent(removed.Link.LinkID)
+	}
+}
+
+// upsertNode returns the listing with the entry n stands for replaced, matched by link id or by
+// name, and appended when the listing has neither. It copies rather than writing in place: load
+// hands the slice to Readdir and Lookup with the lock released, so a cached listing has to stay
+// immutable once it is published.
+func upsertNode(children []*drive.Node, n *drive.Node) []*drive.Node {
+	out := make([]*drive.Node, len(children), len(children)+1)
+	copy(out, children)
+
+	for i, ch := range out {
+		if ch.Link.LinkID != n.Link.LinkID && ch.Name != n.Name {
+			continue
+		}
+
+		out[i] = n
+		return out
+	}
+
+	return append(out, n)
+}
+
+// removeNode drops the entry named name, returning it and a copy of the listing without it.
+func removeNode(children []*drive.Node, name string) (*drive.Node, []*drive.Node) {
+	for i, ch := range children {
+		if ch.Name != name {
+			continue
+		}
+
+		out := make([]*drive.Node, 0, len(children)-1)
+		out = append(out, children[:i]...)
+		out = append(out, children[i+1:]...)
+		return ch, out
+	}
+
+	return nil, children
 }
 
 func (d *dirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
@@ -560,6 +763,10 @@ func (d *dirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (
 		if child.Name != name {
 			continue
 		}
+
+		// A listing only knows the encrypted size; resolve the real one for this single child,
+		// because what a Lookup reports is what applications go on.
+		child.ResolveAttrs()
 
 		if existing := d.GetChild(name); existing != nil {
 			refreshNode(existing, child)
@@ -590,13 +797,15 @@ func (d *dirNode) findChild(ctx context.Context, name string) (*drive.Node, sysc
 	return nil, syscall.ENOENT
 }
 
-// Mkdir creates a folder on the drive, then reuses Lookup to mount and return its inode.
+// Mkdir creates a folder on the drive and mounts its inode from what the API returned, without
+// re-listing the parent.
 func (d *dirNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	defer d.st.track("mkdir", path.Join(d.path, name))()
 	opCtx, cancel := context.WithTimeout(ctx, d.st.opTimeout)
 	defer cancel()
 
-	if err := d.client.CreateDir(opCtx, d.node, name); err != nil {
+	created, err := d.client.CreateDir(opCtx, d.node, name)
+	if err != nil {
 		if timedOut(opCtx) {
 			log.Printf("fusefs: mkdir %q timed out after %s", name, d.st.opTimeout)
 			return nil, syscall.ETIMEDOUT
@@ -605,11 +814,9 @@ func (d *dirNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse
 		return nil, syscall.EIO
 	}
 
-	if _, errno := d.refresh(ctx); errno != 0 {
-		return nil, errno
-	}
+	d.upsertChild(created)
 
-	return d.Lookup(ctx, name, out)
+	return d.makeChild(ctx, created, out), 0
 }
 
 // Create makes a temp file to buffer the new file's content and mounts a pending fileNode
@@ -668,8 +875,8 @@ func (d *dirNode) remove(ctx context.Context, name string) syscall.Errno {
 		return syscall.EIO
 	}
 
-	_, errno = d.refresh(ctx)
-	return errno
+	d.removeChild(name)
+	return 0
 }
 
 // renameNoReplace is Linux's RENAME_NOREPLACE renameat2() flag; go-fuse only exports
@@ -695,7 +902,8 @@ func (d *dirNode) Rename(ctx context.Context, name string, newParent fs.InodeEmb
 	opCtx, cancel := context.WithTimeout(ctx, d.st.opTimeout)
 	defer cancel()
 
-	if err := d.client.Move(opCtx, target, d.node, newDir.node, newName); err != nil {
+	moved, err := d.client.Move(opCtx, target, d.node, newDir.node, newName)
+	if err != nil {
 		if timedOut(opCtx) {
 			log.Printf("fusefs: rename %q to %q timed out after %s", name, newName, d.st.opTimeout)
 			return syscall.ETIMEDOUT
@@ -705,6 +913,7 @@ func (d *dirNode) Rename(ctx context.Context, name string, newParent fs.InodeEmb
 	}
 
 	if child := d.GetChild(name); child != nil {
+		refreshNode(child, moved)
 		if fn, ok := child.Operations().(*fileNode); ok {
 			fn.mu.Lock()
 			fn.name = newName
@@ -713,15 +922,10 @@ func (d *dirNode) Rename(ctx context.Context, name string, newParent fs.InodeEmb
 		}
 	}
 
-	if _, errno := d.refresh(ctx); errno != 0 {
-		return errno
-	}
-	if newDir == d {
-		return 0
-	}
+	d.removeChild(name)
+	newDir.upsertChild(moved)
 
-	_, errno = newDir.refresh(ctx)
-	return errno
+	return 0
 }
 
 func (d *dirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
@@ -775,8 +979,8 @@ func (d *dirNode) fillEntryOut(out *fuse.EntryOut, child *drive.Node) {
 	}
 
 	out.Mode = fuse.S_IFREG | 0o644
-	out.Size = uint64(child.Size)
-	out.Mtime = uint64(child.ModTime.Unix())
+	out.Size = uint64(child.Size())
+	out.Mtime = uint64(child.ModTime().Unix())
 }
 
 // refreshNode updates an already-mounted inode's embedded drive.Node so its Getattr/Open see
@@ -851,7 +1055,7 @@ func (f *fileNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.Attr
 		if size, ok := handle.tmpSize(); ok {
 			out.Size = uint64(size)
 			if node != nil {
-				out.Mtime = uint64(node.ModTime.Unix())
+				out.Mtime = uint64(node.ModTime().Unix())
 			}
 			return 0
 		}
@@ -861,8 +1065,12 @@ func (f *fileNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.Attr
 		return 0
 	}
 
-	out.Size = uint64(node.Size)
-	out.Mtime = uint64(node.ModTime.Unix())
+	// A stat is what applications size their reads by, so it must report the plaintext size even
+	// when this node came straight out of a listing.
+	node.ResolveAttrs()
+
+	out.Size = uint64(node.Size())
+	out.Mtime = uint64(node.ModTime().Unix())
 	return 0
 }
 
@@ -910,8 +1118,8 @@ func (f *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 
 	// Every open mode below can read, so the denylist applies to all of them.
 	if parent != nil {
-		if procName, pid, denied := parent.st.deniedReader(ctx, node.Size); denied {
-			log.Printf("fusefs: denied open of %q (%d bytes) by %s (pid %d); adjust with -deny-readers", f.currentName(), node.Size, procName, pid)
+		if procName, pid, denied := parent.st.deniedReader(ctx, node.Size()); denied {
+			log.Printf("fusefs: denied open of %q (%d bytes) by %s (pid %d); adjust with -deny-readers", f.currentName(), node.Size(), procName, pid)
 			return nil, 0, syscall.EACCES
 		}
 	}
@@ -1158,8 +1366,8 @@ func (h *fileHandle) Flush(ctx context.Context) syscall.Errno {
 	return 0
 }
 
-// Release uploads a dirty temp buffer as a new file or a new revision, then refreshes the
-// parent listing and this node so subsequent Getattr/Open see the uploaded revision. The temp
+// Release uploads a dirty temp buffer as a new file or a new revision, then patches the uploaded
+// link into the parent listing and into this node so subsequent Getattr/Open see it. The temp
 // file is always removed.
 func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 	h.mu.Lock()
@@ -1207,12 +1415,24 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 		return syscall.EIO
 	}
 
-	timeout := uploadTimeout(info.Size(), parent.st.opTimeout)
-	defer parent.st.track("upload", name)()
+	st := parent.st
+	st.uploadsQueued.Add(1)
+
+	if !st.uploads.acquire(ctx) {
+		st.uploadsFailed.Add(1)
+		log.Printf("fusefs: upload %q cancelled while queued", name)
+		return syscall.EINTR
+	}
+	defer st.uploads.release()
+
+	timeout := uploadTimeout(info.Size(), st.opTimeout)
+	defer st.track("upload", name)()
 	opCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	if err := fn.client.Upload(opCtx, parent.node, name, existing, tmp, info.Size(), time.Now()); err != nil {
+	uploaded, err := fn.client.Upload(opCtx, parent.node, name, existing, tmp, info.Size(), time.Now())
+	if err != nil {
+		st.uploadsFailed.Add(1)
 		if timedOut(opCtx) {
 			log.Printf("fusefs: upload %q timed out after %s", name, timeout)
 			return syscall.ETIMEDOUT
@@ -1221,25 +1441,29 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 		return syscall.EIO
 	}
 
+	st.uploadsDone.Add(1)
+
 	// Re-read parent/name: a concurrent Rename during the upload may have moved this file, and
-	// the post-upload refresh/lookup must target where it is now, not where it was.
+	// the entry has to be patched in where it is now, not where it was.
 	fn.mu.Lock()
-	refreshName := fn.name
-	refreshParent := fn.parent
+	uploadedName := fn.name
+	uploadedParent := fn.parent
 	fn.mu.Unlock()
 
-	children, errno := refreshParent.refresh(ctx)
-	if errno != 0 {
-		log.Printf("fusefs: reloading %q after upload", refreshName)
-		return errno
+	// A nil node means the upload succeeded but reading the link back did not; expire the listing
+	// so the next Lookup fetches the truth. Same when a Rename moved the file mid-upload.
+	if uploaded == nil {
+		uploadedParent.expire()
+		return 0
 	}
 
-	for _, child := range children {
-		if child.Name == refreshName {
-			fn.setNode(child)
-			break
-		}
+	if uploadedName != name {
+		uploadedParent.expire()
+		return 0
 	}
+
+	fn.setNode(uploaded)
+	uploadedParent.upsertChild(uploaded)
 
 	return 0
 }

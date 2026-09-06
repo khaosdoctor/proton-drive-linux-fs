@@ -304,13 +304,15 @@ func runMount(args []string) int {
 	thumbnails := fs.Bool("thumbnails", true, "write Proton's stored previews into the freedesktop thumbnail cache")
 	thumbnailDir := fs.String("thumbnail-dir", defaultThumbnailDir(), "freedesktop thumbnail cache directory")
 	denyReaders := fs.String("deny-readers", strings.Join(defaultDenyReaders, ","), "comma-separated process names refused a read of a file above -large-file; empty allows all")
+	maxUploads := fs.Int("max-uploads", 5, "how many files upload at once; the rest wait in line")
+	maxDownloads := fs.Int("max-downloads", 8, "how many file blocks download at once")
 	foreground := fs.Bool("foreground", false, "stay attached to the terminal and log to stderr; used by the systemd unit")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
 	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs mount <mountpoint> [-debug] [-ttl 30s] [-poll 10s] [-op-timeout 60s] [-cache-dir path] [-cache-size 1GiB] [-large-file 300MiB] [-thumbnails] [-thumbnail-dir path] [-deny-readers names] [-foreground]")
+		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs mount <mountpoint> [-debug] [-ttl 30s] [-poll 10s] [-op-timeout 60s] [-cache-dir path] [-cache-size 1GiB] [-large-file 300MiB] [-thumbnails] [-thumbnail-dir path] [-deny-readers names] [-max-uploads 5] [-max-downloads 8] [-foreground]")
 		return 2
 	}
 	mountpoint := fs.Arg(0)
@@ -380,6 +382,7 @@ func runMount(args []string) int {
 		return 1
 	}
 	client.SetBlockCache(blockCache, largeFileLimit)
+	client.SetMaxDownloads(*maxDownloads)
 
 	var thumbStore *thumbs.Store
 	if *thumbnails && *thumbnailDir != "" {
@@ -400,6 +403,7 @@ func runMount(args []string) int {
 		OpTimeout:    *opTimeout,
 		Thumbnails:   thumbStore,
 		DenyReaders:  parseDenyReaders(*denyReaders),
+		MaxUploads:   *maxUploads,
 	}
 
 	if err := fusefs.Mount(ctx, mountpoint, client, root, opts); err != nil {

@@ -22,6 +22,12 @@ type Status struct {
 	Transfers  int64  `json:"transfers"`
 	Paused     bool   `json:"paused"`
 	Updated    int64  `json:"updated"`
+
+	// Upload progress for the current batch: how many files were handed to the uploader, how many
+	// finished, and how many gave up. All three go back to zero once the queue drains.
+	UploadsQueued int64 `json:"uploads_queued"`
+	UploadsDone   int64 `json:"uploads_done"`
+	UploadsFailed int64 `json:"uploads_failed"`
 }
 
 // Fresh reports whether the snapshot is recent enough to trust.

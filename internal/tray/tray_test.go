@@ -167,6 +167,36 @@ func TestStatusLine(t *testing.T) {
 		{"paused", snapshot{loggedIn: true, mounted: true, paused: true}, "Mounted at /m (paused)"},
 		{"syncing", snapshot{loggedIn: true, mounted: true, transfers: 2, fresh: true}, "Mounted at /m (syncing)"},
 		{
+			"upload progress",
+			snapshot{loggedIn: true, mounted: true, fresh: true, uploadsQueued: 10000, uploadsDone: 312},
+			"Mounted at /m, syncing 312/10000",
+		},
+		{
+			"upload progress with failures",
+			snapshot{loggedIn: true, mounted: true, fresh: true, uploadsQueued: 10000, uploadsDone: 312, uploadsFailed: 4},
+			"Mounted at /m, syncing 312/10000, 4 failed",
+		},
+		{
+			"drained queue reports the failures only",
+			snapshot{loggedIn: true, mounted: true, fresh: true, uploadsQueued: 10, uploadsDone: 8, uploadsFailed: 2},
+			"Mounted at /m, 2 failed",
+		},
+		{
+			"drained queue is not syncing",
+			snapshot{loggedIn: true, mounted: true, fresh: true, uploadsQueued: 10, uploadsDone: 10},
+			"Mounted at /m",
+		},
+		{
+			"stale snapshot hides the progress",
+			snapshot{loggedIn: true, mounted: true, uploadsQueued: 10, uploadsDone: 1},
+			"Mounted at /m",
+		},
+		{
+			"paused outranks the progress",
+			snapshot{loggedIn: true, mounted: true, paused: true, fresh: true, uploadsQueued: 10, uploadsDone: 1},
+			"Mounted at /m (paused)",
+		},
+		{
 			"daemon version mismatch",
 			snapshot{loggedIn: true, mounted: true, fresh: true, ownVersion: "1.2.0", daemonVersion: "1.1.0"},
 			"Mounted at /m (daemon 1.1.0, restart needed)",

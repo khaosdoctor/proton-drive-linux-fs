@@ -86,6 +86,11 @@ type snapshot struct {
 	transfers int64
 	fresh     bool
 
+	// Upload progress from the status file, shown as "syncing done/total".
+	uploadsQueued int64
+	uploadsDone   int64
+	uploadsFailed int64
+
 	// ownVersion is this tray's build; daemonVersion is the running daemon's, from the status
 	// file. A mismatch means a rebuild left an older daemon running.
 	ownVersion    string
@@ -94,6 +99,11 @@ type snapshot struct {
 
 func (sn snapshot) state() State {
 	return pickState(sn.loggedIn, sn.mounted, sn.paused, sn.transfers, sn.fresh)
+}
+
+// uploading reports whether files are still waiting on the uploader.
+func (sn snapshot) uploading() bool {
+	return sn.uploadsQueued > sn.uploadsDone+sn.uploadsFailed
 }
 
 // daemonMismatch reports whether the daemon serving the mount is a different build than this
@@ -114,8 +124,14 @@ func (sn snapshot) statusLine(mountpoint string) string {
 	switch {
 	case sn.paused:
 		line += " (paused)"
+	case sn.fresh && sn.uploading():
+		line += fmt.Sprintf(", syncing %d/%d", sn.uploadsDone, sn.uploadsQueued)
 	case sn.fresh && sn.transfers > 0:
 		line += " (syncing)"
+	}
+
+	if sn.fresh && sn.uploadsFailed > 0 {
+		line += fmt.Sprintf(", %d failed", sn.uploadsFailed)
 	}
 
 	if sn.daemonMismatch() {
@@ -212,6 +228,9 @@ func (a *app) poll() {
 			paused:        state.Paused(),
 			transfers:     st.Transfers,
 			fresh:         ok && st.Fresh(),
+			uploadsQueued: st.UploadsQueued,
+			uploadsDone:   st.UploadsDone,
+			uploadsFailed: st.UploadsFailed,
 			ownVersion:    a.opts.Version,
 			daemonVersion: st.Version,
 		})

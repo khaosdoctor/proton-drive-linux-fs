@@ -16,7 +16,7 @@ import (
 
 // thumbQueueSize bounds the pending thumbnail fetches. Listing a huge folder queues what fits
 // and drops the rest; the next listing after the TTL picks them up.
-const thumbQueueSize = 256
+const thumbQueueSize = 4096
 
 // thumbJob is one file whose Proton thumbnail should be fetched and cached.
 type thumbJob struct {
@@ -52,7 +52,7 @@ func (st *mountState) fetchThumb(ctx context.Context, job thumbJob) {
 		return
 	}
 
-	if err := st.thumbs.Write(job.relPath, job.node.ModTime, job.node.Size, img); err != nil {
+	if err := st.thumbs.Write(job.relPath, job.node.ModTime(), job.node.Size(), img); err != nil {
 		st.thumbFailed(job, err)
 		return
 	}
@@ -81,7 +81,7 @@ func (st *mountState) queueThumbs(dirPath string, children []*drive.Node) {
 		}
 
 		relPath := path.Join(dirPath, ch.Name)
-		if st.thumbs.Fresh(relPath, ch.ModTime) {
+		if st.thumbs.Fresh(relPath, ch.ModTime()) {
 			continue
 		}
 
