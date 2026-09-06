@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -255,6 +256,7 @@ func (s *Session) Client() (*proton.Client, *Keys, error) {
 		s.RefreshToken = a.RefreshToken
 		s.mu.Unlock()
 		_, _ = s.Save() // ponytail: best-effort persist of refreshed tokens
+		slog.Info("token refreshed", "username", s.Username)
 	})
 
 	ctx := context.Background()

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -9,6 +10,41 @@ import (
 
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/state"
 )
+
+func TestParseLogLevel(t *testing.T) {
+	tests := []struct {
+		in      string
+		want    slog.Level
+		wantErr bool
+	}{
+		{"debug", slog.LevelDebug, false},
+		{"info", slog.LevelInfo, false},
+		{"warn", slog.LevelWarn, false},
+		{"warning", slog.LevelWarn, false},
+		{"error", slog.LevelError, false},
+		{"DEBUG", slog.LevelDebug, false},
+		{" info ", slog.LevelInfo, false},
+		{"trace", 0, true},
+		{"", 0, true},
+	}
+
+	for _, tt := range tests {
+		got, err := parseLogLevel(tt.in)
+		if tt.wantErr {
+			if err == nil {
+				t.Errorf("parseLogLevel(%q) = nil error, want an error", tt.in)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("parseLogLevel(%q) unexpected error: %v", tt.in, err)
+			continue
+		}
+		if got != tt.want {
+			t.Errorf("parseLogLevel(%q) = %v, want %v", tt.in, got, tt.want)
+		}
+	}
+}
 
 func TestParseDenyReaders(t *testing.T) {
 	tests := []struct {

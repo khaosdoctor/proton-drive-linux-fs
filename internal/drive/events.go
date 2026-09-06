@@ -2,7 +2,7 @@ package drive
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"time"
 
 	proton "github.com/henrybear327/go-proton-api"
@@ -18,13 +18,13 @@ type Event struct {
 }
 
 // Events polls volume events every interval and calls fn for each one until ctx is done.
-// It returns after ctx is cancelled. Errors are logged with log.Printf and polling continues.
+// It returns after ctx is cancelled. Errors are logged and polling continues.
 // When paused is non-nil and returns true, the tick is skipped without calling the API; the
 // next unpaused tick picks up from the last event seen, so nothing is lost.
 func (c *Client) Events(ctx context.Context, interval time.Duration, fn func(Event), paused func() bool) {
 	last, err := c.api.GetLatestVolumeEventID(ctx, c.volumeID)
 	if err != nil {
-		log.Printf("drive: getting latest volume event id: %v", err)
+		slog.Warn("getting latest volume event id failed", "err", err)
 	}
 
 	ticker := time.NewTicker(interval)
@@ -44,7 +44,7 @@ func (c *Client) Events(ctx context.Context, interval time.Duration, fn func(Eve
 		if last == "" {
 			last, err = c.api.GetLatestVolumeEventID(ctx, c.volumeID)
 			if err != nil {
-				log.Printf("drive: getting latest volume event id: %v", err)
+				slog.Warn("getting latest volume event id failed", "err", err)
 				continue
 			}
 		}
@@ -52,9 +52,10 @@ func (c *Client) Events(ctx context.Context, interval time.Duration, fn func(Eve
 		for {
 			ev, err := c.api.GetVolumeEvent(ctx, c.volumeID, last)
 			if err != nil {
-				log.Printf("drive: getting volume event: %v", err)
+				slog.Warn("getting volume event failed", "event_id", last, "err", err)
 				break
 			}
+			slog.Debug("volume event", "event_id", ev.EventID, "count", len(ev.Events), "refresh", ev.Refresh)
 
 			for _, e := range ev.Events {
 				fn(Event{

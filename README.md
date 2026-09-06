@@ -65,10 +65,10 @@ A successful login writes a session file to `$XDG_CONFIG_HOME/proton-drive-fs/se
 ### Mount
 
 ```
-proton-drive-fs mount <mountpoint> [-debug] [-ttl 30s] [-poll 10s] [-op-timeout 60s] [-cache-dir path] [-cache-size 1GiB] [-large-file 300MiB] [-thumbnails] [-thumbnail-dir path] [-deny-readers names] [-max-uploads 5] [-max-downloads 8] [-foreground]
+proton-drive-fs mount <mountpoint> [-debug] [-ttl 30s] [-poll 10s] [-op-timeout 60s] [-cache-dir path] [-cache-size 1GiB] [-large-file 300MiB] [-thumbnails] [-thumbnail-dir path] [-deny-readers names] [-max-uploads 5] [-max-downloads 8] [-foreground] [-log-level info] [-log-stderr]
 ```
 
-If the mountpoint does not exist, mount says so and creates it. By default mount detaches into the background and waits until the filesystem is mounted. When `systemd-cat` is on `PATH` the daemon's output goes to the journal under the identifier `proton-drive-fs`, readable with `journalctl --user -t proton-drive-fs`; without it, the output is appended to `$XDG_STATE_HOME/proton-drive-fs/mount.log` (falling back to `~/.local/state/proton-drive-fs/mount.log`).
+If the mountpoint does not exist, mount says so and creates it. By default mount detaches into the background and waits until the filesystem is mounted. The daemon logs to the systemd journal itself under the identifier `proton-drive-fs`, readable with `journalctl --user -t proton-drive-fs`; see [Logs](#logs) for levels and the file fallback when there's no journal.
 
 - `-debug` (default: false): enable FUSE debug logging.
 - `-ttl` (default: 30s): how long a directory listing stays cached before it is fetched again.
@@ -82,7 +82,9 @@ If the mountpoint does not exist, mount says so and creates it. By default mount
 - `-deny-readers` (default: `tracker-miner-fs,tracker-extract,localsearch,baloo_file,baloo_file_extractor,tumblerd,ffmpegthumbnailer,totem-video-thumbnailer,gdk-pixbuf-thumbnailer,gnome-desktop-thumbnailer,evince-thumbnailer`): comma-separated process names refused a read of a file above `-large-file`. Passing a value replaces the default list; `-deny-readers ""` turns the refusal off.
 - `-max-uploads` (default: 5): how many files upload at once. Copying a folder in hands the mount every file at once; the rest wait in line instead of opening a connection each. 0 or less removes the cap.
 - `-max-downloads` (default: 8): how many file blocks download at once, across every open file. 0 or less removes the cap.
-- `-foreground` (default: false): stay attached to the terminal and log to stderr; used by the systemd unit.
+- `-foreground` (default: false): stay attached to the terminal instead of detaching into the background; used by the systemd unit.
+- `-log-level` (default: info): log verbosity, one of `debug`, `info`, `warn`, `error`. See [Logs](#logs).
+- `-log-stderr` (default: false): force logging to stderr instead of the systemd journal, useful with `-foreground` when working at a terminal.
 
 `mount` refuses to attach to a mountpoint that is already mounted, printing the running daemon's pid and version when the status file has them, so a rebuild whose earlier unmount failed as busy never gets mistaken for actually running the new binary; `make restart` (optionally `MP=<mountpoint>`, default `~/ProtonDrive`) unmounts, rebuilds, and remounts in one step.
 
@@ -125,7 +127,30 @@ systemctl --user enable --now proton-drive-fs
 systemctl --user enable --now proton-drive-fs-tray
 ```
 
-Both units run the binary from `~/.local/bin`; edit `ExecStart` if yours lives elsewhere. The mount unit runs `mount -foreground`, so its output goes to the journal as part of the unit. A mount started outside systemd logs to the journal too when `systemd-cat` is installed: `journalctl --user -t proton-drive-fs`.
+Both units run the binary from `~/.local/bin`; edit `ExecStart` if yours lives elsewhere. The mount unit runs `mount -foreground`; either way the daemon logs straight to the journal under the identifier `proton-drive-fs`, see [Logs](#logs).
+
+## Logs
+
+The daemon logs structured entries to the systemd user journal under the identifier `proton-drive-fs`, asynchronously so a slow or backed-up log write never stalls a filesystem operation. When there's no journal to write to (no `systemd`, or `-log-stderr`), it falls back to plain text on stderr, which lands in `$XDG_STATE_HOME/proton-drive-fs/mount.log` (falling back to `~/.local/state/proton-drive-fs/mount.log`) for a detached mount.
+
+Two levels matter day to day:
+
+- **info**: human-readable, one line per event: mounting and unmounting, opening a file, uploading and uploaded (with size and how long it took), creating a folder, renaming, moving, deleting, a remote change applied to a directory, a thumbnail written, pause and resume, login and logout, a token refresh, and the version and pid at startup.
+- **debug**: the technical detail behind those: block-level cache hits and misses and decrypt timing on reads, API call names and how long they took, listing page counts, keyring unlocks, XAttr resolution, volume event ids, waits on an in-flight fetch another goroutine already started, semaphore waits over 100ms, watchdog checks, and thumbnail queue drops.
+
+Warnings cover recoverable oddities: a denied reader open, a retry, dropped log records, a stale daemon. Errors are operations that failed and were returned to the kernel or the user, carrying the underlying error. Nothing here ever logs a token, password, key material, or file content; paths and file names are fine and do show up.
+
+Read the log with:
+
+```
+journalctl --user -t proton-drive-fs -f       # follow, info and above
+journalctl --user -t proton-drive-fs -p debug -f   # follow, debug and above
+journalctl --user -t proton-drive-fs -o verbose -n 20   # see every field on the last 20 entries
+```
+
+`-o verbose` is worth knowing about: every attr on a log line (path, size, elapsed, err, and so on) is a journal field, uppercased with dots turned into underscores (`op` becomes `OP`, `cache.hit` becomes `CACHE_HIT`), and the plain `journalctl` view hides them.
+
+`-log-level` on `mount` controls what gets logged, `debug` down to `error` (default `info`); `-log-stderr` forces the stderr/file fallback even when the journal is available, which is handy with `-foreground` at a terminal.
 
 ## Tray
 
@@ -144,11 +169,11 @@ The icon is a cloud in one of four states, picked in this order:
 
 While uploads are queued the status line counts them, as in `Mounted at ~/ProtonDrive, syncing 312/10000`, and appends `, N failed` when some of them could not be uploaded. The counts go back to zero half a minute after the queue drains.
 
-The menu holds a status line (`Mounted at <path>`, `Not mounted` or `Not logged in`), then items shown only when they apply: `Mount` when logged in but not mounted, `Unmount` and `Restart mount` when mounted, `Pause syncing` or `Resume syncing` when mounted, `Open folder` when mounted, `Open logs`, `Log in` when logged out, `Log out` when logged in, and `Quit`. `Mount` and `Unmount` run this same binary, so a mount started from the menu is the same detached mount you get from a shell and it survives the tray closing. `Quit` only closes the icon; it never unmounts.
+The menu holds a status line (`Mounted at <path>`, `Not mounted` or `Not logged in`), then items shown only when they apply: `Mount` when logged in but not mounted, `Unmount` and `Restart mount` when mounted, `Pause syncing` or `Resume syncing` when mounted, `Open folder` when mounted, `Open logs`, `Open debug logs`, `Log in` when logged out, `Log out` when logged in, and `Quit`. `Mount` and `Unmount` run this same binary, so a mount started from the menu is the same detached mount you get from a shell and it survives the tray closing. `Quit` only closes the icon; it never unmounts.
 
 When the status line gets a ` (daemon X, restart needed)` suffix, the running daemon is an older build than the tray itself, usually because a rebuild's earlier unmount failed as busy; click `Restart mount` to unmount and remount with the current binary.
 
-`Log in` needs a terminal because it prompts for the password. The tray starts the first terminal it finds on `PATH`, trying `$TERMINAL` first and then `x-terminal-emulator`, `kitty`, `alacritty`, `foot`, `gnome-terminal`, `konsole`, `xterm`. When none of them is installed, the status line shows the command to run yourself for ten seconds. `Open logs` follows the journal in a terminal when the mount logs there, and otherwise opens the log file with `xdg-open`.
+`Log in` needs a terminal because it prompts for the password. The tray starts the first terminal it finds on `PATH`, trying `$TERMINAL` first and then `x-terminal-emulator`, `kitty`, `alacritty`, `foot`, `gnome-terminal`, `konsole`, `xterm`. When none of them is installed, the status line shows the command to run yourself for ten seconds. `Open logs` follows the journal in a terminal when the mount logs there, and otherwise opens the log file with `xdg-open`; `Open debug logs` does the same at debug verbosity (`journalctl --user -t proton-drive-fs -p debug -f`).
 
 Pause stops one thing: the poll of Proton's event feed. Remote changes stop reaching the mount until you resume, while reads and writes keep working throughout. It is a marker file at `$XDG_RUNTIME_DIR/proton-drive-fs/paused` (falling back to `$XDG_STATE_HOME/proton-drive-fs/paused`) that the mount checks on every poll tick, so it also applies to a mount the tray did not start.
 

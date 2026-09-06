@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -22,6 +23,7 @@ import (
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/auth"
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/drive"
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/fusefs"
+	"github.com/khaosdoctor/proton-drive-linux-fs/internal/logx"
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/state"
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/thumbs"
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/tray"
@@ -42,6 +44,11 @@ func run(args []string) int {
 		usage()
 		return 2
 	}
+
+	// Every subcommand logs through the default slog logger; "mount" overrides this with
+	// -log-level/-log-stderr once it has parsed its own flags.
+	_, stopLog := logx.Setup(logx.Options{Level: slog.LevelInfo, Tag: journalTag})
+	defer stopLog()
 
 	switch args[0] {
 	case "login":
@@ -132,6 +139,7 @@ func runLogin(args []string) int {
 		fmt.Fprintf(os.Stderr, "warning: no OS keyring available (Secret Service/libsecret); key password stored in %s with mode 0600\n", path)
 	}
 
+	slog.Info("logged in", "username", username)
 	fmt.Printf("logged in as %s\n", username)
 	return 0
 }
@@ -292,6 +300,22 @@ func parseCacheSize(s string) (int64, error) {
 	return val, nil
 }
 
+// parseLogLevel parses -log-level's value into an slog.Level.
+func parseLogLevel(s string) (slog.Level, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "debug":
+		return slog.LevelDebug, nil
+	case "info":
+		return slog.LevelInfo, nil
+	case "warn", "warning":
+		return slog.LevelWarn, nil
+	case "error":
+		return slog.LevelError, nil
+	default:
+		return 0, fmt.Errorf("unknown level %q (want debug, info, warn or error)", s)
+	}
+}
+
 func runMount(args []string) int {
 	fs := flag.NewFlagSet("mount", flag.ContinueOnError)
 	debug := fs.Bool("debug", false, "enable FUSE debug logging")
@@ -306,13 +330,21 @@ func runMount(args []string) int {
 	denyReaders := fs.String("deny-readers", strings.Join(defaultDenyReaders, ","), "comma-separated process names refused a read of a file above -large-file; empty allows all")
 	maxUploads := fs.Int("max-uploads", 5, "how many files upload at once; the rest wait in line")
 	maxDownloads := fs.Int("max-downloads", 8, "how many file blocks download at once")
-	foreground := fs.Bool("foreground", false, "stay attached to the terminal and log to stderr; used by the systemd unit")
+	foreground := fs.Bool("foreground", false, "stay attached to the terminal instead of detaching into the background; used by the systemd unit")
+	logLevel := fs.String("log-level", "info", "log verbosity: debug, info, warn or error")
+	logStderr := fs.Bool("log-stderr", false, "force logging to stderr instead of the systemd journal; useful with -foreground")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
+	level, err := parseLogLevel(*logLevel)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: invalid -log-level:", err)
+		return 2
+	}
+
 	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs mount <mountpoint> [-debug] [-ttl 30s] [-poll 10s] [-op-timeout 60s] [-cache-dir path] [-cache-size 1GiB] [-large-file 300MiB] [-thumbnails] [-thumbnail-dir path] [-deny-readers names] [-max-uploads 5] [-max-downloads 8] [-foreground]")
+		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs mount <mountpoint> [-debug] [-ttl 30s] [-poll 10s] [-op-timeout 60s] [-cache-dir path] [-cache-size 1GiB] [-large-file 300MiB] [-thumbnails] [-thumbnail-dir path] [-deny-readers names] [-max-uploads 5] [-max-downloads 8] [-foreground] [-log-level info] [-log-stderr]")
 		return 2
 	}
 	mountpoint := fs.Arg(0)
@@ -341,6 +373,11 @@ func runMount(args []string) int {
 	if !*foreground {
 		return mountDetached(args, mountpoint)
 	}
+
+	// This process is the actual daemon (run directly with -foreground, or re-exec'd detached by
+	// the branch above): it owns the real logger, replacing the plain-info one run() installed.
+	_, stopLog := logx.Setup(logx.Options{Level: level, Tag: journalTag, ForceStderr: *logStderr})
+	defer stopLog()
 
 	cacheLimit, err := parseCacheSize(*cacheSize)
 	if err != nil {
@@ -477,14 +514,16 @@ func mountDetached(args []string, mountpoint string) int {
 	output := devNull
 	logPath := ""
 
-	// systemd-cat puts the daemon's output in the journal, where it is rotated and can be
-	// followed per unit. Without it, keep appending to the log file.
+	// The daemon logs structured records to the journal itself (see logx.Setup); wrapping it in
+	// systemd-cat only catches what bypasses that -- a panic or a Go runtime fatal error, which
+	// write straight to the process's real stderr before (or instead of) anything reaches logx.
+	// Without journald, or without systemd-cat installed, that raw output goes to the log file
+	// instead, the same file logx's own stderr fallback writes to.
 	catPath, catErr := exec.LookPath("systemd-cat")
-	if catErr == nil {
+	if logx.JournaldAvailable() && catErr == nil {
 		name = catPath
-		childArgs = append([]string{"-t", journalTag, "--level-prefix=false", exe}, childArgs...)
-	}
-	if catErr != nil {
+		childArgs = append([]string{"-t", journalTag, "-p", "err", "--level-prefix=false", exe}, childArgs...)
+	} else {
 		logPath, err = mountLogPath()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "error: preparing log file:", err)
@@ -909,6 +948,7 @@ func runLogout() int {
 		return 1
 	}
 
+	slog.Info("logged out")
 	fmt.Println("logged out")
 	return 0
 }

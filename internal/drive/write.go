@@ -7,7 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"io"
-	"log"
+	"log/slog"
 	"mime"
 	"path"
 	"time"
@@ -193,7 +193,7 @@ func (c *Client) Upload(ctx context.Context, parent *Node, name string, existing
 
 	uploaded, err := c.fetchNode(ctx, linkID, parent)
 	if err != nil {
-		log.Printf("drive: reading back uploaded link %s (%q): %v", linkID, name, err)
+		slog.Warn("reading back uploaded link failed", "link", linkID, "path", name, "err", err)
 		return nil, nil
 	}
 
@@ -401,13 +401,13 @@ func (c *Client) commitRevision(ctx context.Context, linkID, revisionID string, 
 func (c *Client) cleanupFailedUpload(ctx context.Context, parent *Node, linkID, revisionID string, newFile bool) {
 	if newFile {
 		if err := c.api.DeleteChildren(ctx, c.shareID, parent.Link.LinkID, linkID); err != nil {
-			log.Printf("drive: cleanup after failed upload of %q: %v", linkID, err)
+			slog.Warn("cleanup after failed upload failed", "link", linkID, "err", err)
 		}
 		return
 	}
 
 	if err := c.api.DeleteRevision(ctx, c.shareID, linkID, revisionID); err != nil {
-		log.Printf("drive: cleanup after failed upload of %q: %v", linkID, err)
+		slog.Warn("cleanup after failed upload failed", "link", linkID, "err", err)
 	}
 }
 

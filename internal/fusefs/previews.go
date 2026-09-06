@@ -2,7 +2,7 @@ package fusefs
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
@@ -56,6 +56,7 @@ func (st *mountState) fetchThumb(ctx context.Context, job thumbJob) {
 		st.thumbFailed(job, err)
 		return
 	}
+	slog.Info("thumbnail written", "path", job.relPath)
 
 	st.mu.Lock()
 	delete(st.thumbInflight, thumbKey(job.node))
@@ -65,7 +66,7 @@ func (st *mountState) fetchThumb(ctx context.Context, job thumbJob) {
 // thumbFailed logs the failure and leaves the revision marked, so a file Proton cannot give us a
 // preview for is not retried (and re-logged) on every listing refresh.
 func (st *mountState) thumbFailed(job thumbJob, err error) {
-	log.Printf("fusefs: thumbnail %q: %v", job.relPath, err)
+	slog.Warn("thumbnail failed", "path", job.relPath, "err", err)
 }
 
 // queueThumbs fetches previews for the files in a fresh listing that are not already cached.
@@ -93,9 +94,7 @@ func (st *mountState) queueThumbs(dirPath string, children []*drive.Node) {
 		case st.thumbJobs <- thumbJob{node: ch, relPath: relPath}:
 		default:
 			st.releaseThumb(ch)
-			if st.debug {
-				log.Printf("fusefs: thumbnail queue full, skipping %q", relPath)
-			}
+			slog.Debug("thumbnail queue full, skipping", "path", relPath)
 		}
 	}
 }

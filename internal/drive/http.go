@@ -6,13 +6,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	proton "github.com/henrybear327/go-proton-api"
 
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/auth"
+	"github.com/khaosdoctor/proton-drive-linux-fs/internal/logx"
 )
 
 // putJSON sends body as a JSON PUT to path (relative to auth.APIURL), authenticated with the
@@ -41,6 +44,9 @@ func (c *Client) putJSON(ctx context.Context, path string, body any) error {
 // putJSONOnce issues a single PUT attempt, returning the HTTP status code (0 on a transport
 // error) alongside any error so putJSON can tell a 401 apart from other failures.
 func (c *Client) putJSONOnce(ctx context.Context, path string, body any) (int, error) {
+	start := time.Now()
+	defer func() { slog.Debug("api call", "call", "PUT "+path, logx.Elapsed(start)) }()
+
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return 0, err

@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -14,6 +14,7 @@ import (
 	proton "github.com/henrybear327/go-proton-api"
 
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/auth"
+	"github.com/khaosdoctor/proton-drive-linux-fs/internal/logx"
 )
 
 // Client is a thin wrapper around the Proton API client scoped to a single drive share.
@@ -130,10 +131,12 @@ func (n *Node) Keyring() (*crypto.KeyRing, error) {
 		return n.kr, nil
 	}
 
+	start := time.Now()
 	kr, err := getKeyRing(n.Link, n.parentKR, n.client.addrKR)
 	if err != nil {
 		return nil, err
 	}
+	slog.Debug("keyring unlocked", "link", n.Link.LinkID, logx.Elapsed(start))
 
 	n.kr = kr
 	return n.kr, nil
@@ -180,7 +183,7 @@ func (n *Node) ResolveAttrs() {
 
 	kr, err := n.Keyring()
 	if err != nil {
-		log.Printf("drive: keyring for link %s: %v; keeping encrypted size %d", n.Link.LinkID, err, n.Link.Size)
+		slog.Warn("resolving keyring failed, keeping encrypted size", "link", n.Link.LinkID, "size", n.Link.Size, "err", err)
 		return
 	}
 
@@ -278,6 +281,8 @@ func resolveSigner(keys *auth.Keys, addressID string) (string, *crypto.KeyRing, 
 // attributes that need them, stay locked until something asks for that one child.
 // Entries whose name fails to decrypt are skipped rather than failing the whole listing.
 func (c *Client) Children(ctx context.Context, parent *Node) ([]*Node, error) {
+	start := time.Now()
+
 	parentKR, err := parent.Keyring()
 	if err != nil {
 		return nil, err
@@ -296,7 +301,10 @@ func (c *Client) Children(ctx context.Context, parent *Node) ([]*Node, error) {
 		active = append(active, link)
 	}
 
-	return c.decryptNames(active, parentKR), nil
+	nodes := c.decryptNames(active, parentKR)
+	slog.Debug("listed children", "parent", parent.Link.LinkID, "count", len(nodes), logx.Elapsed(start))
+
+	return nodes, nil
 }
 
 // decryptNames builds one node per link, decrypting the names on up to NumCPU goroutines: name
@@ -395,11 +403,13 @@ func (c *Client) resolveFileAttrs(link proton.Link, kr *crypto.KeyRing) (int64, 
 		return size, modTime
 	}
 
+	start := time.Now()
 	common, err := decryptXAttr(kr, link.FileProperties.ActiveRevision.XAttr)
 	if err != nil {
-		log.Printf("drive: xattr for link %s: %v; using encrypted size %d", link.LinkID, err, link.Size)
+		slog.Warn("resolving xattr failed, using encrypted size", "link", link.LinkID, "size", link.Size, "err", err)
 		return size, modTime
 	}
+	slog.Debug("xattr resolved", "link", link.LinkID, logx.Elapsed(start))
 
 	if common.Size > 0 {
 		size = common.Size

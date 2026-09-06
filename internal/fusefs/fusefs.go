@@ -5,7 +5,7 @@ import (
 	"errors"
 	"hash/fnv"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path"
@@ -19,6 +19,7 @@ import (
 	proton "github.com/henrybear327/go-proton-api"
 
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/drive"
+	"github.com/khaosdoctor/proton-drive-linux-fs/internal/logx"
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/state"
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/thumbs"
 )
@@ -54,6 +55,10 @@ type Options struct {
 
 // defaultMaxUploads matches what Proton's own clients keep in flight.
 const defaultMaxUploads = 5
+
+// semWaitLogThreshold is how long a handler has to wait for a semaphore slot (currently just the
+// upload one) before that wait is worth a debug log line.
+const semWaitLogThreshold = 100 * time.Millisecond
 
 // Mount publishes c's drive tree, rooted at root, at mountpoint and blocks until it is unmounted
 // or ctx is cancelled.
@@ -98,7 +103,7 @@ func Mount(ctx context.Context, mountpoint string, c *drive.Client, root *drive.
 		return err
 	}
 
-	log.Printf("proton-drive-fs %s (pid %d) mounting %s", opts.Version, os.Getpid(), mountpoint)
+	slog.Info("mounted", "path", mountpoint, "version", opts.Version, "pid", os.Getpid())
 
 	go c.Events(ctx, opts.PollInterval, st.handle, state.Paused)
 	go st.publishStatus(ctx, mountpoint, opts.Version)
@@ -118,14 +123,16 @@ func Mount(ctx context.Context, mountpoint string, c *drive.Client, root *drive.
 
 		<-ctx.Done()
 
+		slog.Info("unmounting", "path", mountpoint)
+
 		if err := server.Unmount(); err != nil {
-			log.Printf("fusefs: unmount %s: %v; retrying lazily", mountpoint, err)
+			slog.Warn("unmount failed, retrying lazily", "path", mountpoint, "err", err)
 
 			bin := fusermountBinary()
 			out, lazyErr := exec.Command(bin, "-u", "-z", mountpoint).CombinedOutput()
 			if lazyErr != nil {
-				log.Printf("fusefs: lazy unmount %s: %v: %s", mountpoint, lazyErr, out)
-				log.Printf("fusefs: could not unmount %s; run: proton-drive-fs unmount -force %s", mountpoint, mountpoint)
+				slog.Error("lazy unmount failed", "path", mountpoint, "err", lazyErr, "output", string(out))
+				slog.Error("could not unmount; run: proton-drive-fs unmount -force", "path", mountpoint)
 			}
 		}
 	}()
@@ -175,7 +182,9 @@ func (st *mountState) publishStatus(ctx context.Context, mountpoint string, vers
 			last = current
 			current.Updated = time.Now().Unix()
 			if err := state.WriteStatus(current); err != nil {
-				log.Printf("fusefs: writing status: %v", err)
+				slog.Warn("writing status failed", "err", err)
+			} else {
+				slog.Debug("status published", "transfers", current.Transfers, "uploads_queued", current.UploadsQueued, "uploads_done", current.UploadsDone, "uploads_failed", current.UploadsFailed)
 			}
 		}
 
@@ -202,7 +211,6 @@ type mountState struct {
 	client    *drive.Client
 	uid       uint32
 	gid       uint32
-	debug     bool
 	opTimeout time.Duration
 
 	// ctx is the mount's own lifetime context, cancelled on unmount. A directory listing fetch
@@ -241,7 +249,6 @@ func newMountState(ctx context.Context, c *drive.Client, uid, gid uint32, opts O
 		ctx:           ctx,
 		uid:           uid,
 		gid:           gid,
-		debug:         opts.Debug,
 		opTimeout:     opts.OpTimeout,
 		thumbs:        opts.Thumbnails,
 		denyReaders:   opts.DenyReaders,
@@ -355,6 +362,7 @@ func (st *mountState) invalidateDir(linkID string) {
 		return
 	}
 	d.invalidate()
+	slog.Info("remote change applied", "path", displayPath(d.path))
 }
 
 func (st *mountState) invalidateAll() {
@@ -368,6 +376,15 @@ func (st *mountState) invalidateAll() {
 	for _, d := range dirs {
 		d.invalidate()
 	}
+	slog.Info("remote change applied", "path", "/", "scope", "full refresh")
+}
+
+// displayPath returns p, or "/" for the mount root, whose own path is "".
+func displayPath(p string) string {
+	if p == "" {
+		return "/"
+	}
+	return p
 }
 
 // invalidateFileContent drops the kernel page cache for a file whose active revision changed,
@@ -480,13 +497,16 @@ func (st *mountState) logStuckOps() {
 	stale := 2 * st.opTimeout
 	now := time.Now()
 
+	count := 0
 	st.inflight.Range(func(_, v any) bool {
+		count++
 		op := v.(inflightOp)
 		if age := now.Sub(op.started); age > stale {
-			log.Printf("fusefs: watchdog: %s %q has been in flight for %s", op.op, op.path, age.Round(time.Second))
+			slog.Warn("operation stuck", "op", op.op, "path", op.path, "in_flight", age.Round(time.Second))
 		}
 		return true
 	})
+	slog.Debug("watchdog check", "in_flight", count)
 }
 
 // timedOut reports whether ctx's own per-request deadline, not some other failure, is why a
@@ -633,6 +653,8 @@ func (d *dirNode) load(ctx context.Context) ([]*drive.Node, syscall.Errno) {
 		if done != nil {
 			go d.finishLoad(done)
 			wait = done
+		} else if logx.DebugEnabled(ctx) {
+			slog.Debug("singleflight wait", "op", "readdir", "path", displayPath(d.path))
 		}
 
 		select {
@@ -729,10 +751,10 @@ func (d *dirNode) finishLoad(done chan struct{}) {
 	if err != nil {
 		errno := syscall.EIO
 		if timedOut(opCtx) {
-			log.Printf("fusefs: readdir %q timed out after %s", node.Name, d.st.opTimeout)
+			slog.Error("readdir timed out", "path", displayPath(d.path), "timeout", d.st.opTimeout)
 			errno = syscall.ETIMEDOUT
 		} else {
-			log.Printf("fusefs: readdir %q: %v", node.Name, err)
+			slog.Error("readdir failed", "path", displayPath(d.path), "err", err)
 		}
 
 		d.mu.Lock()
@@ -875,17 +897,20 @@ func (d *dirNode) findChild(ctx context.Context, name string) (*drive.Node, sysc
 // Mkdir creates a folder on the drive and mounts its inode from what the API returned, without
 // re-listing the parent.
 func (d *dirNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	defer d.st.track("mkdir", path.Join(d.path, name))()
+	target := path.Join(d.path, name)
+	slog.Info("creating folder", "path", target)
+
+	defer d.st.track("mkdir", target)()
 	opCtx, cancel := context.WithTimeout(ctx, d.st.opTimeout)
 	defer cancel()
 
 	created, err := d.client.CreateDir(opCtx, d.node, name)
 	if err != nil {
 		if timedOut(opCtx) {
-			log.Printf("fusefs: mkdir %q timed out after %s", name, d.st.opTimeout)
+			slog.Error("creating folder timed out", "path", target, "timeout", d.st.opTimeout)
 			return nil, syscall.ETIMEDOUT
 		}
-		log.Printf("fusefs: creating dir %q: %v", name, err)
+		slog.Error("creating folder failed", "path", target, "err", err)
 		return nil, syscall.EIO
 	}
 
@@ -900,7 +925,7 @@ func (d *dirNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse
 func (d *dirNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
 	tmp, err := os.CreateTemp("", "proton-drive-fs-*")
 	if err != nil {
-		log.Printf("fusefs: creating temp file for %q: %v", name, err)
+		slog.Error("creating temp file failed", "path", path.Join(d.path, name), "err", err)
 		return nil, nil, 0, syscall.EIO
 	}
 
@@ -937,16 +962,19 @@ func (d *dirNode) remove(ctx context.Context, name string) syscall.Errno {
 		return errno
 	}
 
-	defer d.st.track("remove", path.Join(d.path, name))()
+	targetPath := path.Join(d.path, name)
+	slog.Info("deleting", "path", targetPath)
+
+	defer d.st.track("remove", targetPath)()
 	opCtx, cancel := context.WithTimeout(ctx, d.st.opTimeout)
 	defer cancel()
 
 	if err := d.client.Trash(opCtx, d.node, target); err != nil {
 		if timedOut(opCtx) {
-			log.Printf("fusefs: remove %q timed out after %s", name, d.st.opTimeout)
+			slog.Error("deleting timed out", "path", targetPath, "timeout", d.st.opTimeout)
 			return syscall.ETIMEDOUT
 		}
-		log.Printf("fusefs: trashing %q: %v", name, err)
+		slog.Error("deleting failed", "path", targetPath, "err", err)
 		return syscall.EIO
 	}
 
@@ -973,17 +1001,26 @@ func (d *dirNode) Rename(ctx context.Context, name string, newParent fs.InodeEmb
 		return errno
 	}
 
-	defer d.st.track("rename", path.Join(d.path, name)+" -> "+path.Join(newDir.path, newName))()
+	from := path.Join(d.path, name)
+	to := path.Join(newDir.path, newName)
+
+	action := "moving"
+	if d == newDir {
+		action = "renaming"
+	}
+	slog.Info(action, "from", from, "to", to)
+
+	defer d.st.track("rename", from+" -> "+to)()
 	opCtx, cancel := context.WithTimeout(ctx, d.st.opTimeout)
 	defer cancel()
 
 	moved, err := d.client.Move(opCtx, target, d.node, newDir.node, newName)
 	if err != nil {
 		if timedOut(opCtx) {
-			log.Printf("fusefs: rename %q to %q timed out after %s", name, newName, d.st.opTimeout)
+			slog.Error(action+" timed out", "from", from, "to", to, "timeout", d.st.opTimeout)
 			return syscall.ETIMEDOUT
 		}
-		log.Printf("fusefs: moving %q to %q: %v", name, newName, err)
+		slog.Error(action+" failed", "from", from, "to", to, "err", err)
 		return syscall.EIO
 	}
 
@@ -1168,12 +1205,12 @@ func (f *fileNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAt
 	// ponytail: truncate needs a write handle already open on the file; a bare truncate(2) with
 	// no prior open isn't supported.
 	if handle == nil {
-		log.Printf("fusefs: truncate on %q without an open write handle", f.currentName())
+		slog.Warn("truncate without an open write handle", "path", f.currentName())
 		return syscall.EIO
 	}
 
 	if err := handle.truncate(int64(size)); err != nil {
-		log.Printf("fusefs: truncating %q: %v", f.currentName(), err)
+		slog.Error("truncating failed", "path", f.currentName(), "err", err)
 		return syscall.EIO
 	}
 
@@ -1191,10 +1228,12 @@ func (f *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 		return nil, 0, syscall.EIO
 	}
 
+	slog.Info("opening file", "path", f.currentName())
+
 	// Every open mode below can read, so the denylist applies to all of them.
 	if parent != nil {
 		if procName, pid, denied := parent.st.deniedReader(ctx, node.Size()); denied {
-			log.Printf("fusefs: denied open of %q (%d bytes) by %s (pid %d); adjust with -deny-readers", f.currentName(), node.Size(), procName, pid)
+			slog.Warn("denied reader", "path", f.currentName(), "size", node.Size(), "process", procName, "pid", pid)
 			return nil, 0, syscall.EACCES
 		}
 	}
@@ -1220,10 +1259,10 @@ func (f *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 		file, err := f.client.OpenFile(opCtx, node)
 		if err != nil {
 			if timedOut(opCtx) {
-				log.Printf("fusefs: open %q timed out after %s", f.currentName(), parent.st.opTimeout)
+				slog.Error("opening file timed out", "path", f.currentName(), "timeout", parent.st.opTimeout)
 				return nil, 0, syscall.ETIMEDOUT
 			}
-			log.Printf("fusefs: opening %q: %v", f.currentName(), err)
+			slog.Error("opening file failed", "path", f.currentName(), "err", err)
 			return nil, 0, syscall.EIO
 		}
 		return &fileHandle{node: f, file: file}, fuse.FOPEN_KEEP_CACHE, 0
@@ -1239,7 +1278,7 @@ func (f *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 
 	tmp, err := os.CreateTemp("", "proton-drive-fs-*")
 	if err != nil {
-		log.Printf("fusefs: creating temp file for %q: %v", f.currentName(), err)
+		slog.Error("creating temp file failed", "path", f.currentName(), "err", err)
 		return nil, 0, syscall.EIO
 	}
 
@@ -1252,10 +1291,10 @@ func (f *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 			_ = tmp.Close()
 			_ = os.Remove(tmp.Name())
 			if timedOut(opCtx) {
-				log.Printf("fusefs: open %q timed out after %s", f.currentName(), parent.st.opTimeout)
+				slog.Error("opening file timed out", "path", f.currentName(), "timeout", parent.st.opTimeout)
 				return nil, 0, syscall.ETIMEDOUT
 			}
-			log.Printf("fusefs: downloading %q: %v", f.currentName(), err)
+			slog.Error("downloading file failed", "path", f.currentName(), "err", err)
 			return nil, 0, syscall.EIO
 		}
 	}
@@ -1388,7 +1427,7 @@ func (h *fileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.Rea
 	if tmp != nil {
 		n, err := tmp.ReadAt(dest, off)
 		if err != nil && err != io.EOF {
-			log.Printf("fusefs: read %q at offset %d, len %d: %v", h.node.currentName(), off, len(dest), err)
+			slog.Error("read failed", "path", h.node.currentName(), "offset", off, "len", len(dest), "err", err)
 			return nil, syscall.EIO
 		}
 		return fuse.ReadResultData(dest[:n]), 0
@@ -1404,10 +1443,10 @@ func (h *fileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.Rea
 	n, err := h.file.ReadAt(opCtx, dest, off)
 	if err != nil && err != io.EOF {
 		if timedOut(opCtx) {
-			log.Printf("fusefs: read %q timed out after %s", name, st.opTimeout)
+			slog.Error("read timed out", "path", name, "timeout", st.opTimeout)
 			return nil, syscall.ETIMEDOUT
 		}
-		log.Printf("fusefs: read %q at offset %d, len %d: %v", name, off, len(dest), err)
+		slog.Error("read failed", "path", name, "offset", off, "len", len(dest), "err", err)
 		return nil, syscall.EIO
 	}
 
@@ -1425,7 +1464,7 @@ func (h *fileHandle) Write(ctx context.Context, data []byte, off int64) (uint32,
 
 	n, err := tmp.WriteAt(data, off)
 	if err != nil {
-		log.Printf("fusefs: writing temp buffer for %q: %v", h.node.currentName(), err)
+		slog.Error("writing temp buffer failed", "path", h.node.currentName(), "err", err)
 		return 0, syscall.EIO
 	}
 
@@ -1481,24 +1520,32 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 
 	info, err := tmp.Stat()
 	if err != nil {
-		log.Printf("fusefs: stat temp file for %q: %v", name, err)
+		slog.Error("stat temp file failed", "path", name, "err", err)
 		return syscall.EIO
 	}
 
 	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-		log.Printf("fusefs: seek temp file for %q: %v", name, err)
+		slog.Error("seek temp file failed", "path", name, "err", err)
 		return syscall.EIO
 	}
 
 	st := parent.st
 	st.uploadsQueued.Add(1)
 
-	if !st.uploads.acquire(ctx) {
+	semWait := time.Now()
+	acquired := st.uploads.acquire(ctx)
+	if waited := time.Since(semWait); waited > semWaitLogThreshold {
+		slog.Debug("semaphore wait", "op", "upload", "path", name, "waited", waited)
+	}
+	if !acquired {
 		st.uploadsFailed.Add(1)
-		log.Printf("fusefs: upload %q cancelled while queued", name)
+		slog.Warn("upload cancelled while queued", "path", name)
 		return syscall.EINTR
 	}
 	defer st.uploads.release()
+
+	slog.Info("uploading file", "path", name, "size", logx.FormatSize(info.Size()))
+	uploadStart := time.Now()
 
 	timeout := uploadTimeout(info.Size(), st.opTimeout)
 	defer st.track("upload", name)()
@@ -1509,14 +1556,15 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 	if err != nil {
 		st.uploadsFailed.Add(1)
 		if timedOut(opCtx) {
-			log.Printf("fusefs: upload %q timed out after %s", name, timeout)
+			slog.Error("uploading file timed out", "path", name, "timeout", timeout)
 			return syscall.ETIMEDOUT
 		}
-		log.Printf("fusefs: uploading %q: %v", name, err)
+		slog.Error("uploading file failed", "path", name, "err", err)
 		return syscall.EIO
 	}
 
 	st.uploadsDone.Add(1)
+	slog.Info("uploaded file", "path", name, "size", logx.FormatSize(info.Size()), logx.Elapsed(uploadStart))
 
 	// Re-read parent/name: a concurrent Rename during the upload may have moved this file, and
 	// the entry has to be patched in where it is now, not where it was.

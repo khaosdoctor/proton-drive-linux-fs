@@ -6,10 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/ProtonMail/gopenpgp/v2/crypto"
 	proton "github.com/henrybear327/go-proton-api"
+
+	"github.com/khaosdoctor/proton-drive-linux-fs/internal/logx"
 )
 
 const blockSize = 4 << 20 // 4 MiB, per Proton Drive's block layout
@@ -115,9 +119,14 @@ func (f *File) ReadAt(ctx context.Context, p []byte, off int64) (int, error) {
 }
 
 func (f *File) getBlock(ctx context.Context, idx int) ([]byte, error) {
+	debug := logx.DebugEnabled(ctx)
+
 	f.mu.Lock()
 	if data, ok := f.cache[idx]; ok {
 		f.mu.Unlock()
+		if debug {
+			slog.Debug("block cache hit", "link", f.linkID, "block", idx, "cache", "memory")
+		}
 		return data, nil
 	}
 	f.mu.Unlock()
@@ -130,6 +139,9 @@ func (f *File) getBlock(ctx context.Context, idx int) ([]byte, error) {
 			f.mu.Lock()
 			f.cachePut(idx, data)
 			f.mu.Unlock()
+			if debug {
+				slog.Debug("block cache hit", "link", f.linkID, "block", idx, "cache", "disk", "size", len(data))
+			}
 			return data, nil
 		}
 	}
@@ -144,6 +156,7 @@ func (f *File) getBlock(ctx context.Context, idx int) ([]byte, error) {
 		return nil, err
 	}
 
+	dlStart := time.Now()
 	f.client.beginTransfer()
 	ciphertext, err := f.client.getBlockBytes(ctx, blk.BareURL, blk.Token)
 	f.client.endTransfer()
@@ -152,12 +165,17 @@ func (f *File) getBlock(ctx context.Context, idx int) ([]byte, error) {
 		return nil, err
 	}
 
+	decStart := time.Now()
 	plain, err := f.sessionKey.Decrypt(ciphertext)
 	if err != nil {
 		return nil, err
 	}
 
 	data := plain.GetBinary()
+	if debug {
+		slog.Debug("block cache miss, downloaded", "link", f.linkID, "block", idx, "size", len(data),
+			"download_elapsed", decStart.Sub(dlStart), "decrypt_elapsed", time.Since(decStart))
+	}
 
 	if useDisk {
 		f.client.cache.Put(f.linkID, f.revID, idx, data)

@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +18,7 @@ import (
 
 	"fyne.io/systray"
 
+	"github.com/khaosdoctor/proton-drive-linux-fs/internal/logx"
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/state"
 )
 
@@ -151,6 +152,7 @@ type app struct {
 	restart              *systray.MenuItem
 	pause, resume        *systray.MenuItem
 	openFolder, openLogs *systray.MenuItem
+	openDebugLogs        *systray.MenuItem
 	login, logout        *systray.MenuItem
 	hintUntil            atomic.Int64
 }
@@ -176,6 +178,7 @@ func (a *app) onReady() {
 	a.resume = systray.AddMenuItem("Resume syncing", "Poll Proton for remote changes again")
 	a.openFolder = systray.AddMenuItem("Open folder", "Open "+a.opts.Mountpoint+" in the file manager")
 	a.openLogs = systray.AddMenuItem("Open logs", "Show the mount log")
+	a.openDebugLogs = systray.AddMenuItem("Open debug logs", "Show the mount log at debug verbosity")
 	systray.AddSeparator()
 
 	a.login = systray.AddMenuItem("Log in", "Log in to Proton in a terminal")
@@ -189,6 +192,7 @@ func (a *app) onReady() {
 	onClick(a.resume, func() { a.setPaused(false) })
 	onClick(a.openFolder, a.showFolder)
 	onClick(a.openLogs, a.showLogs)
+	onClick(a.openDebugLogs, a.showDebugLogs)
 	onClick(a.login, a.startLogin)
 	onClick(a.logout, func() { a.runSelf("logout") })
 	onClick(quit, systray.Quit)
@@ -312,7 +316,7 @@ func (a *app) hint(text string) {
 func (a *app) runSelf(args ...string) {
 	exe, err := os.Executable()
 	if err != nil {
-		log.Printf("tray: locating own executable: %v", err)
+		slog.Warn("locating own executable failed", "err", err)
 		return
 	}
 
@@ -321,7 +325,7 @@ func (a *app) runSelf(args ...string) {
 	cmd.Stdout = io.MultiWriter(os.Stdout, &output)
 	cmd.Stderr = io.MultiWriter(os.Stderr, &output)
 	if err := cmd.Run(); err != nil {
-		log.Printf("tray: %s: %v", strings.Join(args, " "), err)
+		slog.Warn("tray command failed", "command", strings.Join(args, " "), "err", err)
 		a.hint(firstLine(output.String()))
 	}
 
@@ -347,14 +351,18 @@ func firstLine(s string) string {
 
 func (a *app) setPaused(paused bool) {
 	if err := state.SetPaused(paused); err != nil {
-		log.Printf("tray: setting pause marker: %v", err)
+		slog.Warn("setting pause marker failed", "err", err)
+	} else if paused {
+		slog.Info("paused")
+	} else {
+		slog.Info("resumed")
 	}
 	a.signal()
 }
 
 func (a *app) showFolder() {
 	if err := exec.Command("xdg-open", a.opts.Mountpoint).Start(); err != nil {
-		log.Printf("tray: xdg-open %s: %v", a.opts.Mountpoint, err)
+		slog.Warn("xdg-open failed", "path", a.opts.Mountpoint, "err", err)
 	}
 }
 
@@ -362,7 +370,7 @@ func (a *app) showFolder() {
 func (a *app) showLogs() {
 	journal := []string{"journalctl", "--user", "-t", "proton-drive-fs", "-f"}
 
-	if _, err := exec.LookPath("systemd-cat"); err == nil {
+	if logx.JournaldAvailable() {
 		argv := terminalCommand(exec.LookPath, os.Getenv, journal)
 		if argv == nil {
 			a.hint("Run: " + strings.Join(journal, " "))
@@ -373,15 +381,33 @@ func (a *app) showLogs() {
 	}
 
 	if err := exec.Command("xdg-open", a.opts.LogPath).Start(); err != nil {
-		log.Printf("tray: xdg-open %s: %v", a.opts.LogPath, err)
+		slog.Warn("xdg-open failed", "path", a.opts.LogPath, "err", err)
 	}
+}
+
+// showDebugLogs is like showLogs but at debug verbosity, for the technical detail the plain
+// "Open logs" item leaves out.
+func (a *app) showDebugLogs() {
+	journal := []string{"journalctl", "--user", "-t", "proton-drive-fs", "-p", "debug", "-f"}
+
+	if !logx.JournaldAvailable() {
+		a.hint("Debug logs need the systemd journal")
+		return
+	}
+
+	argv := terminalCommand(exec.LookPath, os.Getenv, journal)
+	if argv == nil {
+		a.hint("Run: " + strings.Join(journal, " "))
+		return
+	}
+	start(argv)
 }
 
 // startLogin opens a terminal for the login prompts, which need stdin.
 func (a *app) startLogin() {
 	exe, err := os.Executable()
 	if err != nil {
-		log.Printf("tray: locating own executable: %v", err)
+		slog.Warn("locating own executable failed", "err", err)
 		return
 	}
 
@@ -397,7 +423,7 @@ func (a *app) startLogin() {
 func start(argv []string) {
 	cmd := exec.Command(argv[0], argv[1:]...)
 	if err := cmd.Start(); err != nil {
-		log.Printf("tray: %s: %v", strings.Join(argv, " "), err)
+		slog.Warn("starting command failed", "command", strings.Join(argv, " "), "err", err)
 		return
 	}
 	go func() { _ = cmd.Wait() }()
