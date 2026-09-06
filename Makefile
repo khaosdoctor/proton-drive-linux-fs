@@ -7,7 +7,7 @@ PREFIX ?= $(HOME)/.local
 MP ?= $(HOME)/ProtonDrive
 GOLANGCI := go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
 
-.PHONY: all build test race lint check generate install uninstall clean restart status packages help
+.PHONY: all build test race lint check generate install uninstall clean restart status packages aur-check help
 
 all: build
 
@@ -65,6 +65,9 @@ status:
 packages:
 	go run github.com/goreleaser/goreleaser/v2@latest release --snapshot --clean --skip=publish,docker
 
+aur-check:
+	go run github.com/goreleaser/goreleaser/v2@latest check
+
 help:
 	@printf "Usage: make [target]\n\nTargets:\n"
 	@printf "  all\t\tBuild the project (default)\n"
@@ -80,4 +83,5 @@ help:
 	@printf "  restart\tUnmount, rebuild, and remount MP (default: \$$HOME/ProtonDrive)\n"
 	@printf "  status\tShow proton-drive-fs status for MP (default: \$$HOME/ProtonDrive)\n"
 	@printf "  packages\tBuild local deb/rpm/apk/pkg.tar.zst packages into dist/\n"
+	@printf "  aur-check\tValidate .goreleaser.yaml, including the AUR publishers\n"
 	@printf "  help\t\tShow this message\n"

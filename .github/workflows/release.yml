@@ -52,3 +52,7 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # SSH private key for the AUR account. Until this secret exists, the
+          # `skip_upload` template in .goreleaser.yaml keeps the AUR publishers
+          # from running instead of failing the release.
+          AUR_KEY: ${{ secrets.AUR_KEY }}

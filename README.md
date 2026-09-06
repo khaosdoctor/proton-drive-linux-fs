@@ -60,6 +60,20 @@ See [Docker](#docker) for how to run it.
 
 Packages: `.deb`, `.rpm`, `.apk`, and Arch packages are attached to each [GitHub release](https://github.com/khaosdoctor/proton-drive-linux-fs/releases). Install with the matching package manager, then enable the tray with `systemctl --user enable --now proton-drive-fs-tray`. Exact commands per format are in the [install docs](https://oss.lsantos.dev/proton-drive-linux-fs/install/).
 
+### Arch Linux (AUR)
+
+```
+yay -S proton-drive-fs-bin
+```
+
+That installs a prebuilt binary. To build from source instead:
+
+```
+yay -S proton-drive-fs
+```
+
+Both pull in `fuse3` as a dependency.
+
 Requirements: Linux, FUSE 3 (the `fuse3` package on most distributions), and access to `/dev/fuse`.
 
 ## Usage

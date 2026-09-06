@@ -58,6 +58,87 @@ nfpms:
 checksum:
   name_template: "checksums.txt"
 
+# aur_sources needs a source archive of the tagged commit to build the PKGBUILD from.
+source:
+  enabled: true
+
+aurs:
+  - name: proton-drive-fs-bin
+    homepage: https://github.com/khaosdoctor/proton-drive-linux-fs
+    description: FUSE virtual filesystem for Proton Drive on Linux.
+    maintainers:
+      - "Lucas Santos <hello@lsantos.dev>"
+    license: MIT
+    private_key: "{{ .Env.AUR_KEY }}"
+    git_url: "ssh://aur@aur.archlinux.org/proton-drive-fs-bin.git"
+    provides:
+      - proton-drive-fs
+    conflicts:
+      - proton-drive-fs
+    depends:
+      - fuse3
+    optdepends:
+      - "zenity: About dialog"
+      - "libsecret: store the key password in the OS keyring"
+    commit_author:
+      name: Lucas Santos
+      email: hello@lsantos.dev
+    commit_msg_template: "Update to {{ .Tag }}"
+    # Publishing needs an AUR_KEY secret (an SSH private key for the AUR account).
+    # Skip the upload rather than fail the release when it's not set.
+    skip_upload: '{{ if isEnvSet "AUR_KEY" }}auto{{ else }}true{{ end }}'
+    package: |-
+      install -Dm755 "./proton-drive-fs" "${pkgdir}/usr/bin/proton-drive-fs"
+      install -Dm644 "./LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+      install -Dm644 "./contrib/proton-drive-fs.desktop" "${pkgdir}/usr/share/applications/proton-drive-fs.desktop"
+      install -Dm644 "./contrib/icons/proton-drive-fs.png" "${pkgdir}/usr/share/icons/hicolor/64x64/apps/proton-drive-fs.png"
+      install -Dm644 "./contrib/systemd/proton-drive-fs.service" "${pkgdir}/usr/lib/systemd/user/proton-drive-fs.service"
+      install -Dm644 "./contrib/systemd/proton-drive-fs-tray.service" "${pkgdir}/usr/lib/systemd/user/proton-drive-fs-tray.service"
+      install -Dm644 "./contrib/io.github.khaosdoctor.proton_drive_fs.metainfo.xml" "${pkgdir}/usr/share/metainfo/io.github.khaosdoctor.proton_drive_fs.metainfo.xml"
+
+aur_sources:
+  - name: proton-drive-fs
+    homepage: https://github.com/khaosdoctor/proton-drive-linux-fs
+    description: FUSE virtual filesystem for Proton Drive on Linux.
+    maintainers:
+      - "Lucas Santos <hello@lsantos.dev>"
+    license: MIT
+    private_key: "{{ .Env.AUR_KEY }}"
+    git_url: "ssh://aur@aur.archlinux.org/proton-drive-fs.git"
+    # goreleaser defaults `provides` to the project name (proton-drive-linux-fs)
+    # when unset; pin it to the package's own name instead.
+    provides:
+      - proton-drive-fs
+    conflicts:
+      - proton-drive-fs-bin
+    depends:
+      - fuse3
+    makedepends:
+      - go
+      - git
+    optdepends:
+      - "zenity: About dialog"
+      - "libsecret: store the key password in the OS keyring"
+    commit_author:
+      name: Lucas Santos
+      email: hello@lsantos.dev
+    commit_msg_template: "Update to {{ .Tag }}"
+    skip_upload: '{{ if isEnvSet "AUR_KEY" }}auto{{ else }}true{{ end }}'
+    prepare: |-
+      go mod download
+    build: |-
+      export CGO_ENABLED=0
+      export GOFLAGS="-buildmode=pie -trimpath -mod=readonly -modcacherw"
+      go build -ldflags "-s -w -X main.version=${pkgver} -X main.commit=aur" -o proton-drive-fs ./cmd/proton-drive-fs
+    package: |-
+      install -Dm755 "./proton-drive-fs" "${pkgdir}/usr/bin/proton-drive-fs"
+      install -Dm644 "./LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+      install -Dm644 "./contrib/proton-drive-fs.desktop" "${pkgdir}/usr/share/applications/proton-drive-fs.desktop"
+      install -Dm644 "./contrib/icons/proton-drive-fs.png" "${pkgdir}/usr/share/icons/hicolor/64x64/apps/proton-drive-fs.png"
+      install -Dm644 "./contrib/systemd/proton-drive-fs.service" "${pkgdir}/usr/lib/systemd/user/proton-drive-fs.service"
+      install -Dm644 "./contrib/systemd/proton-drive-fs-tray.service" "${pkgdir}/usr/lib/systemd/user/proton-drive-fs-tray.service"
+      install -Dm644 "./contrib/io.github.khaosdoctor.proton_drive_fs.metainfo.xml" "${pkgdir}/usr/share/metainfo/io.github.khaosdoctor.proton_drive_fs.metainfo.xml"
+
 dockers:
   - image_templates:
       - "ghcr.io/khaosdoctor/proton-drive-linux-fs:{{ .Version }}-amd64"
