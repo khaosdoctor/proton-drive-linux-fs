@@ -72,7 +72,13 @@ That installs a prebuilt binary. To build from source instead:
 yay -S proton-drive-fs
 ```
 
-Both pull in `fuse3` as a dependency.
+To build the latest commit on `main` instead of the latest release:
+
+```
+yay -S proton-drive-fs-git
+```
+
+All three pull in `fuse3` as a dependency.
 
 Requirements: Linux, FUSE 3 (the `fuse3` package on most distributions), and access to `/dev/fuse`.
 

@@ -1,0 +1,40 @@
+name: aur-git
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - contrib/aur/proton-drive-fs-git/**
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Job-level `if:` can't read the secrets context, so check for AUR_KEY
+      # here and gate the deploy step on this step's output instead.
+      - id: check-secret
+        env:
+          AUR_KEY: ${{ secrets.AUR_KEY }}
+        run: |
+          if [ -n "$AUR_KEY" ]; then
+            echo "has_key=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_key=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Regenerates .SRCINFO in its own container; the .SRCINFO committed in
+      # this repo is only for reviewers reading the PKGBUILD on GitHub.
+      - if: steps.check-secret.outputs.has_key == 'true'
+        uses: KSXGitHub/github-actions-deploy-aur@v4
+        with:
+          pkgname: proton-drive-fs-git
+          pkgbuild: ./contrib/aur/proton-drive-fs-git/PKGBUILD
+          commit_username: Lucas Santos
+          commit_email: hello@lsantos.dev
+          ssh_private_key: ${{ secrets.AUR_KEY }}
+          commit_message: "Update PKGBUILD"
+          ssh_keyscan_types: rsa,ecdsa,ed25519

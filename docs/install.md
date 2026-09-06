@@ -60,8 +60,14 @@ That installs a prebuilt binary. To build from source instead:
 yay -S proton-drive-fs
 ```
 
-Both packages pull in `fuse3` as a dependency and enable the tray the same way
-as the native packages above.
+To build the latest commit on `main`, for unreleased changes:
+
+```
+yay -S proton-drive-fs-git
+```
+
+All three packages pull in `fuse3` as a dependency and enable the tray the
+same way as the native packages above.
 
 ### Maintainer note: publishing to the AUR
 

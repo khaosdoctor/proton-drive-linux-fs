@@ -1,0 +1,66 @@
+# Maintainer: Lucas Santos <hello@lsantos.dev>
+pkgname=proton-drive-fs-git
+pkgver=r0.0000000
+pkgrel=1
+pkgdesc="FUSE virtual filesystem for Proton Drive on Linux."
+arch=('x86_64' 'aarch64')
+url="https://github.com/khaosdoctor/proton-drive-linux-fs"
+license=('MIT')
+depends=('fuse3')
+optdepends=(
+	'zenity: About dialog'
+	'libsecret: store the key password in the OS keyring'
+)
+makedepends=('git' 'go')
+provides=('proton-drive-fs')
+conflicts=('proton-drive-fs' 'proton-drive-fs-bin')
+source=("$pkgname::git+https://github.com/khaosdoctor/proton-drive-linux-fs.git")
+sha256sums=('SKIP')
+
+pkgver() {
+	cd "$pkgname"
+	git describe --long --tags 2>/dev/null | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g' \
+		|| printf 'r%s.%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+	cd "$pkgname"
+	export GOPATH="$srcdir/gopath"
+	export GOMODCACHE="$GOPATH/pkg/mod"
+	export GOFLAGS='-mod=readonly'
+	go mod download
+}
+
+build() {
+	cd "$pkgname"
+	export GOPATH="$srcdir/gopath"
+	export GOMODCACHE="$GOPATH/pkg/mod"
+	export CGO_ENABLED=0
+	# -buildmode=pie is built by Go's internal linker on linux/amd64 and
+	# linux/arm64, so it works fine with CGO_ENABLED=0. -linkmode=external
+	# (used by some Go PKGBUILDs alongside pie) needs cgo, so it is left out
+	# here, per the Arch Go package guidelines.
+	export GOFLAGS='-buildmode=pie -trimpath -mod=readonly -modcacherw'
+	go build -ldflags "-s -w -X main.version=$pkgver -X main.commit=$(git rev-parse --short HEAD)" \
+		-o proton-drive-fs ./cmd/proton-drive-fs
+}
+
+check() {
+	cd "$pkgname"
+	export GOPATH="$srcdir/gopath"
+	export GOMODCACHE="$GOPATH/pkg/mod"
+	export GOFLAGS='-mod=readonly'
+	# Tests use only httptest local servers, no real network access.
+	go test ./...
+}
+
+package() {
+	cd "$pkgname"
+	install -Dm755 "./proton-drive-fs" "$pkgdir/usr/bin/proton-drive-fs"
+	install -Dm644 "./LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+	install -Dm644 "./contrib/proton-drive-fs.desktop" "$pkgdir/usr/share/applications/proton-drive-fs.desktop"
+	install -Dm644 "./contrib/icons/proton-drive-fs.png" "$pkgdir/usr/share/icons/hicolor/64x64/apps/proton-drive-fs.png"
+	install -Dm644 "./contrib/systemd/proton-drive-fs.service" "$pkgdir/usr/lib/systemd/user/proton-drive-fs.service"
+	install -Dm644 "./contrib/systemd/proton-drive-fs-tray.service" "$pkgdir/usr/lib/systemd/user/proton-drive-fs-tray.service"
+	install -Dm644 "./contrib/io.github.khaosdoctor.proton_drive_fs.metainfo.xml" "$pkgdir/usr/share/metainfo/io.github.khaosdoctor.proton_drive_fs.metainfo.xml"
+}
