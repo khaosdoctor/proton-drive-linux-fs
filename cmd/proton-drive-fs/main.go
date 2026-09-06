@@ -577,12 +577,13 @@ func printLastLines(path string, n int) {
 func runUnmount(args []string) int {
 	fs := flag.NewFlagSet("unmount", flag.ContinueOnError)
 	force := fs.Bool("force", false, "lazily unmount and abort the kernel FUSE connection; for a mount wedged by a dead or deadlocked daemon")
+	wait := fs.Duration("wait", 5*time.Second, "retry a plain unmount for this long while the mountpoint is busy before falling back to a lazy unmount")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
 	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs unmount [-force] <mountpoint>")
+		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs unmount [-force] [-wait 5s] <mountpoint>")
 		return 2
 	}
 	mountpoint := fs.Arg(0)
@@ -591,15 +592,160 @@ func runUnmount(args []string) int {
 		return runUnmountForce(mountpoint)
 	}
 
-	cmd := exec.Command(fusermountBinary(), "-u", mountpoint)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		fmt.Fprintln(os.Stderr, "error: unmount failed:", err)
+	out, err := tryUnmount(mountpoint)
+	if err == nil {
+		fmt.Printf("unmounted %s\n", mountpoint)
+		return 0
+	}
+	if !isBusy(out, err) {
+		printUnmountError(out, err)
 		return 1
 	}
 
+	deadline := time.Now().Add(*wait)
+	for time.Now().Before(deadline) {
+		time.Sleep(500 * time.Millisecond)
+
+		out, err = tryUnmount(mountpoint)
+		if err == nil {
+			fmt.Printf("unmounted %s\n", mountpoint)
+			return 0
+		}
+		if !isBusy(out, err) {
+			printUnmountError(out, err)
+			return 1
+		}
+	}
+
+	return unmountLazyWithHolders(mountpoint)
+}
+
+// tryUnmount runs a plain fusermount unmount once and returns its combined output alongside the
+// error, so the caller can tell a "busy" mountpoint from every other failure.
+func tryUnmount(mountpoint string) ([]byte, error) {
+	return exec.Command(fusermountBinary(), "-u", mountpoint).CombinedOutput()
+}
+
+// isBusy reports whether a failed unmount's output names the "Device or resource busy" case,
+// the one worth retrying instead of giving up immediately.
+func isBusy(out []byte, err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(string(out)), "busy")
+}
+
+func printUnmountError(out []byte, err error) {
+	if len(out) > 0 {
+		fmt.Fprint(os.Stderr, string(out))
+	}
+	fmt.Fprintln(os.Stderr, "error: unmount failed:", err)
+}
+
+// unmountLazyWithHolders is the fallback once a plain unmount stayed busy for the whole -wait
+// window: it detaches the mount lazily, so the kernel drops it once every process still using
+// it lets go, and reports which processes those are.
+func unmountLazyWithHolders(mountpoint string) int {
+	holders := mountHolders(procRoot, mountpoint)
+
+	out, err := exec.Command(fusermountBinary(), "-u", "-z", mountpoint).CombinedOutput()
+	if err != nil {
+		if len(out) > 0 {
+			fmt.Fprint(os.Stderr, string(out))
+		}
+		fmt.Fprintln(os.Stderr, "error: lazy unmount failed:", err)
+		fmt.Fprintf(os.Stderr, "run: proton-drive-fs unmount -force %s\n", mountpoint)
+		return 1
+	}
+
+	fmt.Printf("detached %s lazily; it disappears once these processes release it:\n", mountpoint)
+	printHolders(holders)
 	return 0
+}
+
+// procRoot is where mountHolders looks for running processes; a parameter rather than a
+// hardcoded literal so tests can point it at a fake tree.
+const procRoot = "/proc"
+
+// holder is one process using a mountpoint: its pid and command name.
+type holder struct {
+	pid  int
+	comm string
+}
+
+// mountHolders scans procRoot for this user's processes whose cwd, root, exe, or any open file
+// descriptor resolves under mountpoint. It only sees processes the caller can read /proc/<pid>
+// links for, which the kernel already restricts to the caller's own processes.
+func mountHolders(procRoot, mountpoint string) []holder {
+	absMountpoint, err := filepath.Abs(mountpoint)
+	if err != nil {
+		absMountpoint = mountpoint
+	}
+	// A plain prefix match would also catch a sibling like /home/u/ProtonDrive2, so require the
+	// match to be the mountpoint itself or to fall under it separated by "/".
+	prefix := absMountpoint + string(filepath.Separator)
+	underMount := func(target string) bool {
+		return target == absMountpoint || strings.HasPrefix(target, prefix)
+	}
+
+	entries, err := os.ReadDir(procRoot)
+	if err != nil {
+		return nil
+	}
+
+	var holders []holder
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		if !processHolds(procRoot, entry.Name(), underMount) {
+			continue
+		}
+
+		comm, err := os.ReadFile(filepath.Join(procRoot, entry.Name(), "comm"))
+		if err != nil {
+			continue
+		}
+		holders = append(holders, holder{pid: pid, comm: strings.TrimSpace(string(comm))})
+	}
+
+	return holders
+}
+
+// processHolds reports whether the process at procRoot/pid has cwd, root, exe, or any open file
+// descriptor resolving to a path underMount accepts. A symlink it can't read (another user's
+// process) is skipped rather than treated as a match.
+func processHolds(procRoot, pid string, underMount func(string) bool) bool {
+	base := filepath.Join(procRoot, pid)
+
+	for _, link := range []string{"cwd", "root", "exe"} {
+		target, err := os.Readlink(filepath.Join(base, link))
+		if err == nil && underMount(target) {
+			return true
+		}
+	}
+
+	fds, err := os.ReadDir(filepath.Join(base, "fd"))
+	if err != nil {
+		return false
+	}
+	for _, fd := range fds {
+		target, err := os.Readlink(filepath.Join(base, "fd", fd.Name()))
+		if err == nil && underMount(target) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// printHolders lists the processes still using a mountpoint, or says none were found.
+func printHolders(holders []holder) {
+	if len(holders) == 0 {
+		fmt.Println("  (no holders found in /proc; probably a process of another user)")
+		return
+	}
+	for _, h := range holders {
+		fmt.Printf("  %d %s\n", h.pid, h.comm)
+	}
 }
 
 // fusermountBinary returns the fusermount helper to use: fusermount3 when it's on PATH (what
@@ -616,6 +762,9 @@ func fusermountBinary() string {
 // kernel (e.g. a file manager's threads) get errors instead of hanging forever. Either step
 // succeeding counts as recovery, since the daemon may already be dead and one side moot.
 func runUnmountForce(mountpoint string) int {
+	fmt.Printf("processes holding %s:\n", mountpoint)
+	printHolders(mountHolders(procRoot, mountpoint))
+
 	absMountpoint, err := filepath.Abs(mountpoint)
 	if err != nil {
 		absMountpoint = mountpoint

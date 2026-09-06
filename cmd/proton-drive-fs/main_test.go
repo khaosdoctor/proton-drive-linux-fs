@@ -1,6 +1,9 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
+	"reflect"
 	"slices"
 	"testing"
 )
@@ -189,5 +192,49 @@ func TestFuseConnectionID(t *testing.T) {
 				t.Errorf("fuseConnectionID(_, %q) = (%d, %v), want (%d, %v)", tt.mountpoint, gotID, gotFound, tt.wantID, tt.wantFound)
 			}
 		})
+	}
+}
+
+func TestMountHolders(t *testing.T) {
+	root := t.TempDir()
+	mountpoint := "/home/u/ProtonDrive"
+
+	// pid 123 holds the mount through its cwd.
+	mustSymlink(t, mountpoint+"/sub", filepath.Join(root, "123", "cwd"))
+	mustWriteFile(t, filepath.Join(root, "123", "comm"), "bash\n")
+
+	// pid 456 has an open fd pointing elsewhere: not a holder.
+	mustSymlink(t, "/tmp/elsewhere", filepath.Join(root, "456", "fd", "3"))
+	mustWriteFile(t, filepath.Join(root, "456", "comm"), "other\n")
+
+	// pid 789's cwd is under a sibling directory that only shares the mountpoint's prefix;
+	// the trailing-slash rule must not treat that as a match.
+	mustSymlink(t, mountpoint+"2/sub", filepath.Join(root, "789", "cwd"))
+	mustWriteFile(t, filepath.Join(root, "789", "comm"), "sibling\n")
+
+	got := mountHolders(root, mountpoint)
+	want := []holder{{pid: 123, comm: "bash"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("mountHolders(%q, %q) = %+v, want %+v", root, mountpoint, got, want)
+	}
+}
+
+func mustSymlink(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustWriteFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -91,10 +91,10 @@ Some desktops also run thumbnailers and search indexers that open every file the
 ### Unmount
 
 ```
-proton-drive-fs unmount [-force] <mountpoint>
+proton-drive-fs unmount [-force] [-wait 5s] <mountpoint>
 ```
 
-Runs `fusermount3 -u` (or `fusermount -u` if `fusermount3` is not on `PATH`). When the daemon has died or deadlocked and programs are stuck on the mount, `-force` lazily unmounts and aborts the kernel-side FUSE connection so blocked programs get errors instead of hanging; it needs no root for mounts you own.
+Runs `fusermount3 -u` (or `fusermount -u` if `fusermount3` is not on `PATH`); if the mountpoint is busy, it retries every 500ms for up to `-wait` (default 5s). If it is still busy after that, it falls back to a lazy unmount, which detaches the mount right away and lets the kernel drop it once every process still using it lets go, and prints the pid and command name of each of those processes. When the daemon has died or deadlocked and programs are stuck on the mount, `-force` lazily unmounts and aborts the kernel-side FUSE connection so blocked programs get errors instead of hanging; it needs no root for mounts you own.
 
 ### Log out
 

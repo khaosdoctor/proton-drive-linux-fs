@@ -4,7 +4,9 @@
 package tray
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -259,7 +261,9 @@ func (a *app) hint(text string) {
 }
 
 // runSelf runs this binary again with args and waits for it. "mount" detaches on its own,
-// so nothing here blocks for the lifetime of a mount.
+// so nothing here blocks for the lifetime of a mount. On failure it logs and also parks the
+// command's first output line on the status line, since a menu click has no terminal to show
+// it in.
 func (a *app) runSelf(args ...string) {
 	exe, err := os.Executable()
 	if err != nil {
@@ -267,14 +271,26 @@ func (a *app) runSelf(args ...string) {
 		return
 	}
 
+	var output bytes.Buffer
 	cmd := exec.Command(exe, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = io.MultiWriter(os.Stdout, &output)
+	cmd.Stderr = io.MultiWriter(os.Stderr, &output)
 	if err := cmd.Run(); err != nil {
 		log.Printf("tray: %s: %v", strings.Join(args, " "), err)
+		a.hint(firstLine(output.String()))
 	}
 
 	a.signal()
+}
+
+// firstLine returns s up to its first newline, or "(no output)" when there was none.
+func firstLine(s string) string {
+	line, _, _ := strings.Cut(s, "\n")
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return "(no output)"
+	}
+	return line
 }
 
 func (a *app) setPaused(paused bool) {
