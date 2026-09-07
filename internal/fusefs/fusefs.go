@@ -96,6 +96,7 @@ func Mount(ctx context.Context, mountpoint string, c *drive.Client, root *drive.
 			Name:          "proton-drive-fs",
 			DisableXAttrs: true,
 			Debug:         opts.Debug,
+			Options:       []string{"x-gvfs-show", "x-gvfs-name=Proton%20Drive", "x-gvfs-icon=drive-harddisk"},
 		},
 		EntryTimeout:    &ttl,
 		AttrTimeout:     &ttl,
