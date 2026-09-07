@@ -204,6 +204,14 @@ func (n *Node) Keyring() (*crypto.KeyRing, error) {
 	return n.kr, nil
 }
 
+// AttrsKnown reports whether this node's real plaintext size and modification time have been
+// resolved from the XAttr. When false, Size() still returns the encrypted Link.Size.
+func (n *Node) AttrsKnown() bool {
+	n.attrMu.Lock()
+	defer n.attrMu.Unlock()
+	return n.attrsKnown
+}
+
 // Size is the file's plaintext size when it is known, and the encrypted Link size until the node
 // has been resolved; see ResolveAttrs.
 func (n *Node) Size() int64 {

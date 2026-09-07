@@ -364,11 +364,12 @@ func TestReadAtPartialBlockThenEOF(t *testing.T) {
 	f := newTestFileMultiBlock(t, block1, block2, inflatedSize)
 
 	// Read starting 100 bytes into the second block: should get the remaining 100 bytes.
+	// The buffer is larger than the available data, so io.ReaderAt requires io.EOF.
 	readOff := int64(blockSize) + 100
 	buf := make([]byte, 256)
 	n, err := f.ReadAt(context.Background(), buf, readOff)
-	if err != nil {
-		t.Fatalf("ReadAt(blockSize+100): unexpected error: %v", err)
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("ReadAt(blockSize+100): err=%v, want io.EOF (short read)", err)
 	}
 	if n != 100 {
 		t.Fatalf("ReadAt(blockSize+100): n=%d, want 100", n)
@@ -511,13 +512,14 @@ func TestReadAtZipEndOfCentralDirectory(t *testing.T) {
 
 	t.Run("small overhead still returns partial data", func(t *testing.T) {
 		// With small overhead, (inflated - 22) is still within the plaintext. The read
-		// returns however many bytes are left from that offset to the actual end.
+		// returns however many bytes are left from that offset to the actual end, with
+		// io.EOF because fewer than len(buf) bytes were returned (io.ReaderAt contract).
 		f := newTestFile(t, plain, inflatedSize)
 		seekOff := inflatedSize - eocdSize // 216 - 22 = 194, within 200 bytes
 		buf := make([]byte, eocdSize)
 		n, err := f.ReadAt(context.Background(), buf, seekOff)
-		if err != nil {
-			t.Fatalf("ReadAt: unexpected error: %v", err)
+		if !errors.Is(err, io.EOF) {
+			t.Fatalf("ReadAt: err=%v, want io.EOF (short read)", err)
 		}
 		wantN := len(plain) - int(seekOff) // 200 - 194 = 6 bytes available
 		if n != wantN {
@@ -543,4 +545,74 @@ func TestReadAtZipEndOfCentralDirectory(t *testing.T) {
 			t.Fatalf("ReadAt: got %q, want %q", buf[:n], want)
 		}
 	})
+}
+
+// TestReadAtShortReadReturnsEOF verifies the io.ReaderAt contract: when fewer than len(p) bytes
+// are returned, the error must be non-nil (io.EOF when at end of data).
+func TestReadAtShortReadReturnsEOF(t *testing.T) {
+	plain := []byte("short content")
+	f := newTestFile(t, plain, int64(len(plain)))
+
+	// Request more bytes than the file contains; should return all bytes plus io.EOF.
+	buf := make([]byte, 100)
+	n, err := f.ReadAt(context.Background(), buf, 0)
+	if n != len(plain) {
+		t.Fatalf("n=%d, want %d", n, len(plain))
+	}
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("err=%v, want io.EOF (n < len(p) per io.ReaderAt)", err)
+	}
+}
+
+// TestCorrectSizeFromBlocksSingleBlock verifies that correctSizeFromBlocks computes the right
+// plaintext size from a single block's decrypted length.
+func TestCorrectSizeFromBlocksSingleBlock(t *testing.T) {
+	plain := []byte("hello zip file content")
+	inflatedSize := int64(len(plain)) + 20 // simulated encrypted overhead
+
+	f := newTestFile(t, plain, inflatedSize)
+
+	got, err := f.correctSizeFromBlocks(context.Background())
+	if err != nil {
+		t.Fatalf("correctSizeFromBlocks: %v", err)
+	}
+	if got != int64(len(plain)) {
+		t.Errorf("correctSizeFromBlocks = %d, want %d", got, len(plain))
+	}
+}
+
+// TestCorrectSizeFromBlocksMultiBlock verifies size computation across two blocks where the
+// last block is shorter than blockSize.
+func TestCorrectSizeFromBlocksMultiBlock(t *testing.T) {
+	block1 := bytes.Repeat([]byte("A"), blockSize)
+	block2 := bytes.Repeat([]byte("B"), 500)
+	actualSize := int64(blockSize) + 500
+	inflatedSize := actualSize + 100
+
+	f := newTestFileMultiBlock(t, block1, block2, inflatedSize)
+
+	got, err := f.correctSizeFromBlocks(context.Background())
+	if err != nil {
+		t.Fatalf("correctSizeFromBlocks: %v", err)
+	}
+	if got != actualSize {
+		t.Errorf("correctSizeFromBlocks = %d, want %d", got, actualSize)
+	}
+}
+
+// TestCorrectSizeFromBlocksEmpty verifies that an empty block list returns size 0.
+func TestCorrectSizeFromBlocksEmpty(t *testing.T) {
+	f := &File{
+		client: &Client{},
+		blocks: map[int]proton.Block{},
+		cache:  make(map[int][]byte),
+	}
+
+	got, err := f.correctSizeFromBlocks(context.Background())
+	if err != nil {
+		t.Fatalf("correctSizeFromBlocks: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("correctSizeFromBlocks = %d, want 0", got)
+	}
 }

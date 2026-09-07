@@ -40,3 +40,26 @@ func TestKeyringRetriesAfterTransientFailure(t *testing.T) {
 		t.Errorf("getKeyRing called %d times, want 2: the failure must not be cached", calls)
 	}
 }
+
+// TestAttrsKnown checks that AttrsKnown reflects whether ResolveAttrs has successfully decrypted
+// the XAttr: false for a freshly listed node (still using encrypted size), true after resolution.
+func TestAttrsKnown(t *testing.T) {
+	n := &Node{Link: proton.Link{LinkID: "l1"}, client: &Client{}, size: 999}
+
+	if n.AttrsKnown() {
+		t.Fatal("freshly created node should not have attrs known")
+	}
+
+	// Simulate a successful resolution.
+	n.attrMu.Lock()
+	n.attrsKnown = true
+	n.size = 100
+	n.attrMu.Unlock()
+
+	if !n.AttrsKnown() {
+		t.Fatal("node should have attrs known after resolution")
+	}
+	if got := n.Size(); got != 100 {
+		t.Errorf("Size() = %d, want 100", got)
+	}
+}
