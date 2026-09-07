@@ -94,14 +94,8 @@ func Defaults() Config {
 	}
 }
 
-// defaultMountpoint returns ~/ProtonDrive, so a fresh install works without editing the config
-// file first. Returns "" if the home directory cannot be determined.
 func defaultMountpoint() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, "ProtonDrive")
+	return ""
 }
 
 // defaultCacheDir returns the default on-disk cache root for blocks and persisted directory
