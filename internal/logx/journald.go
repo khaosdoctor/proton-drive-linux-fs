@@ -29,10 +29,10 @@ type journaldSink struct {
 func (s journaldSink) writeRecord(r slog.Record) error {
 	vars := map[string]string{"SYSLOG_IDENTIFIER": s.tag}
 
-	r.Attrs(func(a slog.Attr) bool {
-		vars[journaldFieldName(a.Key)] = a.Value.String()
-		return true
-	})
+	// Append attrs to the message as key=value pairs so they are visible in the default
+	// journalctl short format (which only prints MESSAGE). The attrs are still sent as
+	// separate journal fields for programmatic access.
+	msg := buildJournaldMessage(r, vars)
 
 	// Resolving the caller's file/func/line costs a runtime.CallersFrames call; only pay for it
 	// on debug records, which are already the expensive, high-volume ones.
@@ -40,7 +40,36 @@ func (s journaldSink) writeRecord(r slog.Record) error {
 		addSourceFields(vars, r.PC)
 	}
 
-	return journal.Send(r.Message, levelToPriority(r.Level), vars)
+	return journal.Send(msg, levelToPriority(r.Level), vars)
+}
+
+// buildJournaldMessage appends slog attrs to the record's message as key=value pairs and
+// populates vars with the corresponding journal fields. Values containing whitespace are quoted.
+func buildJournaldMessage(r slog.Record, vars map[string]string) string {
+	if r.NumAttrs() == 0 {
+		return r.Message
+	}
+
+	var b strings.Builder
+	b.WriteString(r.Message)
+
+	r.Attrs(func(a slog.Attr) bool {
+		v := a.Value.String()
+		vars[journaldFieldName(a.Key)] = v
+		b.WriteByte(' ')
+		b.WriteString(a.Key)
+		b.WriteByte('=')
+		if strings.ContainsAny(v, " \t") {
+			b.WriteByte('"')
+			b.WriteString(v)
+			b.WriteByte('"')
+		} else {
+			b.WriteString(v)
+		}
+		return true
+	})
+
+	return b.String()
 }
 
 func addSourceFields(vars map[string]string, pc uintptr) {
