@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -427,6 +428,7 @@ func runMount(args []string) int {
 
 	fmt.Printf("mounting %s; unmount with: proton-drive-fs unmount %s\n", mountpoint, mountpoint)
 
+	var authRevoked atomic.Bool
 	opts := fusefs.Options{
 		Version:      version,
 		Debug:        *debug,
@@ -436,10 +438,19 @@ func runMount(args []string) int {
 		Thumbnails:   thumbStore,
 		DenyReaders:  config.SplitDenyReaders(*denyReaders),
 		MaxUploads:   *maxUploads,
+		OnAuthFailed: func() {
+			authRevoked.Store(true)
+			stop()
+		},
 	}
 
 	if err := fusefs.Mount(ctx, mountpoint, client, root, opts); err != nil {
 		fmt.Fprintln(os.Stderr, "error: mount failed:", err)
+		return 1
+	}
+
+	if authRevoked.Load() {
+		fmt.Fprintln(os.Stderr, "error: session was revoked by a new login; restart the daemon to pick up the new session")
 		return 1
 	}
 
