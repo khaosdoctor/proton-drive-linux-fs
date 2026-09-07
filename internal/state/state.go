@@ -5,8 +5,11 @@ package state
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -203,4 +206,89 @@ func RemoveStatus() {
 		return
 	}
 	_ = os.Remove(path)
+}
+
+// ErrLocked is returned by AcquireLock when another process already holds the single-instance
+// lock.
+var ErrLocked = errors.New("another proton-drive-fs daemon is already running")
+
+// LockPath returns the path of the single-instance lock file. Unlike status.json, which can go
+// stale if a daemon dies without cleaning up, this lock is the authoritative "is a daemon
+// running" check: the kernel releases it the moment the holding process exits, however it exits.
+func LockPath() (string, error) {
+	d, err := dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(d, "mount.lock"), nil
+}
+
+// AcquireLock takes the single-instance lock for the calling process. It returns ErrLocked when
+// another process already holds it. The lock stays held for as long as the returned file is
+// open; the caller should keep it alive for the lifetime of the daemon and can rely on process
+// exit (of any kind) to release it, since the kernel releases flock locks when the last fd
+// referencing them closes.
+func AcquireLock() (*os.File, error) {
+	path, err := LockPath()
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
+
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, ErrLocked
+		}
+		return nil, err
+	}
+
+	return f, nil
+}
+
+// FindRunningDaemon reports the daemon described by the last published status snapshot,
+// regardless of freshness (status.json can go stale if a daemon died without cleaning up).
+// alive is true only when a process with that PID currently exists; it's false, along with a
+// zero pid and empty mountpoint, when there is no snapshot to read.
+func FindRunningDaemon() (pid int, mountpoint string, alive bool) {
+	st, ok := ReadStatus()
+	if !ok || st.PID <= 0 {
+		return 0, "", false
+	}
+	return st.PID, st.Mountpoint, processAlive(st.PID)
+}
+
+// DaemonExeName is the executable basename processAlive requires a live PID's /proc/<pid>/exe to
+// resolve to before trusting it as our daemon. It's a var, not a const, so tests can point it at
+// their own process's name instead of the real binary.
+var DaemonExeName = "proton-drive-fs"
+
+// processAlive reports whether pid names a live proton-drive-fs process. Signal 0 alone (which
+// checks existence and permission without delivering anything) isn't enough: if the daemon that
+// owned this PID died without cleaning up its status snapshot (SIGKILL, OOM), the kernel can later
+// reuse the PID for an unrelated process, and signal 0 would report that unrelated process as
+// alive. So processAlive also reads /proc/<pid>/exe and requires its basename to match
+// DaemonExeName; if that can't be read at all (another user's process, or one that raced past
+// exiting), it's treated as not alive rather than risk a false-positive kill.
+func processAlive(pid int) bool {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	if proc.Signal(syscall.Signal(0)) != nil {
+		return false
+	}
+
+	exe, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
+	if err != nil {
+		return false
+	}
+	return filepath.Base(exe) == DaemonExeName
 }

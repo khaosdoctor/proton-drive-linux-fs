@@ -321,10 +321,6 @@ func runMount(args []string) int {
 		return 2
 	}
 
-	if !checkNotAlreadyMounted(mountpoint) {
-		return 1
-	}
-
 	stat, err := os.Stat(mountpoint)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		fmt.Fprintf(os.Stderr, "error: checking mountpoint: %v\n", err)
@@ -350,6 +346,22 @@ func runMount(args []string) int {
 	// the branch above): it owns the real logger, replacing the plain-info one run() installed.
 	_, stopLog := logx.Setup(logx.Options{Level: level, Tag: journalTag, ForceStderr: *logStderr})
 	defer stopLog()
+
+	// stopPreviousDaemon runs here, in the actual daemon process, rather than in the launcher
+	// above: the launcher re-execs into this same code path with -foreground, so calling it
+	// before the foreground gate would run it twice per mount (once in the launcher, once in
+	// the re-exec'd child). The launcher doesn't need to kill anything; the daemon that's about
+	// to acquire the lock does.
+	stopPreviousDaemon()
+
+	// The single-instance lock is only ever held here, by the daemon itself, never by the
+	// detached launcher above: it's released the moment this process exits, however it exits.
+	lockFile, err := state.AcquireLock()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: acquiring single-instance lock:", err)
+		return 1
+	}
+	defer func() { _ = lockFile.Close() }()
 
 	cacheLimit, err := parseCacheSize(cacheSize.String())
 	if err != nil {
@@ -434,38 +446,54 @@ func runMount(args []string) int {
 	return 0
 }
 
-// checkNotAlreadyMounted refuses to proceed when mountpoint is already mounted by us. Without
-// this, a rebuild whose unmount failed as busy leaves the old daemon serving the mount while the
-// new binary reports success without ever replacing it. It prints which daemon is running, when
-// the status file says so, and how to unmount it.
-func checkNotAlreadyMounted(mountpoint string) bool {
-	absMountpoint, err := filepath.Abs(mountpoint)
+// stopPreviousDaemon looks for a still-running daemon from an earlier mount, on any mountpoint
+// (only one should ever run at a time), and stops it: SIGTERM, then up to 5 seconds for it to
+// exit, then SIGKILL if it's still around, followed by a short poll to confirm the kill actually
+// took (a process stuck in D-state can survive SIGKILL until whatever it's blocked on returns).
+// The daemon is found through the last published status snapshot; a PID that isn't actually alive
+// (status.json can go stale, or the PID can have been reused by an unrelated process) is silently
+// ignored, and so is our own PID, in case a foreground process ends up re-reading its own snapshot.
+func stopPreviousDaemon() {
+	pid, mountpoint, alive := state.FindRunningDaemon()
+	if !alive || pid == os.Getpid() {
+		return
+	}
+
+	proc, err := os.FindProcess(pid)
 	if err != nil {
-		absMountpoint = mountpoint
+		return
+	}
+	if err := proc.Signal(syscall.SIGTERM); err != nil {
+		return // already gone
 	}
 
-	mounts, err := os.ReadFile("/proc/self/mounts")
-	if err != nil || !mountedAt(string(mounts), absMountpoint) {
-		return true
+	fmt.Printf("stopping previous mount (pid %d, mounted at %s)\n", pid, mountpoint)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if proc.Signal(syscall.Signal(0)) != nil {
+			return // exited
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 
-	var running *state.Status
-	if st, ok := state.ReadStatus(); ok && st.Fresh() {
-		running = &st
+	if proc.Signal(syscall.Signal(0)) != nil {
+		return // exited between the last poll above and here
 	}
 
-	fmt.Fprintf(os.Stderr, "error: %s is already mounted%s. Run: proton-drive-fs unmount %s\n", mountpoint, describeRunning(running, version), mountpoint)
-	return false
-}
+	_ = proc.Signal(syscall.SIGKILL)
 
-// describeRunning formats the clause of the mount guard's error message between "is already
-// mounted" and the trailing "Run: ...": the running daemon's pid and version when st is fresh,
-// otherwise nothing beyond this binary's own version.
-func describeRunning(st *state.Status, thisVersion string) string {
-	if st == nil {
-		return fmt.Sprintf("; this binary is version %s", thisVersion)
+	killDeadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(killDeadline) {
+		if proc.Signal(syscall.Signal(0)) != nil {
+			return // exited
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
-	return fmt.Sprintf(" (pid %d, daemon version %s); this binary is version %s", st.PID, st.Version, thisVersion)
+
+	if proc.Signal(syscall.Signal(0)) == nil {
+		slog.Warn("previous daemon still running after SIGKILL", "pid", pid)
+	}
 }
 
 func detachedArgs(args []string) []string {

@@ -1,6 +1,9 @@
 package state
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -90,5 +93,82 @@ func TestStatusRoundTrip(t *testing.T) {
 	RemoveStatus()
 	if _, ok := ReadStatus(); ok {
 		t.Fatal("status should be gone after RemoveStatus")
+	}
+}
+
+func TestAcquireLock(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	f1, err := AcquireLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := AcquireLock(); !errors.Is(err, ErrLocked) {
+		t.Fatalf("second AcquireLock() = %v, want ErrLocked", err)
+	}
+
+	if err := f1.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	f2, err := AcquireLock()
+	if err != nil {
+		t.Fatalf("AcquireLock() after releasing the first lock: %v", err)
+	}
+	_ = f2.Close()
+}
+
+func TestFindRunningDaemon(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	// FindRunningDaemon checks a live PID's /proc/<pid>/exe against DaemonExeName; point that at
+	// this test binary's own exe so "our own PID" reads as alive below.
+	exe, err := os.Readlink("/proc/self/exe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := DaemonExeName
+	DaemonExeName = filepath.Base(exe)
+	t.Cleanup(func() { DaemonExeName = orig })
+
+	if _, _, alive := FindRunningDaemon(); alive {
+		t.Fatal("no status published yet, should not report a running daemon")
+	}
+
+	// Our own PID is alive, and its exe matches DaemonExeName as set above.
+	want := Status{PID: os.Getpid(), Mountpoint: "/home/u/ProtonDrive", Updated: time.Now().Unix()}
+	if err := WriteStatus(want); err != nil {
+		t.Fatal(err)
+	}
+	pid, mountpoint, alive := FindRunningDaemon()
+	if !alive || pid != want.PID || mountpoint != want.Mountpoint {
+		t.Fatalf("FindRunningDaemon() = (%d, %q, %v), want (%d, %q, true)", pid, mountpoint, alive, want.PID, want.Mountpoint)
+	}
+
+	// A PID that (almost certainly) doesn't exist should report as not alive, even though the
+	// snapshot is otherwise fresh: status.json can be stale.
+	if err := WriteStatus(Status{PID: 999999, Mountpoint: "/home/u/ProtonDrive", Updated: time.Now().Unix()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, alive := FindRunningDaemon(); alive {
+		t.Fatal("PID 999999 should not be alive")
+	}
+}
+
+// TestFindRunningDaemonRejectsPIDReuse covers the case the exe check exists for: the recorded PID
+// died without cleaning up status.json (SIGKILL, OOM) and the kernel later reused that PID for an
+// unrelated process. Signal 0 alone can't tell that apart from the real daemon still running.
+func TestFindRunningDaemonRejectsPIDReuse(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	// DaemonExeName is left at its default ("proton-drive-fs"), which the test binary running
+	// this process certainly isn't, so this PID stands in for an unrelated process reusing an
+	// old daemon's PID.
+	if err := WriteStatus(Status{PID: os.Getpid(), Mountpoint: "/home/u/ProtonDrive", Updated: time.Now().Unix()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, alive := FindRunningDaemon(); alive {
+		t.Fatal("a live PID whose exe isn't proton-drive-fs should not be reported as alive")
 	}
 }

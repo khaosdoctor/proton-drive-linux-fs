@@ -3,10 +3,12 @@ package main
 import (
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/config"
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/state"
@@ -195,40 +197,54 @@ func TestMountedAt(t *testing.T) {
 	}
 }
 
-func TestDescribeRunning(t *testing.T) {
-	tests := []struct {
-		name string
-		st   *state.Status
-		this string
-		want string
-	}{
-		{
-			name: "nil status",
-			st:   nil,
-			this: "1.2.0",
-			want: "; this binary is version 1.2.0",
-		},
-		{
-			name: "same version",
-			st:   &state.Status{PID: 4242, Version: "1.2.0"},
-			this: "1.2.0",
-			want: " (pid 4242, daemon version 1.2.0); this binary is version 1.2.0",
-		},
-		{
-			name: "different version",
-			st:   &state.Status{PID: 4242, Version: "1.1.0"},
-			this: "1.2.0",
-			want: " (pid 4242, daemon version 1.1.0); this binary is version 1.2.0",
-		},
+// TestStopPreviousDaemon spawns a real process, publishes it as the running daemon, and checks
+// that stopPreviousDaemon actually kills it.
+func TestStopPreviousDaemon(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	// FindRunningDaemon requires the recorded PID's exe to match DaemonExeName; point it at
+	// "sleep" so the spawned stand-in process below reads as our (fake) daemon.
+	origExeName := state.DaemonExeName
+	state.DaemonExeName = "sleep"
+	t.Cleanup(func() { state.DaemonExeName = origExeName })
+
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+
+	if err := state.WriteStatus(state.Status{PID: cmd.Process.Pid, Mountpoint: "/home/u/ProtonDrive", Updated: time.Now().Unix()}); err != nil {
+		t.Fatal(err)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := describeRunning(tt.st, tt.this); got != tt.want {
-				t.Errorf("describeRunning() = %q, want %q", got, tt.want)
-			}
-		})
+	stopPreviousDaemon()
+
+	waited := make(chan error, 1)
+	go func() { waited <- cmd.Wait() }()
+
+	select {
+	case <-waited:
+	case <-time.After(6 * time.Second):
+		t.Fatal("stopPreviousDaemon did not stop the process in time")
 	}
+
+	if _, _, alive := state.FindRunningDaemon(); alive {
+		t.Error("process should no longer be alive after stopPreviousDaemon")
+	}
+}
+
+// TestStopPreviousDaemonNoOpWhenNoneRunning checks the no-daemon and dead-PID cases don't panic
+// or hang.
+func TestStopPreviousDaemonNoOpWhenNoneRunning(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	stopPreviousDaemon() // no status.json at all
+
+	if err := state.WriteStatus(state.Status{PID: 999999, Mountpoint: "/home/u/ProtonDrive", Updated: time.Now().Unix()}); err != nil {
+		t.Fatal(err)
+	}
+	stopPreviousDaemon() // PID that (almost certainly) isn't running
 }
 
 func TestFuseConnectionID(t *testing.T) {
