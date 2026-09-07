@@ -74,8 +74,8 @@ by an edit to `config.toml` setting `mountpoint`, or by restarting the tray with
 `-mountpoint <path>`.
 
 `Mount` and `Unmount` run this same binary, so a mount started from the menu is the
-same detached mount you get from a shell, and it survives the tray closing. `Quit`
-only closes the icon; it never unmounts.
+same detached mount you get from a shell. `Quit` unmounts the daemon before closing
+the icon; Ctrl-C and SIGTERM do the same.
 
 When the status line gets a ` (daemon X, restart needed)` suffix, the running daemon
 is an older build than the tray itself, usually because a rebuild's earlier unmount

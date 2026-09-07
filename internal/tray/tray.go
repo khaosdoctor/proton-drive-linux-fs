@@ -12,10 +12,12 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"fyne.io/systray"
@@ -260,7 +262,25 @@ type app struct {
 // Run shows the icon and blocks until Quit is chosen.
 func Run(opts Options) {
 	a := &app{opts: opts, refresh: make(chan struct{}, 1), shown: -1}
-	systray.Run(a.onReady, func() {})
+	systray.Run(a.onReady, a.onExit)
+}
+
+func (a *app) onExit() {
+	a.stopDaemon()
+}
+
+func (a *app) stopDaemon() {
+	if a.opts.Mountpoint == "" {
+		return
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	cmd := exec.Command(exe, "unmount", a.opts.Mountpoint)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	_ = cmd.Run()
 }
 
 func (a *app) onReady() {
@@ -309,7 +329,7 @@ func (a *app) onReady() {
 		a.openDashboard = systray.AddMenuItem("Open dashboard", "Open the proton-drive-fs-gui dashboard")
 		onClick(a.openDashboard, func() { start([]string{"proton-drive-fs-gui"}) })
 	}
-	quit := systray.AddMenuItem("Quit", "Close the tray icon; the mount keeps running")
+	quit := systray.AddMenuItem("Quit", "Unmount Proton Drive and close the tray icon")
 
 	onClick(a.mount, func() { a.runSelf("mount", a.opts.Mountpoint) })
 	onClick(a.unmount, func() { a.runSelf("unmount", a.opts.Mountpoint) })
@@ -321,9 +341,20 @@ func (a *app) onReady() {
 	onClick(a.login, a.startLogin)
 	onClick(a.logout, func() { a.runSelf("logout") })
 	onClick(a.about, a.showAbout)
-	onClick(quit, systray.Quit)
+	onClick(quit, func() {
+		a.stopDaemon()
+		systray.Quit()
+	})
 
 	go a.poll()
+
+	go func() {
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+		<-sig
+		a.stopDaemon()
+		systray.Quit()
+	}()
 }
 
 // showAbout displays the About dialog; a failure (no zenity and no xdg-open, say) only gets a
