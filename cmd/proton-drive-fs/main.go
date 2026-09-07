@@ -720,6 +720,9 @@ func runUnmount(args []string) int {
 		fmt.Printf("unmounted %s\n", mountpoint)
 		return 0
 	}
+	if notMounted(out) {
+		return 0
+	}
 	if !isBusy(out, err) {
 		printUnmountError(out, err)
 		return 1
@@ -732,6 +735,9 @@ func runUnmount(args []string) int {
 		out, err = tryUnmount(mountpoint)
 		if err == nil {
 			fmt.Printf("unmounted %s\n", mountpoint)
+			return 0
+		}
+		if notMounted(out) {
 			return 0
 		}
 		if !isBusy(out, err) {
@@ -747,6 +753,12 @@ func runUnmount(args []string) int {
 // error, so the caller can tell a "busy" mountpoint from every other failure.
 func tryUnmount(mountpoint string) ([]byte, error) {
 	return exec.Command(fusermountBinary(), "-u", mountpoint).CombinedOutput()
+}
+
+// notMounted reports whether fusermount's output says the mountpoint isn't in mtab, meaning
+// the mount was already cleaned up (e.g. the daemon unmounted itself on signal).
+func notMounted(out []byte) bool {
+	return strings.Contains(string(out), "not found in")
 }
 
 // isBusy reports whether a failed unmount's output names the "Device or resource busy" case,
