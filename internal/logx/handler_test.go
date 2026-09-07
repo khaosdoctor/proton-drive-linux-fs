@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeSink records every message (and its attrs, as a plain string map) handed to it, guarded by
@@ -233,6 +234,54 @@ func TestJournaldFieldNameReservedNames(t *testing.T) {
 		if got := journaldFieldName(in); got != want {
 			t.Errorf("journaldFieldName(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestBuildJournaldMessageIncludesAttrs(t *testing.T) {
+	rec := slog.NewRecord(time.Now(), slog.LevelDebug, "block cache hit", 0)
+	rec.AddAttrs(
+		slog.String("link", "abc123"),
+		slog.Int("block", 1),
+		slog.String("cache", "memory"),
+	)
+
+	vars := make(map[string]string)
+	got := buildJournaldMessage(rec, vars)
+
+	want := `block cache hit link=abc123 block=1 cache=memory`
+	if got != want {
+		t.Fatalf("buildJournaldMessage() = %q, want %q", got, want)
+	}
+
+	// Journal fields should also be populated.
+	if vars["LINK"] != "abc123" {
+		t.Errorf("vars[LINK] = %q, want %q", vars["LINK"], "abc123")
+	}
+	if vars["BLOCK"] != "1" {
+		t.Errorf("vars[BLOCK] = %q, want %q", vars["BLOCK"], "1")
+	}
+}
+
+func TestBuildJournaldMessageQuotesSpaces(t *testing.T) {
+	rec := slog.NewRecord(time.Now(), slog.LevelInfo, "open", 0)
+	rec.AddAttrs(slog.String("path", "/my files/doc.txt"))
+
+	vars := make(map[string]string)
+	got := buildJournaldMessage(rec, vars)
+
+	want := `open path="/my files/doc.txt"`
+	if got != want {
+		t.Fatalf("buildJournaldMessage() = %q, want %q", got, want)
+	}
+}
+
+func TestBuildJournaldMessageNoAttrs(t *testing.T) {
+	rec := slog.NewRecord(time.Now(), slog.LevelInfo, "plain message", 0)
+	vars := make(map[string]string)
+
+	got := buildJournaldMessage(rec, vars)
+	if got != "plain message" {
+		t.Fatalf("buildJournaldMessage() = %q, want %q", got, "plain message")
 	}
 }
 
