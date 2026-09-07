@@ -98,7 +98,7 @@ func (c *Client) OpenFile(ctx context.Context, n *Node, path string) (*File, err
 		blocks[b.Index] = b
 	}
 
-	return &File{
+	f := &File{
 		client:     c,
 		sessionKey: sessionKey,
 		blocks:     blocks,
@@ -107,7 +107,22 @@ func (c *Client) OpenFile(ctx context.Context, n *Node, path string) (*File, err
 		revID:      revID,
 		path:       path,
 		cache:      make(map[int][]byte),
-	}, nil
+	}
+
+	// When XAttr resolution failed, the size is the encrypted (too-large) Link.Size.
+	// Compute the real plaintext size from the last block so readers that seek near
+	// the end (ZIP EOCD, PDF xref, etc.) find data where they expect it.
+	if !n.AttrsKnown() && len(blocks) > 0 {
+		if computed, err := f.correctSizeFromBlocks(ctx); err == nil {
+			slog.Warn("xattr unavailable, computed size from blocks",
+				"link", n.Link.LinkID,
+				"encrypted_size", n.Link.Size,
+				"plaintext_size", computed)
+			f.size = computed
+		}
+	}
+
+	return f, nil
 }
 
 // ensureTransfer lazily starts this file's tracked download transfer on its first real network
@@ -199,7 +214,33 @@ func (f *File) ReadAt(ctx context.Context, p []byte, off int64) (int, error) {
 		n += copied
 	}
 
+	if n < len(p) {
+		return n, io.EOF
+	}
 	return n, nil
+}
+
+// correctSizeFromBlocks computes the plaintext file size by downloading and measuring the last
+// block. Used when XAttr resolution failed and the only known size is the encrypted one. The
+// downloaded block is cached, so the caller's first real read of it is a memory hit.
+func (f *File) correctSizeFromBlocks(ctx context.Context) (int64, error) {
+	if len(f.blocks) == 0 {
+		return 0, nil
+	}
+
+	lastIdx := 0
+	for idx := range f.blocks {
+		if idx > lastIdx {
+			lastIdx = idx
+		}
+	}
+
+	data, err := f.getBlock(ctx, lastIdx)
+	if err != nil {
+		return f.size, err
+	}
+
+	return blockByteOffset(lastIdx) + int64(len(data)), nil
 }
 
 // getBlock returns block idx's decrypted content, from the in-memory cache, the on-disk cache, or
