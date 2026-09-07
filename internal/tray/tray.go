@@ -245,7 +245,6 @@ type app struct {
 	restart              *systray.MenuItem
 	pause, resume        *systray.MenuItem
 	openFolder, openLogs *systray.MenuItem
-	openDebugLogs        *systray.MenuItem
 	openConfig           *systray.MenuItem
 	login, logout        *systray.MenuItem
 	about, openDashboard *systray.MenuItem
@@ -295,7 +294,6 @@ func (a *app) onReady() {
 	a.resume = systray.AddMenuItem("Resume syncing", "Poll Proton for remote changes again")
 	a.openFolder = systray.AddMenuItem("Open folder", "Open "+a.opts.Mountpoint+" in the file manager")
 	a.openLogs = systray.AddMenuItem("Open logs", "Show the mount log")
-	a.openDebugLogs = systray.AddMenuItem("Open debug logs", "Show the mount log at debug verbosity")
 	if a.configDir() != "" {
 		a.openConfig = systray.AddMenuItem("Open config folder", "Open "+a.configDir()+" in the file manager")
 		onClick(a.openConfig, a.showConfigFolder)
@@ -320,7 +318,6 @@ func (a *app) onReady() {
 	onClick(a.resume, func() { a.setPaused(false) })
 	onClick(a.openFolder, a.showFolder)
 	onClick(a.openLogs, a.showLogs)
-	onClick(a.openDebugLogs, a.showDebugLogs)
 	onClick(a.login, a.startLogin)
 	onClick(a.logout, func() { a.runSelf("logout") })
 	onClick(a.about, a.showAbout)
@@ -479,7 +476,7 @@ type menuVisibility struct {
 // is currently mounted, and a mountpoint has resolved at all (configured: an argument, the config
 // file, or the tray's remembered one). Without a mountpoint, Mount, Unmount, Restart, Pause/Resume
 // and Open folder stay hidden regardless of the other two, since none of them has anywhere to act
-// on; About, Open logs, Open debug logs, Log in/out and Quit are unaffected and stay available
+// on; About, Open logs, Log in/out and Quit are unaffected and stay available
 // (they are not gated through this struct at all).
 func visibilityFor(loggedIn, mounted, configured bool) menuVisibility {
 	return menuVisibility{
@@ -606,7 +603,7 @@ func (a *app) showConfigFolder() {
 
 // showLogs follows the journal when the mount logs there, and otherwise opens the log file.
 func (a *app) showLogs() {
-	journal := []string{"journalctl", "--user", "-t", "proton-drive-fs", "-p", "info", "-f"}
+	journal := []string{"journalctl", "--user", "-t", "proton-drive-fs", "-f"}
 
 	if logx.JournaldAvailable() {
 		argv := terminalCommand(exec.LookPath, os.Getenv, journal)
@@ -621,24 +618,6 @@ func (a *app) showLogs() {
 	if err := exec.Command("xdg-open", a.opts.LogPath).Start(); err != nil {
 		slog.Warn("xdg-open failed", "path", a.opts.LogPath, "err", err)
 	}
-}
-
-// showDebugLogs is like showLogs but at debug verbosity, for the technical detail the plain
-// "Open logs" item leaves out.
-func (a *app) showDebugLogs() {
-	journal := []string{"journalctl", "--user", "-t", "proton-drive-fs", "-p", "debug", "-f"}
-
-	if !logx.JournaldAvailable() {
-		a.hint("Debug logs need the systemd journal")
-		return
-	}
-
-	argv := terminalCommand(exec.LookPath, os.Getenv, journal)
-	if argv == nil {
-		a.hint("Run: " + strings.Join(journal, " "))
-		return
-	}
-	start(argv)
 }
 
 // startLogin opens a terminal for the login prompts, which need stdin.
