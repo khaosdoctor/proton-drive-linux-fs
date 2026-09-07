@@ -73,6 +73,11 @@ type Options struct {
 
 	// MaxUploads caps how many files upload at once. <=0 uses the default.
 	MaxUploads int
+
+	// OnAuthFailed is called when the event poller detects an unrecoverable auth error
+	// (refresh token revoked by a new login). The callback should cancel the mount context
+	// so the daemon exits and restarts with fresh tokens from session.json.
+	OnAuthFailed func()
 }
 
 // defaultMaxUploads matches what Proton's own clients keep in flight.
@@ -156,7 +161,7 @@ func Mount(ctx context.Context, mountpoint string, c *drive.Client, root *drive.
 		}()
 	}
 
-	go c.Events(ctx, opts.PollInterval, st.handle, state.Paused)
+	go c.Events(ctx, opts.PollInterval, st.handle, state.Paused, opts.OnAuthFailed)
 	go st.publishStatus(ctx, mountpoint, opts.Version)
 	go st.watchdog(ctx)
 

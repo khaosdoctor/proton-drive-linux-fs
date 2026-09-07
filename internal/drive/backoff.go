@@ -171,6 +171,21 @@ func IsUnauthorized(err error) bool {
 	return apiErr.Status == http.StatusUnauthorized
 }
 
+// IsUnrecoverableAuth reports whether err is an authentication failure the daemon cannot
+// recover from by retrying: a 422 with Code 10013 (refresh token revoked by a new login)
+// or a 401 the library already failed to refresh. When true the only fix is re-reading
+// session.json (which the new login wrote) by restarting the daemon.
+func IsUnrecoverableAuth(err error) bool {
+	apiErr, ok := asAPIError(err)
+	if !ok {
+		return false
+	}
+	if apiErr.Code == proton.AuthRefreshTokenInvalid {
+		return true
+	}
+	return apiErr.Status == http.StatusUnauthorized
+}
+
 // asAPIError extracts a *proton.APIError from err's chain, matching either the pointer shape
 // go-proton-api wraps its own errors in, or the plain value shape drive.putJSON wraps its
 // hand-rolled requests' errors in (proton.APIError's Error method has a value receiver, so

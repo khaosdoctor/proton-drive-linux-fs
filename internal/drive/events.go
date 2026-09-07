@@ -21,9 +21,18 @@ type Event struct {
 // It returns after ctx is cancelled. Errors are logged and polling continues.
 // When paused is non-nil and returns true, the tick is skipped without calling the API; the
 // next unpaused tick picks up from the last event seen, so nothing is lost.
-func (c *Client) Events(ctx context.Context, interval time.Duration, fn func(Event), paused func() bool) {
+//
+// onAuthFailed, when non-nil, is called once when an API call fails with an unrecoverable
+// auth error (revoked refresh token). The caller should use it to cancel the mount context
+// so the daemon shuts down and restarts with fresh tokens.
+func (c *Client) Events(ctx context.Context, interval time.Duration, fn func(Event), paused func() bool, onAuthFailed func()) {
 	last, err := c.api.GetLatestVolumeEventID(ctx, c.volumeID)
 	if err != nil {
+		if onAuthFailed != nil && IsUnrecoverableAuth(err) {
+			slog.Error("session revoked, shutting down", "err", err)
+			onAuthFailed()
+			return
+		}
 		slog.Warn("getting latest volume event id failed", "err", err)
 	}
 
@@ -44,6 +53,11 @@ func (c *Client) Events(ctx context.Context, interval time.Duration, fn func(Eve
 		if last == "" {
 			last, err = c.api.GetLatestVolumeEventID(ctx, c.volumeID)
 			if err != nil {
+				if onAuthFailed != nil && IsUnrecoverableAuth(err) {
+					slog.Error("session revoked, shutting down", "err", err)
+					onAuthFailed()
+					return
+				}
 				slog.Warn("getting latest volume event id failed", "err", err)
 				continue
 			}
@@ -52,6 +66,11 @@ func (c *Client) Events(ctx context.Context, interval time.Duration, fn func(Eve
 		for {
 			ev, err := c.api.GetVolumeEvent(ctx, c.volumeID, last)
 			if err != nil {
+				if onAuthFailed != nil && IsUnrecoverableAuth(err) {
+					slog.Error("session revoked, shutting down", "err", err)
+					onAuthFailed()
+					return
+				}
 				slog.Warn("getting volume event failed", "event_id", last, "err", err)
 				break
 			}
