@@ -36,17 +36,24 @@ func Setup(opts Options) (*slog.Logger, func()) {
 		tag = defaultTag
 	}
 
+	// The journald sink always gets debug+: the journal does its own priority filtering
+	// (journalctl -p), so gating it on -log-level would make that filtering redundant and, worse,
+	// mean debug records never reach journald at all when -log-level is left at its info default.
+	// The stderr/file fallback has no such filtering of its own, so it stays gated on opts.Level.
 	var s sink
+	var level slog.Level
 	if !opts.ForceStderr && JournaldAvailable() {
 		s = journaldSink{tag: tag}
+		level = slog.LevelDebug
 	} else {
 		s = textSink{h: slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 			Level:     opts.Level,
 			AddSource: opts.Level <= slog.LevelDebug,
 		})}
+		level = opts.Level
 	}
 
-	h, stop := newAsyncHandler(s, opts.Level)
+	h, stop := newAsyncHandler(s, level)
 	logger := slog.New(h)
 	slog.SetDefault(logger)
 	return logger, stop

@@ -21,8 +21,10 @@ func Elapsed(start time.Time) slog.Attr {
 
 // DebugEnabled reports whether the default logger would actually emit a debug record. Guard a
 // slog.Debug call with it on a per-request hot path (e.g. once per block read) so building the
-// attrs (which allocates when it boxes non-string values into `any`) is skipped entirely at the
-// default info level.
+// attrs (which allocates when it boxes non-string values into `any`) is skipped entirely when
+// nothing would use them. Note this returns true whenever the journald sink is active, regardless
+// of -log-level, since journald always accepts debug+ records (see logx.Setup); it only reflects
+// -log-level when logging falls back to stderr/file.
 func DebugEnabled(ctx context.Context) bool {
 	return slog.Default().Enabled(ctx, slog.LevelDebug)
 }
