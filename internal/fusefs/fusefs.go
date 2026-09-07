@@ -9,7 +9,9 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -208,6 +210,15 @@ func Mount(ctx context.Context, mountpoint string, c *drive.Client, root *drive.
 		}
 	}
 
+	// Safety net: if the mount is still present after the shutdown select, try one more time.
+	if isMounted(mountpoint) {
+		bin := fusermountBinary()
+		out, err := exec.Command(bin, "-u", "-z", mountpoint).CombinedOutput()
+		if err != nil {
+			slog.Error("safety-net unmount failed", "path", mountpoint, "err", err, "output", string(out))
+		}
+	}
+
 	return nil
 }
 
@@ -293,6 +304,25 @@ func fusermountBinary() string {
 		return "fusermount3"
 	}
 	return "fusermount"
+}
+
+// isMounted reports whether path appears as a mountpoint in /proc/mounts.
+func isMounted(path string) bool {
+	data, err := os.ReadFile("/proc/mounts")
+	if err != nil {
+		return false
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		abs = path
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[1] == abs {
+			return true
+		}
+	}
+	return false
 }
 
 // mountState tracks every registered directory node and each node's last-known parent, so a
