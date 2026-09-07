@@ -16,8 +16,10 @@ import (
 // come from a TOML file. Durations and byte sizes are strings ("30s", "2GiB"), parsed the same way
 // their flag counterparts are, so a config file and a command-line flag accept identical syntax.
 type Config struct {
-	// Mountpoint is the default mountpoint mount and tray use when none is given on the command
-	// line (mount's positional argument, or tray's -mountpoint flag).
+	// Mountpoint is the mountpoint mount, unmount, status, and tray fall back to when none is
+	// given on the command line (a positional argument, or tray's -mountpoint flag). There is no
+	// built-in default: Defaults() leaves this empty, and a caller with nothing to fall back to
+	// must treat an empty Mountpoint as a configuration error.
 	Mountpoint string `toml:"mountpoint"`
 
 	TTL          string   `toml:"ttl"`

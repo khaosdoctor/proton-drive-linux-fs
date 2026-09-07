@@ -16,7 +16,7 @@ var initFields = []struct {
 	comment string
 	value   func(d Config) string
 }{
-	{"mountpoint", "Default mountpoint for mount and tray when none is given on the command line.", func(d Config) string { return strconv.Quote(d.Mountpoint) }},
+	{"mountpoint", "Required; no default. Mountpoint for mount, unmount, status, and tray when none is given on the command line.", func(d Config) string { return strconv.Quote(d.Mountpoint) }},
 	{"ttl", "How long a directory listing stays cached before it is fetched again.", func(d Config) string { return strconv.Quote(d.TTL) }},
 	{"poll", "How often the event feed is polled for remote changes.", func(d Config) string { return strconv.Quote(d.Poll) }},
 	{"op_timeout", "Deadline for one filesystem operation's network calls; a stuck operation returns an error after this instead of hanging.", func(d Config) string { return strconv.Quote(d.OpTimeout) }},

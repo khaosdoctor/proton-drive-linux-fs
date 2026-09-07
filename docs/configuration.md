@@ -30,14 +30,15 @@ existing file unless `-force` is passed.
 
 `config show` prints the effective configuration after merging defaults, the file, and
 any flag passed to `config show` itself, with a trailing comment naming where each
-value came from (`default`, `file`, or `flag`): useful to check what `mount` or `login`
-would actually resolve to before running them.
+value came from (`default`, `file`, or `flag`, plus `unset` for `mountpoint` alone,
+which has no built-in default): useful to check what `mount` or `login` would actually
+resolve to before running them.
 
 ## Keys
 
 | Key | Flag | Default | Meaning |
 | --- | --- | --- | --- |
-| `mountpoint` | (positional for `mount`, `-mountpoint` for `tray`) | (none) | Default mountpoint `mount` and `tray` use when none is given on the command line. |
+| `mountpoint` | positional for `mount`/`unmount`/`status`, `-mountpoint` for `tray` | none, required | Mountpoint `mount`, `unmount`, `status`, and `tray` fall back to when none is given on the command line. There is no default; see [Keeping indexers out of the mount](troubleshooting.md#keeping-indexers-out-of-the-mount) when choosing one. |
 | `ttl` | `-ttl` | `30s` | How long a directory listing stays cached before it is fetched again. |
 | `poll` | `-poll` | `10s` | How often the event feed is polled for remote changes. |
 | `op_timeout` | `-op-timeout` | `60s` | Deadline for one filesystem operation's network calls. |

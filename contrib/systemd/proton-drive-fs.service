@@ -7,10 +7,10 @@ StartLimitBurst=3
 
 [Service]
 Type=simple
-# Mounts at %h/ProtonDrive; change with `systemctl --user edit proton-drive-fs`
-# or by setting `mountpoint` in config.toml and dropping the argument below.
-ExecStart=@BINDIR@/proton-drive-fs mount -foreground %h/ProtonDrive
-ExecStop=@BINDIR@/proton-drive-fs unmount %h/ProtonDrive
+# Takes its mountpoint from `mountpoint` in config.toml; set it with `proton-drive-fs config
+# init` and an edit.
+ExecStart=@BINDIR@/proton-drive-fs mount -foreground
+ExecStop=@BINDIR@/proton-drive-fs unmount
 Restart=on-failure
 RestartSec=5s
 

@@ -88,6 +88,134 @@ flowchart LR
     Restart --> Fine
 ```
 
+## systemd unit fails, or the tray shows "No mountpoint configured"
+
+`systemctl --user status proton-drive-fs` shows the unit exiting right away, or the
+tray's status line reads `No mountpoint configured` with `Mount`, `Unmount`, and the
+other mount-management items hidden from its menu. There is no default mountpoint:
+`mount`, `unmount`, `status`, and the tray all need one from an argument,
+`-mountpoint`, or the config file's `mountpoint` key, and the systemd unit has no
+argument to give it at all.
+
+Set `mountpoint` in the config file:
+
+```
+proton-drive-fs config init
+```
+
+then uncomment the `mountpoint` line and set it, and check what proton-drive-fs
+actually resolved:
+
+```
+proton-drive-fs config show
+```
+
+Reload and restart the unit, or quit and relaunch the tray, once it is set:
+
+```
+systemctl --user daemon-reload
+systemctl --user restart proton-drive-fs
+```
+
+## Keeping indexers out of the mount
+
+A file indexer that walks the mount opens every file and directory under it, and each
+open turns into a metadata request over the network. When the mount is stalled or rate
+limited, the indexer's worker threads block in uninterruptible sleep until that request
+finishes, rather than giving up on their own. On one machine running this project, a
+launcher's file indexer had home-directory indexing turned on, walked the mount, and
+its worker threads stayed blocked for minutes, with `readdir "/" timed out after 1m0s`
+in the daemon's log at the same time.
+
+### Choosing the mountpoint
+
+There is no default mountpoint, so where to put it is a choice made at mount time. A
+path outside the home directory root, for example `~/mnt/protondrive`, is walked by
+fewer indexers than a directory placed directly under the home directory: several
+indexers only walk a fixed set of well-known folders under `$HOME` (Desktop, Documents,
+Downloads, Pictures, Videos) rather than the whole home tree.
+
+### Excluding the mount per tool
+
+- **GNOME Tracker** (`tracker-miner-fs`, `tracker-extract`, `localsearch`). By default
+  Tracker only indexes the folders listed in the `index-recursive-directories`
+  gsettings key under `org.freedesktop.Tracker3.Miner.Files`; a mountpoint outside
+  those folders is already skipped. If it ends up covered anyway, remove it from
+  `index-recursive-directories`, or add its name to `ignored-directories`:
+
+  ```
+  gsettings set org.freedesktop.Tracker3.Miner.Files ignored-directories "['protondrive']"
+  ```
+
+  or drop an empty `.trackerignore` file at the top of the mountpoint before mounting;
+  Tracker skips any directory containing one of the names in
+  `ignored-directories-with-content` (`.trackerignore`, `.git`, `.hg`, `.nomedia` by
+  default). Restart the miner for a change to take effect: `tracker3 daemon -k`.
+
+- **KDE Baloo** (`baloo_file`, `baloo_file_extractor`):
+
+  ```
+  balooctl6 config add excludeFolders ~/mnt/protondrive
+  ```
+
+  which appends the path to `exclude folders[$e]` under `[General]` in
+  `~/.config/baloofilerc` (editing that key directly works the same way). Restart Baloo
+  for the change to apply: `balooctl6 disable && balooctl6 enable` (`balooctl` on
+  Plasma 5).
+
+- **Thumbnailer daemon** (`tumblerd`). `tumbler.rc` excludes are set per plugin, not
+  globally: copy `/etc/xdg/tumbler/tumbler.rc` to `~/.config/tumbler/tumbler.rc` if you
+  do not have one yet, then add the mountpoint to `Excludes` (a `;`-separated path
+  list) under each `[...Thumbnailer]` section you care about, for example:
+
+  ```
+  [FfmpegThumbnailer]
+  Excludes=~/mnt/protondrive
+  ```
+
+  [The mount's own denylist](#the-mounts-own-denylist) already stops `tumblerd` from
+  reading a large file on the mount, so this only matters if you also want it to skip
+  small files there.
+
+- **`updatedb`/`mlocate`/`plocate`**. Add the mountpoint to `PRUNEPATHS`, or add
+  `fuse.proton-drive-fs` to `PRUNEFS`, in `/etc/updatedb.conf`:
+
+  ```
+  PRUNEPATHS="... /home/you/mnt/protondrive"
+  PRUNEFS="... fuse.proton-drive-fs"
+  ```
+
+  `updatedb` reads this file on its next scheduled run (a daily cron job or systemd
+  timer on most distributions); there is no daemon to restart.
+
+- **vicinae**. Its root search walks files under the home directory only when
+  `search_files_in_root` is turned on in `~/.config/vicinae/settings.json` (`false` by
+  default). Turn it off, or keep the mountpoint outside the home directory so a
+  home-rooted search never reaches it:
+
+  ```
+  "search_files_in_root": false
+  ```
+
+  vicinae picks up a config file change without a restart.
+
+### The mount's own denylist
+
+The mount already refuses a read of a file above `-large-file` from a fixed list of
+thumbnailer and indexer process names (`-deny-readers`; see [mount](usage.md#mount) for
+the current default list), so a preview for a large file on the mount comes from
+Proton's own stored thumbnail instead of triggering a full download. Add a process name
+to `-deny-readers` to extend that list.
+
+### Checking the filesystem type
+
+`updatedb`'s `PRUNEFS`, and any other tool that excludes by filesystem type rather than
+by path, should match `fuse.proton-drive-fs`. See what is actually mounted with:
+
+```
+findmnt -t fuse.proton-drive-fs
+```
+
 ## systemd unit fails with status=203/EXEC
 
 `systemctl --user status proton-drive-fs` shows the process exiting immediately with

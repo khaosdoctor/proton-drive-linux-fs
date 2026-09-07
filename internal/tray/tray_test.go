@@ -9,20 +9,23 @@ import (
 
 func TestVisibilityFor(t *testing.T) {
 	tests := []struct {
-		name     string
-		loggedIn bool
-		mounted  bool
-		want     menuVisibility
+		name       string
+		loggedIn   bool
+		mounted    bool
+		configured bool
+		want       menuVisibility
 	}{
 		{
 			"logged out, not mounted",
 			false,
 			false,
+			true,
 			menuVisibility{Mount: false, Unmount: false, Restart: false, Pause: false, OpenFolder: false, Login: true, Logout: false},
 		},
 		{
 			"logged out, mounted",
 			false,
+			true,
 			true,
 			menuVisibility{Mount: false, Unmount: true, Restart: true, Pause: true, OpenFolder: true, Login: true, Logout: false},
 		},
@@ -30,21 +33,37 @@ func TestVisibilityFor(t *testing.T) {
 			"logged in, not mounted",
 			true,
 			false,
+			true,
 			menuVisibility{Mount: true, Unmount: false, Restart: false, Pause: false, OpenFolder: false, Login: false, Logout: true},
 		},
 		{
 			"logged in, mounted",
 			true,
 			true,
+			true,
 			menuVisibility{Mount: false, Unmount: true, Restart: true, Pause: true, OpenFolder: true, Login: false, Logout: true},
+		},
+		{
+			"logged in, no mountpoint configured",
+			true,
+			false,
+			false,
+			menuVisibility{Mount: false, Unmount: false, Restart: false, Pause: false, OpenFolder: false, Login: false, Logout: true},
+		},
+		{
+			"logged out, no mountpoint configured",
+			false,
+			false,
+			false,
+			menuVisibility{Mount: false, Unmount: false, Restart: false, Pause: false, OpenFolder: false, Login: true, Logout: false},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := visibilityFor(tt.loggedIn, tt.mounted)
+			got := visibilityFor(tt.loggedIn, tt.mounted, tt.configured)
 			if got != tt.want {
-				t.Errorf("visibilityFor(%v, %v) = %+v, want %+v", tt.loggedIn, tt.mounted, got, tt.want)
+				t.Errorf("visibilityFor(%v, %v, %v) = %+v, want %+v", tt.loggedIn, tt.mounted, tt.configured, got, tt.want)
 			}
 		})
 	}
@@ -157,66 +176,78 @@ func TestTerminalCommandDoesNotMutateTerminals(t *testing.T) {
 
 func TestStatusLine(t *testing.T) {
 	tests := []struct {
-		name string
-		sn   snapshot
-		want string
+		name       string
+		sn         snapshot
+		mountpoint string
+		want       string
 	}{
-		{"logged out", snapshot{}, "Not logged in"},
-		{"not mounted", snapshot{loggedIn: true}, "Not mounted"},
-		{"mounted", snapshot{loggedIn: true, mounted: true}, "Mounted at /m"},
-		{"paused", snapshot{loggedIn: true, mounted: true, paused: true}, "Mounted at /m (paused)"},
-		{"syncing", snapshot{loggedIn: true, mounted: true, transfers: 2, fresh: true}, "Mounted at /m (syncing)"},
+		{"logged out", snapshot{}, "/m", "Not logged in"},
+		{"logged out with no mountpoint configured", snapshot{}, "", "Not logged in"},
+		{"no mountpoint configured", snapshot{loggedIn: true}, "", "No mountpoint configured"},
+		{"not mounted", snapshot{loggedIn: true}, "/m", "Not mounted"},
+		{"mounted", snapshot{loggedIn: true, mounted: true}, "/m", "Mounted at /m"},
+		{"paused", snapshot{loggedIn: true, mounted: true, paused: true}, "/m", "Mounted at /m (paused)"},
+		{"syncing", snapshot{loggedIn: true, mounted: true, transfers: 2, fresh: true}, "/m", "Mounted at /m (syncing)"},
 		{
 			"upload progress",
 			snapshot{loggedIn: true, mounted: true, fresh: true, uploadsQueued: 10000, uploadsDone: 312},
+			"/m",
 			"Mounted at /m, syncing 312/10000",
 		},
 		{
 			"upload progress with failures",
 			snapshot{loggedIn: true, mounted: true, fresh: true, uploadsQueued: 10000, uploadsDone: 312, uploadsFailed: 4},
+			"/m",
 			"Mounted at /m, syncing 312/10000, 4 failed",
 		},
 		{
 			"drained queue reports the failures only",
 			snapshot{loggedIn: true, mounted: true, fresh: true, uploadsQueued: 10, uploadsDone: 8, uploadsFailed: 2},
+			"/m",
 			"Mounted at /m, 2 failed",
 		},
 		{
 			"drained queue is not syncing",
 			snapshot{loggedIn: true, mounted: true, fresh: true, uploadsQueued: 10, uploadsDone: 10},
+			"/m",
 			"Mounted at /m",
 		},
 		{
 			"stale snapshot hides the progress",
 			snapshot{loggedIn: true, mounted: true, uploadsQueued: 10, uploadsDone: 1},
+			"/m",
 			"Mounted at /m",
 		},
 		{
 			"paused outranks the progress",
 			snapshot{loggedIn: true, mounted: true, paused: true, fresh: true, uploadsQueued: 10, uploadsDone: 1},
+			"/m",
 			"Mounted at /m (paused)",
 		},
 		{
 			"daemon version mismatch",
 			snapshot{loggedIn: true, mounted: true, fresh: true, ownVersion: "1.2.0", daemonVersion: "1.1.0"},
+			"/m",
 			"Mounted at /m (daemon 1.1.0, restart needed)",
 		},
 		{
 			"stale snapshot hides the mismatch",
 			snapshot{loggedIn: true, mounted: true, fresh: false, ownVersion: "1.2.0", daemonVersion: "1.1.0"},
+			"/m",
 			"Mounted at /m",
 		},
 		{
 			"same version, no hint",
 			snapshot{loggedIn: true, mounted: true, fresh: true, ownVersion: "1.2.0", daemonVersion: "1.2.0"},
+			"/m",
 			"Mounted at /m",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.sn.statusLine("/m"); got != tt.want {
-				t.Errorf("statusLine() = %q, want %q", got, tt.want)
+			if got := tt.sn.statusLine(tt.mountpoint); got != tt.want {
+				t.Errorf("statusLine(%q) = %q, want %q", tt.mountpoint, got, tt.want)
 			}
 		})
 	}

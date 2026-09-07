@@ -68,15 +68,17 @@ func runTray(args []string) int {
 
 	fs := flag.NewFlagSet("tray", flag.ContinueOnError)
 	fs.String("config", configPath, "path to config.toml")
-	mountpoint := fs.String("mountpoint", cfg.Mountpoint, "mountpoint the tray manages (default: the config file's mountpoint, else the last one used, else ~/ProtonDrive)")
+	mountpoint := fs.String("mountpoint", cfg.Mountpoint, "mountpoint the tray manages (default: the config file's mountpoint, else the one it used last; with none of those, the tray starts with mount management disabled)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	config.ApplyFlags(fs, &cfg)
 
-	mp := resolveTrayMountpoint(*mountpoint)
-	if err := tray.SaveMountpoint(mp); err != nil {
-		fmt.Fprintln(os.Stderr, "warning: remembering the mountpoint failed:", err)
+	mp := resolveTrayMountpoint(*mountpoint, cfg)
+	if mp != "" {
+		if err := tray.SaveMountpoint(mp); err != nil {
+			fmt.Fprintln(os.Stderr, "warning: remembering the mountpoint failed:", err)
+		}
 	}
 
 	logPath, err := mountLogPath()
@@ -97,16 +99,14 @@ func runTray(args []string) int {
 	return 0
 }
 
-// resolveTrayMountpoint prefers the flag, then the mountpoint the tray used last, then the
-// default under the home directory.
-func resolveTrayMountpoint(flagValue string) string {
-	if flagValue != "" {
-		return absOrSelf(flagValue)
+// resolveTrayMountpoint prefers the flag, then the config file, then the mountpoint the tray
+// used last. It returns "" when none of those provide one: the tray still starts in that case,
+// with mount management disabled, rather than inventing a default.
+func resolveTrayMountpoint(flagValue string, cfg config.Config) string {
+	if mp, err := resolveMountpoint(flagValue, cfg); err == nil {
+		return absOrSelf(mp)
 	}
-	if saved := tray.LoadMountpoint(); saved != "" {
-		return saved
-	}
-	return tray.DefaultMountpoint()
+	return tray.LoadMountpoint()
 }
 
 func absOrSelf(path string) string {

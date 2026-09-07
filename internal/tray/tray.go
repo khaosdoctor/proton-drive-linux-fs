@@ -153,6 +153,9 @@ func (sn snapshot) statusLine(mountpoint string) string {
 	if !sn.loggedIn {
 		return "Not logged in"
 	}
+	if mountpoint == "" {
+		return "No mountpoint configured"
+	}
 	if !sn.mounted {
 		return "Not mounted"
 	}
@@ -409,7 +412,7 @@ func (a *app) apply(sn snapshot) {
 	}
 	systray.SetTooltip(tooltipFor(sn, a.opts.Mountpoint))
 
-	v := visibilityFor(sn.loggedIn, sn.mounted)
+	v := visibilityFor(sn.loggedIn, sn.mounted, a.opts.Mountpoint != "")
 	showIf(a.mount, v.Mount)
 	showIf(a.unmount, v.Unmount)
 	showIf(a.restart, v.Restart)
@@ -464,13 +467,19 @@ type menuVisibility struct {
 	Mount, Unmount, Restart, Pause, OpenFolder, Login, Logout bool
 }
 
-func visibilityFor(loggedIn, mounted bool) menuVisibility {
+// visibilityFor decides which menu items apply given whether a session is logged in, the mount
+// is currently mounted, and a mountpoint has resolved at all (configured: an argument, the config
+// file, or the tray's remembered one). Without a mountpoint, Mount, Unmount, Restart, Pause/Resume
+// and Open folder stay hidden regardless of the other two, since none of them has anywhere to act
+// on; About, Open logs, Open debug logs, Log in/out and Quit are unaffected and stay available
+// (they are not gated through this struct at all).
+func visibilityFor(loggedIn, mounted, configured bool) menuVisibility {
 	return menuVisibility{
-		Mount:      loggedIn && !mounted,
-		Unmount:    mounted,
-		Restart:    mounted,
-		Pause:      mounted,
-		OpenFolder: mounted,
+		Mount:      loggedIn && !mounted && configured,
+		Unmount:    mounted && configured,
+		Restart:    mounted && configured,
+		Pause:      mounted && configured,
+		OpenFolder: mounted && configured,
 		Login:      !loggedIn,
 		Logout:     loggedIn,
 	}
@@ -661,16 +670,6 @@ func terminalCommand(lookPath func(string) (string, error), getenv func(string) 
 	}
 
 	return nil
-}
-
-// DefaultMountpoint is where the tray mounts when neither the flag nor the remembered
-// config says otherwise.
-func DefaultMountpoint() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "ProtonDrive"
-	}
-	return filepath.Join(home, "ProtonDrive")
 }
 
 func configPath() (string, error) {

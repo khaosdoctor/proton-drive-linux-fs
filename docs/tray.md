@@ -1,14 +1,16 @@
 # Tray
 
 ```
-proton-drive-fs tray [-mountpoint ~/ProtonDrive]
+proton-drive-fs tray [-mountpoint <path>]
 ```
 
 Runs a status icon in the system tray over StatusNotifierItem, which is what Waybar,
 KDE Plasma, and the GNOME AppIndicator extension speak. With no `-mountpoint` the tray
-reuses the last mountpoint it was given and falls back to `~/ProtonDrive`; the choice
-is stored in `$XDG_CONFIG_HOME/proton-drive-fs/tray.json` so the menu keeps working
-after a restart.
+uses the config file's `mountpoint`, then the mountpoint it was given last time; the
+choice is stored in `$XDG_CONFIG_HOME/proton-drive-fs/tray.json` so the menu keeps
+working after a restart. There is no default mountpoint: with none of the three, the
+tray still starts, but with mount management disabled until one is set (see
+[No mountpoint configured](#no-mountpoint-configured)).
 
 ## Icon states
 
@@ -46,17 +48,28 @@ drains.
 
 ## Menu
 
-The menu holds a status line (`Mounted at <path>`, `Not mounted`, or `Not logged in`),
-then items shown only when they apply:
+The menu holds a status line (`Mounted at <path>`, `Not mounted`, `Not logged in`, or
+`No mountpoint configured`), then items shown only when they apply:
 
-- `Mount` when logged in but not mounted.
-- `Unmount` and `Restart mount` when mounted.
+- `Mount` when logged in, not mounted, and a mountpoint is configured.
+- `Unmount` and `Restart mount` when mounted (which implies a mountpoint is
+  configured).
 - `Pause syncing` or `Resume syncing` when mounted.
 - `Open folder` when mounted.
 - `Open logs` and `Open debug logs`.
 - `Log in` when logged out.
 - `Log out` when logged in.
 - `Quit`.
+
+## No mountpoint configured
+
+When neither `-mountpoint`, the config file, nor the mountpoint remembered from a
+previous run resolves to a path, the tray still starts rather than exiting: the status
+line reads `No mountpoint configured`, and `Mount`, `Unmount`, `Restart mount`,
+`Pause syncing`/`Resume syncing`, and `Open folder` stay hidden, since none of them has
+a mountpoint to act on. `About`, `Open logs`, `Open debug logs`, `Log in`/`Log out`, and
+`Quit` stay available. Fix it with `proton-drive-fs config init` followed by an edit to
+set `mountpoint`, or by restarting the tray with `-mountpoint <path>`.
 
 `Mount` and `Unmount` run this same binary, so a mount started from the menu is the
 same detached mount you get from a shell, and it survives the tray closing. `Quit`

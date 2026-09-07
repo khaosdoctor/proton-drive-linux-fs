@@ -61,3 +61,52 @@ func TestCacheSizeFlagRejectsMalformedCLIValue(t *testing.T) {
 		t.Fatal("expected fs.Parse to reject a malformed -cache-size")
 	}
 }
+
+// TestResolveMountpoint covers every combination resolveMountpoint has to arbitrate between: an
+// argument, a config file value, both, and neither. There is no built-in default (see
+// config.Defaults), so "neither" must fail rather than fall back to an invented path.
+func TestResolveMountpoint(t *testing.T) {
+	tests := []struct {
+		name    string
+		arg     string
+		cfgMP   string
+		want    string
+		wantErr bool
+	}{
+		{"arg only", "/from/arg", "", "/from/arg", false},
+		{"config only", "", "/from/config", "/from/config", false},
+		{"both, arg wins", "/from/arg", "/from/config", "/from/arg", false},
+		{"neither is an error", "", "", "", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Defaults()
+			cfg.Mountpoint = tt.cfgMP
+
+			got, err := resolveMountpoint(tt.arg, cfg)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("resolveMountpoint(%q, cfg with Mountpoint=%q) = %q, nil; want an error", tt.arg, tt.cfgMP, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveMountpoint(%q, cfg with Mountpoint=%q) unexpected error: %v", tt.arg, tt.cfgMP, err)
+			}
+			if got != tt.want {
+				t.Errorf("resolveMountpoint(%q, cfg with Mountpoint=%q) = %q, want %q", tt.arg, tt.cfgMP, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestNoMountpointError checks the exact wording and that the config path is interpolated into
+// it, since a caller (mount, unmount, status) matches nothing else against this string.
+func TestNoMountpointError(t *testing.T) {
+	got := noMountpointError("/home/u/.config/proton-drive-fs/config.toml")
+	want := "error: no mountpoint given; pass one as an argument or set mountpoint in /home/u/.config/proton-drive-fs/config.toml"
+	if got != want {
+		t.Errorf("noMountpointError() = %q, want %q", got, want)
+	}
+}

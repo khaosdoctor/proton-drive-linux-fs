@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -10,6 +11,32 @@ import (
 
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/config"
 )
+
+// errNoMountpoint is resolveMountpoint's error when neither an argument nor the config file
+// provides one. Callers turn it into the user-facing "error: no mountpoint given; ..." message,
+// which needs the resolved config path resolveMountpoint itself does not have.
+var errNoMountpoint = errors.New("no mountpoint given")
+
+// resolveMountpoint picks the mountpoint mount, unmount, status, and tray operate on: arg (a
+// command-line positional argument) when it is non-empty, otherwise cfg.Mountpoint, otherwise
+// errNoMountpoint. It reads and writes nothing, so every caller resolves a mountpoint the same
+// way and the logic is testable with plain data instead of a full command invocation.
+func resolveMountpoint(arg string, cfg config.Config) (string, error) {
+	if arg != "" {
+		return arg, nil
+	}
+	if cfg.Mountpoint != "" {
+		return cfg.Mountpoint, nil
+	}
+	return "", errNoMountpoint
+}
+
+// noMountpointError formats resolveMountpoint's errNoMountpoint as the message printed to
+// stderr, naming configPath (the config file that was actually consulted) as where a mountpoint
+// could also come from.
+func noMountpointError(configPath string) string {
+	return fmt.Sprintf("error: no mountpoint given; pass one as an argument or set mountpoint in %s", configPath)
+}
 
 // resolveConfigPath finds the -config path from args without fully parsing them: the config file
 // has to be loaded before the rest of a subcommand's flags are defined, since their defaults come
@@ -186,7 +213,7 @@ func runConfigShow(args []string) int {
 
 	fs := flag.NewFlagSet("config show", flag.ContinueOnError)
 	fs.String("config", configPath, "path to config.toml")
-	fs.String("mountpoint", cfg.Mountpoint, "default mountpoint for mount and tray")
+	fs.String("mountpoint", cfg.Mountpoint, "mountpoint for mount, unmount, status, and tray when none is given as an argument")
 	if _, err := registerMountConfigFlags(fs, cfg); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 2
@@ -202,7 +229,8 @@ func runConfigShow(args []string) int {
 }
 
 // printConfig prints cfg as TOML with a trailing comment on each line naming where that value came
-// from: a flag explicitly passed to this invocation, the config file, or the built-in default.
+// from: a flag explicitly passed to this invocation, the config file, the built-in default, or
+// (mountpoint only, which has no built-in default) "unset".
 func printConfig(cfg config.Config, explicit map[string]bool) {
 	fileKeys := cfg.FileKeys()
 
@@ -221,7 +249,13 @@ func printConfig(cfg config.Config, explicit map[string]bool) {
 		fmt.Printf("%s = %s # %s\n", key, value, source(key))
 	}
 
-	line("mountpoint", strconv.Quote(cfg.Mountpoint))
+	mountpointSource := source("mountpoint")
+	if mountpointSource == "default" {
+		// mountpoint has no built-in default (see config.Defaults), so falling through to
+		// "default" here would claim one exists; "unset" says nothing provided it instead.
+		mountpointSource = "unset"
+	}
+	fmt.Printf("mountpoint = %s # %s\n", strconv.Quote(cfg.Mountpoint), mountpointSource)
 	line("ttl", strconv.Quote(cfg.TTL))
 	line("poll", strconv.Quote(cfg.Poll))
 	line("op_timeout", strconv.Quote(cfg.OpTimeout))

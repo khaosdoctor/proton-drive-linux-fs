@@ -27,7 +27,6 @@ import (
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/logx"
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/state"
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/thumbs"
-	"github.com/khaosdoctor/proton-drive-linux-fs/internal/tray"
 )
 
 var version = "dev"
@@ -311,13 +310,14 @@ func runMount(args []string) int {
 		return 2
 	}
 
-	mountpoint := cfg.Mountpoint
+	var arg string
 	if fs.NArg() >= 1 {
-		mountpoint = fs.Arg(0)
+		arg = fs.Arg(0)
 	}
-	if mountpoint == "" {
-		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs mount [<mountpoint>] [-config path] [-debug] [-ttl 30s] [-poll 10s] [-op-timeout 60s] [-cache-dir path] [-cache-size 2GiB] [-large-file 300MiB] [-thumbnails] [-thumbnail-dir path] [-deny-readers names] [-max-uploads 5] [-max-downloads 8] [-foreground] [-log-level info] [-log-stderr]")
-		fmt.Fprintln(os.Stderr, "mountpoint is required unless the config file sets one (see: proton-drive-fs config init)")
+	mountpoint, err := resolveMountpoint(arg, cfg)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs mount [<mountpoint>] [-config path] [-debug] [-ttl 30s] [-poll 10s] [-op-timeout 60s] [-cache-dir path] [-cache-size 2GiB] [-large-file 300MiB] [-thumbnails] [-thumbnail-dir path] [-deny-readers names] [-max-uploads 5] [-max-downloads 8] [-foreground] [-log-level info] [-log-stderr]  (required unless mountpoint is set in the config file)")
+		fmt.Fprintln(os.Stderr, noMountpointError(configPath))
 		return 2
 	}
 
@@ -633,18 +633,33 @@ func printLastLines(path string, n int) {
 }
 
 func runUnmount(args []string) int {
+	configPath := resolveConfigPath(args)
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: loading config:", err)
+		return 1
+	}
+
+	const usage = "usage: proton-drive-fs unmount [<mountpoint>] [-config path] [-force] [-wait 5s]  (required unless mountpoint is set in the config file)"
+
 	fs := flag.NewFlagSet("unmount", flag.ContinueOnError)
+	fs.String("config", configPath, "path to config.toml")
 	force := fs.Bool("force", false, "lazily unmount and abort the kernel FUSE connection; for a mount wedged by a dead or deadlocked daemon")
 	wait := fs.Duration("wait", 5*time.Second, "retry a plain unmount for this long while the mountpoint is busy before falling back to a lazy unmount")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
-	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs unmount [-force] [-wait 5s] <mountpoint>")
+	if fs.NArg() > 1 {
+		fmt.Fprintln(os.Stderr, usage)
 		return 2
 	}
-	mountpoint := fs.Arg(0)
+	mountpoint, err := resolveMountpoint(fs.Arg(0), cfg)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, usage)
+		fmt.Fprintln(os.Stderr, noMountpointError(configPath))
+		return 2
+	}
 
 	if *force {
 		return runUnmountForce(mountpoint)
@@ -947,29 +962,19 @@ func runStatus(args []string) int {
 	}
 	config.ApplyFlags(fs, &cfg)
 	if fs.NArg() > 1 {
-		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs status [-config path] [mountpoint]")
+		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs status [<mountpoint>] [-config path]  (required unless mountpoint is set in the config file)")
 		return 2
 	}
 
-	mountpoint := statusMountpoint(fs.Arg(0), cfg.Mountpoint)
-	printStatus(mountpoint)
-	return 0
-}
+	mountpoint, err := resolveMountpoint(fs.Arg(0), cfg)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs status [<mountpoint>] [-config path]  (required unless mountpoint is set in the config file)")
+		fmt.Fprintln(os.Stderr, noMountpointError(configPath))
+		return 2
+	}
 
-// statusMountpoint resolves the mountpoint "status" reports on: the argument when given, else
-// the config file's mountpoint, else the tray's remembered mountpoint, else the default under the
-// home directory.
-func statusMountpoint(arg, cfgMountpoint string) string {
-	if arg != "" {
-		return absOrSelf(arg)
-	}
-	if cfgMountpoint != "" {
-		return absOrSelf(cfgMountpoint)
-	}
-	if saved := tray.LoadMountpoint(); saved != "" {
-		return saved
-	}
-	return tray.DefaultMountpoint()
+	printStatus(absOrSelf(mountpoint))
+	return 0
 }
 
 func printStatus(mountpoint string) {

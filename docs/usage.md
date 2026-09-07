@@ -33,16 +33,19 @@ session file with mode 0600. `logout` removes both.
 ## mount
 
 ```
-proton-drive-fs mount [<mountpoint>] [-config path] [flags]
+proton-drive-fs mount [<mountpoint>] [-config path] [flags]  (required unless mountpoint is set in the config file)
 ```
 
-`<mountpoint>` is required unless the config file sets `mountpoint`. If it does not
-exist, mount creates it. By default mount detaches into the
-background and waits until the filesystem is mounted. The daemon logs structured
-entries to the systemd journal itself under the identifier `proton-drive-fs`, readable
-with `journalctl --user -t proton-drive-fs`; see
-[Logs](troubleshooting.md#logs) for levels and the file fallback when there is no
-journal.
+There is no default mountpoint. `<mountpoint>` is required unless the config file sets
+`mountpoint`; with neither, mount prints `error: no mountpoint given; pass one as an
+argument or set mountpoint in <config path>` and exits with status 2. If the mountpoint
+does not exist, mount creates it. By default mount detaches into the background and
+waits until the filesystem is mounted. The daemon logs structured entries to the
+systemd journal itself under the identifier `proton-drive-fs`, readable with
+`journalctl --user -t proton-drive-fs`; see [Logs](troubleshooting.md#logs) for levels
+and the file fallback when there is no journal. See
+[Keeping indexers out of the mount](troubleshooting.md#keeping-indexers-out-of-the-mount)
+before picking a mountpoint.
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -73,23 +76,25 @@ gnome-desktop-thumbnailer, evince-thumbnailer
 `mount` refuses to attach to a mountpoint that is already mounted, printing the running
 daemon's pid and version when the status file has them, so a rebuild whose earlier
 unmount failed as busy never gets mistaken for actually running the new binary.
-`make restart` (optionally `MP=<mountpoint>`, default `~/ProtonDrive`) unmounts,
-rebuilds, and remounts in one step.
+`make restart MP=<mountpoint>` (`MP` is required) unmounts, rebuilds, and remounts in
+one step.
 
 A cold directory (nothing cached in memory yet, for example right after mount) is
 served from the persisted listing cache when one exists, so a folder listed before
 shows up instantly instead of waiting on the network; a background refresh follows the
 same TTL and event-driven invalidation as everything else, and refreshes the persisted
-copy once it lands. See [Cache layout](how-it-works.md#cache-layout) for how blocks
-and listings share the cache directory.
+copy once that finishes. See [Cache layout](how-it-works.md#cache-layout) for how
+blocks and listings share the cache directory.
 
 ## unmount
 
 ```
-proton-drive-fs unmount [-force] [-wait 5s] <mountpoint>
+proton-drive-fs unmount [<mountpoint>] [-config path] [-force] [-wait 5s]  (required unless mountpoint is set in the config file)
 ```
 
 Runs `fusermount3 -u` (or `fusermount -u` if `fusermount3` is not on `PATH`).
+`<mountpoint>` is required unless the config file sets `mountpoint`; the systemd unit's
+`ExecStop` relies on this to run `unmount` with no argument at all.
 
 - `-wait` (default: `5s`): if the mountpoint is busy, retry every 500ms for up to this
   long. If it is still busy after that, unmount falls back to a lazy unmount, which
@@ -102,23 +107,25 @@ Runs `fusermount3 -u` (or `fusermount -u` if `fusermount3` is not on `PATH`).
 ## status
 
 ```
-proton-drive-fs status [-config path] [mountpoint]
+proton-drive-fs status [<mountpoint>] [-config path]  (required unless mountpoint is set in the config file)
 ```
 
 Prints whether the mountpoint is mounted, the running daemon's pid and version, this
 binary's version, transfers in flight, and whether syncing is paused; with a version
 mismatch it also prints the unmount-then-mount command to fix it. With no argument it
-uses the config file's `mountpoint`, then the tray's remembered mountpoint, then falls
-back to `~/ProtonDrive`.
+uses the config file's `mountpoint`; with neither, `status` prints the same
+`error: no mountpoint given` message as `mount` and exits with status 2.
 
 ## tray
 
 ```
-proton-drive-fs tray [-config path] [-mountpoint ~/ProtonDrive]
+proton-drive-fs tray [-config path] [-mountpoint <path>]
 ```
 
-Runs a status icon in the system tray. See [Tray](tray.md) for the menu, icon states,
-and desktop integration.
+Runs a status icon in the system tray. `-mountpoint` falls back to the config file's
+`mountpoint`, then the mountpoint the tray used last; with none of those, the tray
+still starts, but with mount management disabled until a mountpoint is set. See
+[Tray](tray.md) for the menu, icon states, and desktop integration.
 
 ## logout
 
@@ -160,15 +167,18 @@ systemctl --user enable --now proton-drive-fs-tray
 ```
 
 Both units run the binary from `~/.local/bin`; edit `ExecStart` if yours lives
-elsewhere. The mount unit runs `mount -foreground`, so its output goes to the journal
-as part of the unit.
+elsewhere. The mount unit runs `mount -foreground` with no mountpoint argument, so it
+needs `mountpoint` set in config.toml (`proton-drive-fs config init`, then edit the
+file); its `ExecStop` runs `unmount` the same way. Its output goes to the journal as
+part of the unit.
 
 ## make restart
 
 ```
-make restart
+make restart MP=<mountpoint>
 ```
 
-Unmounts the mountpoint (default `~/ProtonDrive`, override with `MP=<path>`), rebuilds
-the binary, and remounts it. Use this after changing code, or after a `git pull`, so
-the running daemon always matches the binary on disk.
+`MP` is required; without it, `restart` and `status` fail with a message telling you to
+set it. Unmounts the mountpoint, rebuilds the binary, and remounts it. Use this after
+changing code, or after a `git pull`, so the running daemon always matches the binary
+on disk.

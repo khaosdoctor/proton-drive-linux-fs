@@ -4,7 +4,7 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT)
 PREFIX ?= $(HOME)/.local
-MP ?= $(HOME)/ProtonDrive
+MP ?=
 GOLANGCI := go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
 
 .PHONY: all build test race lint check generate install uninstall clean restart status packages aur-check help
@@ -57,11 +57,13 @@ clean:
 	rm -rf bin/
 
 restart:
+	@test -n "$(MP)" || { echo "set MP=<mountpoint>, for example: make restart MP=~/ProtonDrive" >&2; exit 1; }
 	-./$(BIN) unmount $(MP)
 	$(MAKE) build
 	./$(BIN) mount $(MP)
 
 status:
+	@test -n "$(MP)" || { echo "set MP=<mountpoint>, for example: make status MP=~/ProtonDrive" >&2; exit 1; }
 	./$(BIN) status $(MP)
 
 packages:
@@ -82,8 +84,8 @@ help:
 	@printf "  install\tBuild and install to \$$PREFIX (default: \$$HOME/.local)\n"
 	@printf "  uninstall\tRemove installed files\n"
 	@printf "  clean\t\tRemove built binary and bin/ directory\n"
-	@printf "  restart\tUnmount, rebuild, and remount MP (default: \$$HOME/ProtonDrive)\n"
-	@printf "  status\tShow proton-drive-fs status for MP (default: \$$HOME/ProtonDrive)\n"
+	@printf "  restart\tUnmount, rebuild, and remount MP (required, e.g. MP=~/ProtonDrive)\n"
+	@printf "  status\tShow proton-drive-fs status for MP (required, e.g. MP=~/ProtonDrive)\n"
 	@printf "  packages\tBuild local deb/rpm/apk/pkg.tar.zst packages into dist/\n"
 	@printf "  aur-check\tValidate .goreleaser.yaml, including the AUR publishers\n"
 	@printf "  help\t\tShow this message\n"
