@@ -606,7 +606,7 @@ func (a *app) showConfigFolder() {
 
 // showLogs follows the journal when the mount logs there, and otherwise opens the log file.
 func (a *app) showLogs() {
-	journal := []string{"journalctl", "--user", "-t", "proton-drive-fs", "-f"}
+	journal := []string{"journalctl", "--user", "-t", "proton-drive-fs", "-p", "info", "-f"}
 
 	if logx.JournaldAvailable() {
 		argv := terminalCommand(exec.LookPath, os.Getenv, journal)
