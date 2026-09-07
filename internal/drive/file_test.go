@@ -389,6 +389,93 @@ func TestReadAtPartialBlockThenEOF(t *testing.T) {
 	}
 }
 
+// TestReadAtTrailingStructures covers several file formats where readers seek near the end of
+// the file to find a trailing structure (xref table, trailer, moov atom, IFD, etc.). When the
+// reported size includes PGP overhead, the computed seek offset is past the actual plaintext
+// and the read must return (0, io.EOF) instead of a silent (0, nil).
+func TestReadAtTrailingStructures(t *testing.T) {
+	cases := []struct {
+		name      string
+		readSize  int   // bytes the format reader tries to read from the end
+		overhead  int64 // how much larger encrypted size is vs plaintext
+		plainSize int64 // actual plaintext file size
+	}{
+		{
+			name:      "pdf xref scan",
+			readSize:  64,
+			overhead:  112,
+			plainSize: 50000,
+		},
+		{
+			name:      "gzip trailer",
+			readSize:  8,
+			overhead:  48,
+			plainSize: 1024,
+		},
+		{
+			name:      "mp4 moov atom header",
+			readSize:  8,
+			overhead:  96,
+			plainSize: 80000,
+		},
+		{
+			name:      "sqlite page read",
+			readSize:  4096,
+			overhead:  4200,
+			plainSize: 32768,
+		},
+		{
+			name:      "png iend chunk",
+			readSize:  12,
+			overhead:  64,
+			plainSize: 4096,
+		},
+		{
+			name:      "tiff ifd near eof",
+			readSize:  12,
+			overhead:  80,
+			plainSize: 16384,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			plain := bytes.Repeat([]byte("D"), int(tc.plainSize))
+
+			t.Run("inflated size", func(t *testing.T) {
+				inflated := tc.plainSize + tc.overhead
+				f := newTestFile(t, plain, inflated)
+
+				// The format reader computes offset = reportedSize - readSize.
+				// With inflated size this is past the actual plaintext.
+				seekOff := inflated - int64(tc.readSize)
+				buf := make([]byte, tc.readSize)
+				n, err := f.ReadAt(context.Background(), buf, seekOff)
+				if n != 0 {
+					t.Errorf("n=%d, want 0 (offset past actual data)", n)
+				}
+				if !errors.Is(err, io.EOF) {
+					t.Errorf("err=%v, want io.EOF", err)
+				}
+			})
+
+			t.Run("correct size", func(t *testing.T) {
+				f := newTestFile(t, plain, tc.plainSize)
+
+				seekOff := tc.plainSize - int64(tc.readSize)
+				buf := make([]byte, tc.readSize)
+				n, err := f.ReadAt(context.Background(), buf, seekOff)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if n != tc.readSize {
+					t.Fatalf("n=%d, want %d", n, tc.readSize)
+				}
+			})
+		})
+	}
+}
+
 // TestReadAtZipEndOfCentralDirectory simulates the access pattern a ZIP reader uses: it seeks to
 // (file_size - 22) to read the End of Central Directory record (22 bytes). When the reported size
 // includes PGP overhead, that seek offset ends up past the actual plaintext, which used to return
