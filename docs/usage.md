@@ -7,6 +7,26 @@ Every flag `login`, `mount`, and `tray` accept also has a matching key in a conf
 file; see [Configuration](configuration.md) for the file location, its keys, and how a
 flag and the file resolve together.
 
+## Operation models
+
+There are three ways to keep proton-drive-fs running, depending on how you use it.
+
+**Manual.** You run `mount` when you want the drive and `unmount` when you're done. The
+daemon detaches into the background on `mount`; nothing supervises it, so it stays up
+only until you unmount it, log out, or it crashes. Use `status` to check whether it's
+still mounted. Good for trying the tool out or for occasional use.
+
+**systemd (recommended for daily use).** The `proton-drive-fs` user unit runs `mount
+-foreground` with no mountpoint argument, so it needs `mountpoint` set in `config.toml`
+first. systemd starts it at login, restarts it on failure, and stops it with `unmount`
+on shutdown; its output goes to the journal as part of the unit. See
+[Systemd user units](#systemd-user-units) below and the
+[Quick start](quickstart.md#5-keep-it-running) walkthrough.
+
+**Docker.** The container image runs the CLI only, with no tray and no desktop
+integration; it's for containers and headless servers rather than a desktop session.
+See [Install](install.md#container-image).
+
 ## login
 
 ```

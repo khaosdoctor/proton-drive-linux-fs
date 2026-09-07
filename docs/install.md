@@ -7,40 +7,6 @@
 - Optional: `zenity`, used by some desktops for graphical prompts.
 - Optional: a running systemd journal, so the mount daemon logs there instead of a plain log file.
 
-## From a GitHub Release
-
-```
-tar -xzf proton-drive-fs_linux_amd64.tar.gz
-sudo install -m 755 proton-drive-fs /usr/local/bin/proton-drive-fs
-```
-
-Releases are published on the [releases page](https://github.com/khaosdoctor/proton-drive-linux-fs/releases), one tarball per architecture (`amd64`, `arm64`).
-
-## With Go
-
-```
-go install github.com/khaosdoctor/proton-drive-linux-fs/cmd/proton-drive-fs@latest
-```
-
-## From source
-
-Run these in order:
-
-```
-git clone https://github.com/khaosdoctor/proton-drive-linux-fs
-cd proton-drive-linux-fs
-make build
-make install
-```
-
-`make build` places the binary in the repository root. `make install` copies it to `$PREFIX/bin` (default `$HOME/.local/bin`), installs the desktop entry and icon, and installs the two systemd user units described in [Usage](usage.md). Run `make help` to see every target.
-
-## Native packages
-
-You can download the native packages and install locally as well.
-
-`.deb`, `.rpm`, `.apk`, and Arch packages are attached to each [release](https://github.com/khaosdoctor/proton-drive-linux-fs/releases). Install one with the matching package manager (`dpkg`, `rpm`, `apk`, or `pacman`), then enable the tray with `systemctl --user enable --now proton-drive-fs-tray`.
-
 ## Arch Linux (AUR)
 
 The recommended way is to use the prebuilt binary, you can use any AUR helper:
@@ -67,6 +33,42 @@ yay -S proton-drive-fs-git
 
 All three packages pull in `fuse3` as a dependency and enable the tray the
 same way as the native packages above.
+
+## Native packages
+
+On another distro, download the native package and install locally.
+
+`.deb`, `.rpm`, `.apk`, and Arch packages are attached to each [release](https://github.com/khaosdoctor/proton-drive-linux-fs/releases). Install one with the matching package manager (`dpkg`, `rpm`, `apk`, or `pacman`), then enable the tray with `systemctl --user enable --now proton-drive-fs-tray`.
+
+## From a GitHub Release
+
+No package for your distro? Take the raw binary instead:
+
+```
+tar -xzf proton-drive-fs_linux_amd64.tar.gz
+sudo install -m 755 proton-drive-fs /usr/local/bin/proton-drive-fs
+```
+
+Releases are published on the [releases page](https://github.com/khaosdoctor/proton-drive-linux-fs/releases), one tarball per architecture (`amd64`, `arm64`).
+
+## With Go
+
+```
+go install github.com/khaosdoctor/proton-drive-linux-fs/cmd/proton-drive-fs@latest
+```
+
+## From source
+
+Run these in order:
+
+```
+git clone https://github.com/khaosdoctor/proton-drive-linux-fs
+cd proton-drive-linux-fs
+make build
+make install
+```
+
+`make build` places the binary in the repository root. `make install` copies it to `$PREFIX/bin` (default `$HOME/.local/bin`), installs the desktop entry and icon, and installs the two systemd user units described in [Usage](usage.md). Run `make help` to see every target.
 
 ## Container image
 
