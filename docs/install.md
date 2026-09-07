@@ -5,55 +5,52 @@
 - Linux, with FUSE 3 (the `fuse3` package on most distributions) and access to `/dev/fuse`.
 - Optional: a Secret Service provider (GNOME Keyring, KWallet) to store the drive's key password in the OS keyring instead of the session file.
 - Optional: `zenity`, used by some desktops for graphical prompts.
-- Optional: a running systemd journal, so the mount daemon logs there instead of a plain log file.
+- Optional: a running systemd journal, otherwise a logfile is used
 
 ## Arch Linux (AUR)
 
 The recommended way is to use the prebuilt binary, you can use any AUR helper:
 
-```
+```sh
 yay -S proton-drive-fs-bin
 ```
 
 To build from source instead:
 
-```
+```sh
 yay -S proton-drive-fs
 ```
 
 To build the latest commit on `main`, for unreleased changes:
 
-```
+```sh
 yay -S proton-drive-fs-git
 ```
 
-> Be aware that building from HEAD is __highly experimental__, and it _will_
-> probably break sometime, so only do that if you're either developing against
-> that branch or you are very bold
+> Be aware that building from HEAD is __highly experimental__, and it _will_ probably break sometime, so only do that if you're either developing against that branch or you are very bold
 
-All three packages pull in `fuse3` as a dependency and enable the tray the
-same way as the native packages above.
+All three packages pull in `fuse3` as a dependency and enable the tray the same way as the native packages above.
 
 ## Native packages
 
 On another distro, download the native package and install locally.
 
-`.deb`, `.rpm`, `.apk`, and Arch packages are attached to each [release](https://github.com/khaosdoctor/proton-drive-linux-fs/releases). Install one with the matching package manager (`dpkg`, `rpm`, `apk`, or `pacman`), then enable the tray with `systemctl --user enable --now proton-drive-fs-tray`.
+> Packages for those are coming
+
+`.deb`, `.rpm`, `.apk`, and Arch packages are attached to each [release](https://github.com/khaosdoctor/proton-drive-linux-fs/releases). Install one with the matching package manager, then enable the tray with `systemctl --user enable --now proton-drive-fs-tray`.
 
 ## From a GitHub Release
 
-No package for your distro? Take the raw binary instead:
+No package for your distro? Take the raw binary instead, download the tarball from the releases page and install it manually:
 
-```
+```sh
 tar -xzf proton-drive-fs_linux_amd64.tar.gz
 sudo install -m 755 proton-drive-fs /usr/local/bin/proton-drive-fs
 ```
 
-Releases are published on the [releases page](https://github.com/khaosdoctor/proton-drive-linux-fs/releases), one tarball per architecture (`amd64`, `arm64`).
-
 ## With Go
 
-```
+```sh
 go install github.com/khaosdoctor/proton-drive-linux-fs/cmd/proton-drive-fs@latest
 ```
 
@@ -61,7 +58,7 @@ go install github.com/khaosdoctor/proton-drive-linux-fs/cmd/proton-drive-fs@late
 
 Run these in order:
 
-```
+```sh
 git clone https://github.com/khaosdoctor/proton-drive-linux-fs
 cd proton-drive-linux-fs
 make build
@@ -74,13 +71,13 @@ make install
 
 If you wish to run the proton FUSE drive in a container, we got you covered too:
 
-```
+```sh
 docker pull ghcr.io/khaosdoctor/proton-drive-linux-fs:latest
 ```
 
-Run `login` first to create a session, then `mount`:
+Run `login` first to create a session, then `mount`, you can also copy your session file from your local computer to the container via bind mount:
 
-```
+```sh
 docker run --rm -it \
   --device /dev/fuse \
   --cap-add SYS_ADMIN \
@@ -91,4 +88,6 @@ docker run --rm -it \
   mount /mnt/protondrive
 ```
 
-`--device /dev/fuse`, `--cap-add SYS_ADMIN`, and `--security-opt apparmor:unconfined` are what FUSE needs to create a mount inside a container. The bind mount on the config directory keeps the session across container runs, and the bind mount on the mountpoint needs `:rshared` propagation for the mount created inside the container to become visible on the host; without it the mount stays confined to the container's own mount namespace.
+`--device /dev/fuse`, `--cap-add SYS_ADMIN`, and `--security-opt apparmor:unconfined` are what FUSE needs to create a mount inside a container.
+
+The bind mount on the config directory keeps the session across container runs, and the bind mount on the mountpoint needs `:rshared` propagation for the mount created inside the container to become visible on the host. Without it the mount stays confined to the container's own mount namespace.

@@ -6,7 +6,7 @@ On first login, or after Proton grows suspicious of a login attempt, the API rep
 with error 9001 (human verification required) instead of logging you in. `login`
 catches this and walks you through it:
 
-```
+```bash
 proton-drive-fs login
 ```
 
@@ -21,265 +21,247 @@ proton-drive-fs login
 
 Proton's API can return error 2028 (account temporarily locked) after several failed
 login attempts in a row. This is enforced on Proton's side, not something
-proton-drive-fs can bypass. Wait before retrying; repeated retries while locked only
+we can bypass. Wait before retrying because repeated retries while locked only
 extend the wait.
+
+## Mount or app refuses to start
+
+One reason for that could be that PDFS only allows one instance of the mount per
+user at a time. If you have another mount running, or something happened to the
+previous mount and the daemon is still running, you will see an error when
+trying to mount or start the tray. You can first try to check if the daemon is
+running with:
+
+```sh
+ps -aux | grep proton-drive-fs
+```
+
+If not, this means a lockfile is still there preventing the mount from starting. You can remove it with:
+
+```sh
+rm -rf $XDG_RUNTIME_DIR/proton-drive-fs/mount.lock
+```
+
+Then __close the application completely__ and try to start it again.
 
 ## "Device or resource busy" on unmount
 
-```
+```bash
 proton-drive-fs unmount ~/ProtonDrive
 ```
 
-A plain unmount fails as busy while a process still has a file or the mountpoint open.
+An unmount fails as busy while a process still has a file or the mountpoint open.
 `unmount` retries automatically for `-wait` (default 5s), then falls back to a lazy
 unmount that detaches the mount immediately and prints the processes still holding it
-open; the kernel drops the mount once those processes let go.
+open so the kernel drops the mount once those processes let go.
 
 If the daemon has died or deadlocked and programs are stuck on the mount instead of
 just holding it open, use:
 
-```
+```bash
 proton-drive-fs unmount -force ~/ProtonDrive
 ```
 
 This lazily unmounts and aborts the kernel-side FUSE connection, so anything blocked
-on the mount gets an error instead of hanging. It needs no root for a mount you own.
+on the mount gets an error instead of hanging.
+
+Sometimes both things will not work, in this case the solution is to pull the
+plug with:
+
+```bash
+fusermount3 -uz path/to/mount
+```
+
+Here's the mental model you can follow:
 
 ```mermaid
 flowchart TD
     Start["proton-drive-fs unmount"] --> Busy{"Busy?"}
     Busy -- no --> Done["Unmounted"]
-    Busy -- yes --> Wait["Retry every 500ms for -wait (default 5s)"]
+    Busy -- yes --> Wait["Retry every 5s"]
     Wait --> StillBusy{"Still busy?"}
     StillBusy -- no --> Done
-    StillBusy -- yes --> Lazy["Lazy unmount: detach now, kernel drops it once every holder lets go"]
-    Lazy --> Stuck{"A process is stuck, not just holding it open?"}
-    Stuck -- yes --> Force["unmount -force: abort the kernel-side FUSE connection"]
+    StillBusy -- yes --> Lazy["Lazy unmount"]
+    Lazy --> Stuck{"A process is stuck"}
+    Stuck -- yes --> Force["unmount -force"]
     Stuck -- no --> Done
-    Force --> Done
+    Force --> StillStuck{"Still Stuck?"}
+    StillStuck -- yes --> Kill["fusermount3 -uz"]
+    StillStuck -- no --> Done
+    Kill --> Done
 ```
 
 ## Stale daemon after a rebuild
 
 If an earlier unmount failed as busy, the old daemon can keep serving a mountpoint
-after you rebuild the binary. `mount` guards against this: it refuses to attach to a
-mountpoint that is already mounted and prints the running daemon's pid and version, so
-a rebuild is never mistaken for actually replacing what is running. Check what is
+after you rebuild the binary. `mount` guards against this by refusing to attach to a
+mountpoint that is already mounted and prints the running daemon's pid and version. Check what is
 actually running with:
 
-```
+```sh
 proton-drive-fs status ~/ProtonDrive
 ```
 
 `status` reports a version mismatch between the running daemon and the current binary
-and prints the exact unmount-then-mount command to fix it. `make restart` does the
-same in one step:
+and prints the unmount-then-mount command to fix it. `make restart` does the
+same if you're building from source:
 
-```
+```sh
 make restart
-```
-
-```mermaid
-flowchart LR
-    Rebuild["Rebuild the binary"] --> Status["proton-drive-fs status"]
-    Status --> Mismatch{"Version mismatch?"}
-    Mismatch -- no --> Fine["Running daemon matches the binary"]
-    Mismatch -- yes --> Restart["make restart: unmount, rebuild, remount"]
-    Restart --> Fine
 ```
 
 ## systemd unit fails, or the tray shows "No mountpoint configured"
 
 `systemctl --user status proton-drive-fs` shows the unit exiting right away, or the
 tray's status line reads `No mountpoint configured` with `Mount`, `Unmount`, and the
-other mount-management items hidden from its menu. There is no default mountpoint:
-`mount`, `unmount`, `status`, and the tray all need one from an argument,
-`-mountpoint`, or the config file's `mountpoint` key, and the systemd unit has no
-argument to give it at all.
+other mount-management items hidden from its menu. This means that the
+mountpoint is not recognized.
 
-Set `mountpoint` in the config file, which any command already created for you at
-`$XDG_CONFIG_HOME/proton-drive-fs/config.toml` (falls back to
-`~/.config/proton-drive-fs/config.toml`); the tray's `Open config folder` item opens
-the directory holding it. Uncomment the `mountpoint` line and set it, then check what
-proton-drive-fs actually resolved:
+The package doesn't assume any default mountpoint, it will __require__ you to
+set it.
 
-```
+Check if you set `mountpoint` in the config file, which any command already created for you at
+`$XDG_CONFIG_HOME/proton-drive-fs/config.toml` or `~/.config/proton-drive-fs/config.toml`.
+
+You can use the config command to open the folder, or click the tray icon:
+
+```sh
 proton-drive-fs config show
 ```
 
-Reload and restart the unit, or quit and relaunch the tray, once it is set:
+Reload and restart the unit, or quit and relaunch the tray:
 
-```
+```bash
 systemctl --user daemon-reload
 systemctl --user restart proton-drive-fs
 ```
 
-## Keeping indexers out of the mount
+## Indexer spam
 
-A file indexer that walks the mount opens every file and directory under it, and each
-open turns into a metadata request over the network. When the mount is stalled or rate
-limited, the indexer's worker threads block in uninterruptible sleep until that request
-finishes, rather than giving up on their own. On one machine running this project, a
-launcher's file indexer had home-directory indexing turned on, walked the mount, and
-its worker threads stayed blocked for minutes, with `readdir "/" timed out after 1m0s`
-in the daemon's log at the same time.
+If you have applications that resemble Alfred/Raycast/Spotlight in Linux, for
+example: wofi, rofi, vicinae, etc. These things have indexers that will prevent
+your mount from being unmounted forever.
+
+A file indexer that walks the mount opens every file and directory under it, and each open turns into a metadata request over the network. When the mount is stalled or rate limited, the indexer's worker threads block in uninterruptible sleep until that request finishes.
+
+If you have Proton Drive mounted at your root `/` (for example `/mnt/Proton`), a launcher's file indexer with home-directory indexing turned on, will walk the mount, and its worker threads may stay blocked for minutes, with `readdir "/" timed out after 1m0s` in the daemon's log at the same time.
+
+> __Note:__ This can happen in basically any directory if your indexer has it
+> enabled
 
 ### Choosing the mountpoint
 
-There is no default mountpoint, so where to put it is a choice made at mount time. A
+Where to put it a mountpoint is a choice made at mount time. A
 path outside the home directory root, for example `~/mnt/protondrive`, is walked by
-fewer indexers than a directory placed directly under the home directory: several
-indexers only walk a fixed set of well-known folders under `$HOME` (Desktop, Documents,
-Downloads, Pictures, Videos) rather than the whole home tree.
+fewer indexers than a directory placed directly under the home directory. But
+this is convention, it _doesn't prevent it from happening_.
 
-### Excluding the mount per tool
+### The mount's own denylist
 
-- **GNOME Tracker** (`tracker-miner-fs`, `tracker-extract`, `localsearch`). By default
-  Tracker only indexes the folders listed in the `index-recursive-directories`
-  gsettings key under `org.freedesktop.Tracker3.Miner.Files`; a mountpoint outside
-  those folders is already skipped. If it ends up covered anyway, remove it from
-  `index-recursive-directories`, or add its name to `ignored-directories`:
+The mount already refuses a read of a file above `-large-file` from a fixed list of thumbnailer and indexer process names set in the `-deny-readers` option (see [mount](usage.md#mount) for the current default list). This is done so a preview for a large file on the mount comes from Proton's own stored thumbnail instead of triggering a full download, otherwise the indexer would download the entire file list every time. Add a process name to `-deny-readers` to extend that list.
 
-  ```
+If you prefer to deny that in the indexer itself, here's a non-exhaustive list.
+
+### Some common indexers and how to exclude them
+
+- **GNOME Tracker** (`tracker-miner-fs`, `tracker-extract`, `localsearch`): By default Tracker only indexes the folders listed in the `index-recursive-directories` gsettings key under `org.freedesktop.Tracker3.Miner.Files`. Any mountpoint outside those folders is already skipped. If it ends up covered anyway, remove it from `index-recursive-directories`, or add its name to `ignored-directories`:
+
+  ```bash
   gsettings set org.freedesktop.Tracker3.Miner.Files ignored-directories "['protondrive']"
   ```
 
-  or drop an empty `.trackerignore` file at the top of the mountpoint before mounting;
-  Tracker skips any directory containing one of the names in
-  `ignored-directories-with-content` (`.trackerignore`, `.git`, `.hg`, `.nomedia` by
-  default). Restart the miner for a change to take effect: `tracker3 daemon -k`.
+    Or, you can write an empty `.trackerignore` file at the top of the mountpoint before mounting. Then, restart the miner for a change to take effect: `tracker3 daemon -k`.
 
 - **KDE Baloo** (`baloo_file`, `baloo_file_extractor`):
 
-  ```
-  balooctl6 config add excludeFolders ~/mnt/protondrive
+  ```sh
+  balooctl6 config add excludeFolders path/to/mount
   ```
 
-  which appends the path to `exclude folders[$e]` under `[General]` in
-  `~/.config/baloofilerc` (editing that key directly works the same way). Restart Baloo
-  for the change to apply: `balooctl6 disable && balooctl6 enable` (`balooctl` on
-  Plasma 5).
+    Restart Baloo for the change to take effect: `balooctl6 disable && balooctl6 enable` (`balooctl` on Plasma 5).
 
-- **Thumbnailer daemon** (`tumblerd`). `tumbler.rc` excludes are set per plugin, not
-  globally: copy `/etc/xdg/tumbler/tumbler.rc` to `~/.config/tumbler/tumbler.rc` if you
-  do not have one yet, then add the mountpoint to `Excludes` (a `;`-separated path
-  list) under each `[...Thumbnailer]` section you care about, for example:
+- **Thumbnailer daemon** (`tumblerd`): `tumbler.rc` excludes are set per plugin. Copy `/etc/xdg/tumbler/tumbler.rc` to `~/.config/tumbler/tumbler.rc` if you do not have one yet, then add the mountpoint to `Excludes` (paths separated with `;`) under each `[...Thumbnailer]` section you care about, for example:
 
   ```
   [FfmpegThumbnailer]
   Excludes=~/mnt/protondrive
   ```
 
-  [The mount's own denylist](#the-mounts-own-denylist) already stops `tumblerd` from
-  reading a large file on the mount, so this only matters if you also want it to skip
-  small files there.
+  [The mount's own denylist](#the-mounts-own-denylist) already stops `tumblerd` from reading a large file on the mount, so it's only important if you _also_ want to skip small files.
 
-- **`updatedb`/`mlocate`/`plocate`**. Add the mountpoint to `PRUNEPATHS`, or add
+- **`updatedb`/`mlocate`/`plocate`**: Add the mountpoint to `PRUNEPATHS`, or add
   `fuse.proton-drive-fs` to `PRUNEFS`, in `/etc/updatedb.conf`:
 
-  ```
+  ```sh
   PRUNEPATHS="... /home/you/mnt/protondrive"
   PRUNEFS="... fuse.proton-drive-fs"
   ```
 
   `updatedb` reads this file on its next scheduled run (a daily cron job or systemd
-  timer on most distributions); there is no daemon to restart.
+  timer on most distributions), so you gotta wait.
 
-- **vicinae**. Its root search walks files under the home directory only when
-  `search_files_in_root` is turned on in `~/.config/vicinae/settings.json` (`false` by
-  default). Turn it off, or keep the mountpoint outside the home directory so a
-  home-rooted search never reaches it:
+- **vicinae**: Walks files under the home directory only when `search_files_in_root` is turned on in `~/.config/vicinae/settings.json` (`false` by default). Turn it off, or keep the mountpoint outside the home directory there's really no other alternative here:
 
-  ```
+  ```json
   "search_files_in_root": false
   ```
 
   vicinae picks up a config file change without a restart.
 
-### The mount's own denylist
-
-The mount already refuses a read of a file above `-large-file` from a fixed list of
-thumbnailer and indexer process names (`-deny-readers`; see [mount](usage.md#mount) for
-the current default list), so a preview for a large file on the mount comes from
-Proton's own stored thumbnail instead of triggering a full download. Add a process name
-to `-deny-readers` to extend that list.
-
 ### Checking the filesystem type
 
-`updatedb`'s `PRUNEFS`, and any other tool that excludes by filesystem type rather than
-by path, should match `fuse.proton-drive-fs`. See what is actually mounted with:
+`updatedb`'s `PRUNEFS`, and any other tool that excludes by filesystem type rather than by path, should match `fuse.proton-drive-fs`:
 
-```
+```sh
 findmnt -t fuse.proton-drive-fs
 ```
 
+To find the options
+
 ## systemd unit fails with status=203/EXEC
 
-`systemctl --user status proton-drive-fs` shows the process exiting immediately with
-`status=203/EXEC`, then `Start request repeated too quickly` and
-`Failed with result 'start-limit-hit'`. This means the unit points at a binary that is
-not there, for example a stale unit left over from an older install after you switched
-install methods.
+`systemctl --user status proton-drive-fs` shows the process exiting immediately with `status=203/EXEC`, then `Start request repeated too quickly` and `Failed with result 'start-limit-hit'`. This means the unit points at a binary that is not there, for example a stale unit left over from an older install after you switched install methods.
 
 Check what the unit actually points at:
 
-```
+```sh
 systemctl --user cat proton-drive-fs
 ```
 
-Look at the `ExecStart=` line and confirm that path exists. Where the binary and the
-unit end up depends on how you installed:
+Look at the `ExecStart=` line and confirm that path exists. Where the binary and the unit end up depends on how you installed:
 
-- A package (AUR, deb, rpm, apk) puts the binary at `/usr/bin/proton-drive-fs` and the
-  units at `/usr/lib/systemd/user/`.
-- `make install` puts the binary at `$PREFIX/bin/proton-drive-fs` (default
-  `~/.local/bin`) and the units at `~/.config/systemd/user/`, which also takes
-  priority over the package copy.
+- A package (AUR, deb, rpm, apk) puts the binary at `/usr/bin/proton-drive-fs` and the units at `/usr/lib/systemd/user/`.
+- `make install` puts the binary at `$PREFIX/bin/proton-drive-fs` (default `~/.local/bin`) and the units at `~/.config/systemd/user/`, which also takes priority over the package copy.
 
-A leftover unit in `~/.config/systemd/user/` from a previous `make install` can shadow
-the package's unit and still point at a binary you removed. Delete the stale one, or
-reinstall with the method you actually want, then reload and clear the failure:
+A leftover unit in `~/.config/systemd/user/` from a previous `make install` can override the package's unit and still point at a binary you removed. Delete the stale one, or reinstall with the method you actually want, then reload and clear the failure:
 
-```
+```sh
 systemctl --user daemon-reload
 systemctl --user reset-failed proton-drive-fs
 systemctl --user restart proton-drive-fs
 ```
 
-## Logs
+## Read the logs
 
-The mount daemon logs structured entries to the systemd user journal under the
-identifier `proton-drive-fs`, asynchronously so a slow or backed-up log write never
-stalls a filesystem operation.
+The mount daemon logs entries to the systemd user journal under the identifier `proton-drive-fs`, asynchronously.
 
-Two levels matter day to day: `info` covers one line per event (mounting and
-unmounting, opening a file, uploading, creating, renaming, moving, deleting, a remote
-change applied, pause and resume, login and logout); `debug` adds the technical
-fields behind those (block-level cache hits and misses, API call timing, listing page
-counts, keyring unlocks, and more). `-log-level` on `mount` sets which of `debug`,
-`info`, `warn`, or `error` gets logged (default `info`). Nothing here ever logs a
-token, password, key material, or file content.
+`info` covers one line per event (mounting and unmounting, opening a file, etc); `debug` adds the details behind those (block-level cache hits and misses, and other nerd info). You can set `-log-level` on `mount` to one of `debug`, `info`, `warn`, or `error` (default `info`).
+
+> __Important__: File contents or sensitive tokens/sessions are never logged.
 
 Read the log with:
 
-```
+```sh
 journalctl --user -t proton-drive-fs -f
 journalctl --user -t proton-drive-fs -p debug -f
 journalctl --user -t proton-drive-fs -o verbose -n 20
 ```
 
-`-p debug` follows at debug level and above, picking up the technical fields.
-`-o verbose` shows every field on a log line (path, size, elapsed, err, and so on) as
-a journal field, uppercased with dots turned into underscores (`op` becomes `OP`,
-`cache.hit` becomes `CACHE_HIT`); the plain `journalctl` view hides them.
+`-p debug` follows at debug level and above, picking up the technical fields. `-o verbose` shows every field on a log line as a journal field, uppercased with dots turned into underscores (`op` becomes `OP`, `cache.hit` becomes `CACHE_HIT`).
 
-Without a systemd journal to write to, or with `-log-stderr`, the daemon falls back to
-plain text on stderr, which for a detached mount goes to
-`$XDG_STATE_HOME/proton-drive-fs/mount.log` (falling back to
-`~/.local/state/proton-drive-fs/mount.log`). `-log-stderr` forces this fallback even
-when the journal is available, which is handy with `-foreground` at a terminal.
+If your distro comes without a systemd journal to write to, or with `-log-stderr`, the daemon falls back to plain text on stderr which, for a detached mount, goes to `$XDG_STATE_HOME/proton-drive-fs/mount.log` falling back to `~/.local/state/proton-drive-fs/mount.log`. `-log-stderr` forces this fallback even when the journal is available, which is handy with `-foreground` at a terminal to debug stuff.
 
-## Where things live
+## General table of locations
 
 | What | Path |
 |---|---|
@@ -287,10 +269,9 @@ when the journal is available, which is handy with `-foreground` at a terminal.
 | Tray's remembered mountpoint | `$XDG_CONFIG_HOME/proton-drive-fs/tray.json` |
 | On-disk block cache | `$XDG_CACHE_HOME/proton-drive-fs/blocks` (`-cache-dir`) |
 | Thumbnails | `$XDG_CACHE_HOME/thumbnails` (`-thumbnail-dir`) |
-| Mount log (no journal, or `-log-stderr`) | `$XDG_STATE_HOME/proton-drive-fs/mount.log` |
+| Mount log  | `$XDG_STATE_HOME/proton-drive-fs/mount.log` |
 | Status snapshot (pid, version, transfers) | `$XDG_RUNTIME_DIR/proton-drive-fs/status.json` |
 | Pause marker | `$XDG_RUNTIME_DIR/proton-drive-fs/paused` |
+| Lockfile | `$XDG_RUNTIME_DIR/proton-drive-fs/mount.lock` |
 
-Every `$XDG_*_HOME` path falls back to the matching directory under `$HOME` (for
-example `~/.config`, `~/.cache`, `~/.local/state`) when the environment variable is
-unset.
+Every `$XDG_*_HOME` path falls back to the matching directory under `$HOME` (for example `~/.config`, `~/.cache`, `~/.local/state`) when the environment variable is unset.
