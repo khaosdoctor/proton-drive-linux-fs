@@ -116,8 +116,7 @@ journalctl --user -u proton-drive-fs -f
 
 ## Docker
 
-The container image runs the CLI only; there is no tray and no GUI inside it. Log in
-first, with the config directory bind-mounted so the session survives between runs:
+The container image runs the CLI only. Log in first outside the container (or in a disposable container) so the session file is created, with the config directory bind-mounted so the session survives between runs:
 
 ```sh
 docker run --rm -it \
@@ -146,14 +145,9 @@ docker run --rm -it \
 `--device /dev/fuse`, `--cap-add SYS_ADMIN`, and `--security-opt apparmor:unconfined`
 are what FUSE needs to create a mount inside a container. The mountpoint bind needs
 `:rshared` propagation for the mount created inside the container to become visible on
-the host; without it the mount stays confined to the container's own mount namespace.
+the host. Without it the mount stays confined to the container's own mount namespace.
 
-Run `mount` with `-foreground` so the daemon stays attached instead of detaching into
-the background the way it does outside a container; without it the container's main
-process exits right after the mount succeeds and Docker stops the container along
-with it. There is no systemd journal inside the container, so logs go to the
-container's own stdout/stderr instead. Run detached (`-d` instead of `-it`) and read
-them with:
+Run `mount` with `-foreground` so the daemon stays attached instead of detaching into the background the way it does outside a container. If you don't, the container's main process exits right after the mount succeeds and Docker stops the container. There is no systemd journal inside the container, so logs go to the container's own stdout/stderr instead. You can read with:
 
 ```sh
 docker logs -f <container>
