@@ -29,6 +29,18 @@ import (
 // defaultOpTimeout bounds a handler's network calls when Options.OpTimeout is unset.
 const defaultOpTimeout = 60 * time.Second
 
+// defaultMetaTimeout bounds a metadata handler's network calls when Options.MetaTimeout is
+// unset. Kept far shorter than OpTimeout: a metadata call (a listing, a lookup, a mkdir) blocks
+// whichever caller made it in the kernel's uninterruptible D state, immune to signals, so a file
+// indexer walking $HOME can wedge dozens of its own threads on a single slow directory. 10s is
+// long enough to ride out an ordinary network hiccup without leaving a caller parked anywhere
+// near as long as OpTimeout's 60s.
+const defaultMetaTimeout = 10 * time.Second
+
+// failedLoadCooldown is a short expiry applied after a failed refresh: without it, every readdir
+// on an unhealthy directory starts a new fetch.
+const failedLoadCooldown = 5 * time.Second
+
 // Options configures the mount.
 type Options struct {
 	// Version is this binary's version, logged at startup and published in the status
@@ -39,9 +51,17 @@ type Options struct {
 	TTL          time.Duration
 	PollInterval time.Duration
 
-	// OpTimeout bounds every network call a handler makes; a handler that misses it returns
-	// ETIMEDOUT instead of hanging the caller. <=0 uses the default.
+	// OpTimeout bounds every data-operation network call a handler makes (Open's revision/block-
+	// list fetch, Read, Release's upload); a handler that misses it returns ETIMEDOUT instead of
+	// hanging the caller. <=0 uses the default.
 	OpTimeout time.Duration
+
+	// MetaTimeout bounds every metadata-operation network call (a directory listing, Lookup's
+	// attribute resolution, Mkdir, Unlink/Rmdir, Rename): much shorter than OpTimeout, since a
+	// metadata call blocks its caller in uninterruptible sleep and a stale cached listing is
+	// usually a fine answer while a fresh one is fetched in the background (see dirNode.load).
+	// <=0 uses the default.
+	MetaTimeout time.Duration
 
 	// Thumbnails, when set, receives the previews Proton stores for listed files. nil disables
 	// preview caching.
@@ -74,9 +94,14 @@ func Mount(ctx context.Context, mountpoint string, c *drive.Client, root *drive.
 	if opts.OpTimeout <= 0 {
 		opts.OpTimeout = defaultOpTimeout
 	}
+	if opts.MetaTimeout <= 0 {
+		opts.MetaTimeout = defaultMetaTimeout
+	}
 	if opts.MaxUploads <= 0 {
 		opts.MaxUploads = defaultMaxUploads
 	}
+
+	c.SetMetaTimeout(opts.MetaTimeout)
 
 	// FUSE's kernel-side permission check compares these against the caller; 0:0 made every write ACCESS fail.
 	uid := uint32(os.Getuid())
@@ -96,7 +121,6 @@ func Mount(ctx context.Context, mountpoint string, c *drive.Client, root *drive.
 			Name:          "proton-drive-fs",
 			DisableXAttrs: true,
 			Debug:         opts.Debug,
-			Options:       []string{"x-gvfs-show", "x-gvfs-name=Proton%20Drive", "x-gvfs-icon=drive-harddisk"},
 		},
 		EntryTimeout:    &ttl,
 		AttrTimeout:     &ttl,
@@ -269,10 +293,11 @@ func fusermountBinary() string {
 // mountState tracks every registered directory node and each node's last-known parent, so a
 // remote event naming a LinkID can find which cached listings to drop.
 type mountState struct {
-	client    *drive.Client
-	uid       uint32
-	gid       uint32
-	opTimeout time.Duration
+	client      *drive.Client
+	uid         uint32
+	gid         uint32
+	opTimeout   time.Duration
+	metaTimeout time.Duration
 
 	// ctx is the mount's own lifetime context, cancelled on unmount. A directory listing fetch
 	// parents its own deadline on this instead of on whichever request's context happened to
@@ -353,6 +378,7 @@ func newMountState(ctx context.Context, c *drive.Client, uid, gid uint32, opts O
 		uid:           uid,
 		gid:           gid,
 		opTimeout:     opts.OpTimeout,
+		metaTimeout:   opts.MetaTimeout,
 		thumbs:        opts.Thumbnails,
 		denyReaders:   opts.DenyReaders,
 		uploads:       newSem(opts.MaxUploads),
@@ -465,7 +491,7 @@ func (st *mountState) invalidateDir(linkID string) {
 		return
 	}
 	d.invalidate()
-	slog.Debug("remote change applied", "path", displayPath(d.path), "link", linkID)
+	slog.Info("remote change applied", "path", displayPath(d.path))
 }
 
 func (st *mountState) invalidateAll() {
@@ -479,7 +505,7 @@ func (st *mountState) invalidateAll() {
 	for _, d := range dirs {
 		d.invalidate()
 	}
-	slog.Debug("remote change applied", "path", "/", "scope", "full refresh")
+	slog.Info("remote change applied", "path", "/", "scope", "full refresh")
 }
 
 // displayPath returns p, or "/" for the mount root, whose own path is "".
@@ -596,15 +622,34 @@ func (st *mountState) watchdog(ctx context.Context) {
 	}
 }
 
+// metaOps are the track() op names bounded by MetaTimeout rather than OpTimeout (see
+// dirNode.finishLoad, Mkdir, remove, Rename); logStuckOps uses it to pick the right staleness
+// threshold per operation instead of a single one for every handler.
+var metaOps = map[string]bool{
+	"readdir": true,
+	"mkdir":   true,
+	"remove":  true,
+	"rename":  true,
+}
+
+// staleThreshold is the age an in-flight op has to reach before logStuckOps reports it: a
+// metadata op (see metaOps) is bounded by MetaTimeout, everything else by the much longer
+// OpTimeout.
+func staleThreshold(op string, opTimeout, metaTimeout time.Duration) time.Duration {
+	if metaOps[op] {
+		return 2 * metaTimeout
+	}
+	return 2 * opTimeout
+}
+
 func (st *mountState) logStuckOps() {
-	stale := 2 * st.opTimeout
 	now := time.Now()
 
 	count := 0
 	st.inflight.Range(func(_, v any) bool {
 		count++
 		op := v.(inflightOp)
-		if age := now.Sub(op.started); age > stale {
+		if age := now.Sub(op.started); age > staleThreshold(op.op, st.opTimeout, st.metaTimeout) {
 			slog.Warn("operation stuck", "op", op.op, "path", op.path, "in_flight", age.Round(time.Second))
 		}
 		return true
@@ -661,6 +706,12 @@ type dirNode struct {
 	// notifying is set while a background NotifyEntry pass for this dir is in flight, so a burst
 	// of remote events dedupes to one pass instead of stacking up goroutines.
 	notifying atomic.Bool
+
+	// lastWarnedAt is the unix-nano time warnOncePerMinute last actually logged for this
+	// directory, rate-limiting the noisy paths that would otherwise fire on every failed refresh
+	// or every FUSE call while a directory stays unhealthy (stale-over-blocking, an expired
+	// session).
+	lastWarnedAt atomic.Int64
 
 	mu       sync.Mutex
 	node     *drive.Node
@@ -772,13 +823,90 @@ func (d *dirNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno
 	return 0
 }
 
+// staleDecision is what load should do once a fresh listing cannot be delivered right now: serve
+// the last-known one if there is one (the stale-over-blocking rule), or fail -- with ETIMEDOUT for a
+// rate-limited caller that should just retry shortly rather than wait out Proton's backoff
+// window, or with the refresh's own errno (usually ETIMEDOUT, now from the shorter MetaTimeout
+// deadline) otherwise.
+type staleDecision int
+
+const (
+	serveStale staleDecision = iota
+	failRateLimited
+	failRefresh
+)
+
+// decideStale is load's stale-over-blocking rule as a pure function: hasCached is whether a
+// listing (in memory, even expired, or on disk) exists for this directory at all; refreshFailed
+// is whether a network refresh was attempted and came back with an error; rateLimited is whether
+// Proton's shared backoff window (drive.Client.RateLimited) is active. load never attempts a
+// refresh while rate limited (see below), so the two are never both true in practice, but the
+// function still resolves sensibly if they were.
+func decideStale(hasCached, refreshFailed, rateLimited bool) staleDecision {
+	if hasCached && (refreshFailed || rateLimited) {
+		return serveStale
+	}
+	if rateLimited {
+		return failRateLimited
+	}
+	return failRefresh
+}
+
+// warnOncePerMinute logs at warn, at most once per minute per directory, guarding the paths that
+// would otherwise fire on every failed refresh or every FUSE call while a directory stays
+// unhealthy.
+func (d *dirNode) warnOncePerMinute(msg string, args ...any) {
+	now := time.Now()
+	last := d.lastWarnedAt.Load()
+	if last != 0 && now.Sub(time.Unix(0, last)) < time.Minute {
+		return
+	}
+	if !d.lastWarnedAt.CompareAndSwap(last, now.UnixNano()) {
+		return // another goroutine just logged it
+	}
+	slog.Warn(msg, args...)
+}
+
+// errorOncePerMinute logs at error, at most once per minute per directory, guarding the paths that
+// would otherwise fire on every failed refresh or every FUSE call while a directory stays
+// unhealthy. It shares the same lastWarnedAt field as warnOncePerMinute so one message per
+// directory per minute is emitted across both helpers.
+func (d *dirNode) errorOncePerMinute(msg string, args ...any) {
+	now := time.Now()
+	last := d.lastWarnedAt.Load()
+	if last != 0 && now.Sub(time.Unix(0, last)) < time.Minute {
+		return
+	}
+	if !d.lastWarnedAt.CompareAndSwap(last, now.UnixNano()) {
+		return // another goroutine just logged it
+	}
+	slog.Error(msg, args...)
+}
+
 // load returns the cached children, refetching them once ttl has elapsed. The fetch itself runs
 // detached from any single caller (see finishLoad): every caller here, whether it triggers the
 // fetch or finds one already running, only ever waits for it to finish and respects nothing but
 // its own ctx while doing so, so one caller's cancellation or timeout never fails another's.
+//
+// A refresh that fails, times out, or is skipped because Proton is rate-limiting the client never
+// fails a caller that has something to show: the last-known listing is served instead, however
+// stale, and the background refresh keeps running so the directory heals on its own once it can
+// (see decideStale). Only a directory with nothing cached at all reports an error.
 func (d *dirNode) load(ctx context.Context) ([]*drive.Node, syscall.Errno) {
 	if children, ok := d.serveFromDiskCache(); ok {
 		return children, 0
+	}
+
+	if _, limited := clientRateLimited(d.client); limited {
+		d.mu.Lock()
+		children := d.children
+		d.mu.Unlock()
+
+		if decideStale(children != nil, false, true) == serveStale {
+			d.warnOncePerMinute("serving stale listing, rate limited", "path", displayPath(d.path))
+			return children, 0
+		}
+		return nil, syscall.ETIMEDOUT
 	}
 
 	for {
@@ -839,16 +967,24 @@ func (d *dirNode) serveFromDiskCache() ([]*drive.Node, bool) {
 	return children, true
 }
 
-// loadResult reads the outcome of the fetch that just finished: the freshly published listing, or
-// the errno finishLoad recorded when the fetch failed.
+// loadResult reads the outcome of the fetch that just finished: the freshly published listing on
+// success, or, on failure, the stale-over-blocking fallback (see decideStale) -- the last-known
+// listing if one is cached, however out of date, and only the failure's errno when nothing at all
+// is cached yet.
 func (d *dirNode) loadResult() ([]*drive.Node, syscall.Errno) {
 	d.mu.Lock()
-	defer d.mu.Unlock()
+	children, expires, errno := d.children, d.expires, d.loadErrno
+	d.mu.Unlock()
 
-	if d.children != nil && time.Now().Before(d.expires) {
-		return d.children, 0
+	if children != nil && time.Now().Before(expires) {
+		return children, 0
 	}
-	return nil, d.loadErrno
+
+	if decideStale(children != nil, errno != 0, false) == serveStale {
+		d.warnOncePerMinute("serving stale listing, refresh failed", "path", displayPath(d.path), "err", errno)
+		return children, 0
+	}
+	return nil, errno
 }
 
 // beginLoad says how this caller gets the listing: children when the cache is still fresh, done
@@ -892,6 +1028,8 @@ func (d *dirNode) publish(children []*drive.Node, done chan struct{}, startGen u
 			d.children = children
 		}
 		d.expires = time.Now().Add(d.ttl)
+	} else {
+		d.expires = time.Now().Add(min(d.ttl, failedLoadCooldown))
 	}
 
 	d.mu.Unlock()
@@ -917,17 +1055,20 @@ func (d *dirNode) finishLoad(done chan struct{}) {
 	if d.st.ctx != nil {
 		parent = d.st.ctx
 	}
-	opCtx, cancel := context.WithTimeout(parent, d.st.opTimeout)
+	opCtx, cancel := context.WithTimeout(parent, d.st.metaTimeout)
 	defer cancel()
 
 	children, err := fetchChildren(opCtx, d.client, node)
 	if err != nil {
 		errno := syscall.EIO
-		if timedOut(opCtx) {
-			slog.Error("readdir timed out", "path", displayPath(d.path), "timeout", d.st.opTimeout)
+		switch {
+		case timedOut(opCtx):
 			errno = syscall.ETIMEDOUT
-		} else {
-			slog.Error("readdir failed", "path", displayPath(d.path), "err", err)
+			d.errorOncePerMinute("readdir timed out", "path", displayPath(d.path), "timeout", d.st.metaTimeout)
+		case drive.IsUnauthorized(err):
+			d.warnOncePerMinute("session expired, run: proton-drive-fs login", "path", displayPath(d.path))
+		default:
+			d.errorOncePerMinute("readdir failed", "path", displayPath(d.path), "err", err)
 		}
 
 		d.mu.Lock()
@@ -959,6 +1100,12 @@ func (d *dirNode) finishLoad(done chan struct{}) {
 // failing fetch without a real drive.Client.
 var fetchChildren = func(ctx context.Context, c *drive.Client, node *drive.Node) ([]*drive.Node, error) {
 	return c.Children(ctx, node)
+}
+
+// clientRateLimited reports whether c's shared backoff window (see drive.Client.RateLimited) is
+// active; overridden in tests to simulate Proton rate-limiting without a live drive.Client.
+var clientRateLimited = func(c *drive.Client) (time.Duration, bool) {
+	return c.RateLimited()
 }
 
 // cachedChildren rebuilds a directory's children from the persisted listing cache, without a
@@ -1097,16 +1244,16 @@ func (d *dirNode) findChild(ctx context.Context, name string) (*drive.Node, sysc
 // re-listing the parent.
 func (d *dirNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	target := path.Join(d.path, name)
-	slog.Debug("creating folder", "path", target)
+	slog.Info("creating folder", "path", target)
 
 	defer d.st.track("mkdir", target)()
-	opCtx, cancel := context.WithTimeout(ctx, d.st.opTimeout)
+	opCtx, cancel := context.WithTimeout(ctx, d.st.metaTimeout)
 	defer cancel()
 
 	created, err := d.client.CreateDir(opCtx, d.node, name)
 	if err != nil {
 		if timedOut(opCtx) {
-			slog.Error("creating folder timed out", "path", target, "timeout", d.st.opTimeout)
+			slog.Error("creating folder timed out", "path", target, "timeout", d.st.metaTimeout)
 			return nil, syscall.ETIMEDOUT
 		}
 		slog.Error("creating folder failed", "path", target, "err", err)
@@ -1162,15 +1309,15 @@ func (d *dirNode) remove(ctx context.Context, name string) syscall.Errno {
 	}
 
 	targetPath := path.Join(d.path, name)
-	slog.Debug("deleting", "path", targetPath)
+	slog.Info("deleting", "path", targetPath)
 
 	defer d.st.track("remove", targetPath)()
-	opCtx, cancel := context.WithTimeout(ctx, d.st.opTimeout)
+	opCtx, cancel := context.WithTimeout(ctx, d.st.metaTimeout)
 	defer cancel()
 
 	if err := d.client.Trash(opCtx, d.node, target); err != nil {
 		if timedOut(opCtx) {
-			slog.Error("deleting timed out", "path", targetPath, "timeout", d.st.opTimeout)
+			slog.Error("deleting timed out", "path", targetPath, "timeout", d.st.metaTimeout)
 			return syscall.ETIMEDOUT
 		}
 		slog.Error("deleting failed", "path", targetPath, "err", err)
@@ -1207,16 +1354,16 @@ func (d *dirNode) Rename(ctx context.Context, name string, newParent fs.InodeEmb
 	if d == newDir {
 		action = "renaming"
 	}
-	slog.Debug(action, "from", from, "to", to)
+	slog.Info(action, "from", from, "to", to)
 
 	defer d.st.track("rename", from+" -> "+to)()
-	opCtx, cancel := context.WithTimeout(ctx, d.st.opTimeout)
+	opCtx, cancel := context.WithTimeout(ctx, d.st.metaTimeout)
 	defer cancel()
 
 	moved, err := d.client.Move(opCtx, target, d.node, newDir.node, newName)
 	if err != nil {
 		if timedOut(opCtx) {
-			slog.Error(action+" timed out", "from", from, "to", to, "timeout", d.st.opTimeout)
+			slog.Error(action+" timed out", "from", from, "to", to, "timeout", d.st.metaTimeout)
 			return syscall.ETIMEDOUT
 		}
 		slog.Error(action+" failed", "from", from, "to", to, "err", err)
@@ -1435,7 +1582,7 @@ func (f *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 		return nil, 0, syscall.EIO
 	}
 
-	slog.Debug("opening file", "path", f.currentName(), "link", node.Link.LinkID)
+	slog.Info("opening file", "path", f.currentName())
 
 	// Every open mode below can read, so the denylist applies to all of them.
 	if parent != nil {
@@ -1647,7 +1794,10 @@ func (h *fileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.Rea
 
 	n, err := h.file.ReadAt(opCtx, dest, off)
 	if err != nil && err != io.EOF {
-		if timedOut(opCtx) {
+		// A rate-limited read gives up (see drive.Client.waitOutRateLimit) rather than block a
+		// FUSE call for however long Proton's own backoff window runs; from the caller's
+		// perspective that is exactly what a deadline miss looks like.
+		if timedOut(opCtx) || errors.Is(err, drive.ErrRateLimited) {
 			slog.Error("read timed out", "path", name, "timeout", st.opTimeout)
 			return nil, syscall.ETIMEDOUT
 		}

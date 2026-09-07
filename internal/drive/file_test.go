@@ -356,7 +356,7 @@ func TestReadAtAccurateSize(t *testing.T) {
 // available, and a subsequent read past the actual data should return EOF.
 func TestReadAtPartialBlockThenEOF(t *testing.T) {
 	block1 := bytes.Repeat([]byte("A"), blockSize) // full first block
-	block2 := bytes.Repeat([]byte("B"), 200)        // short second block
+	block2 := bytes.Repeat([]byte("B"), 200)       // short second block
 
 	actualLen := int64(blockSize) + 200
 	inflatedSize := actualLen + 50 // reported size extends 50 bytes past actual data
