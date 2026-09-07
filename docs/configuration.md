@@ -1,26 +1,12 @@
 # Configuration
 
-Every flag `login`, `mount`, and `tray` accept also has a key in a TOML config file at
-`$XDG_CONFIG_HOME/proton-drive-fs/config.toml` (falls back to
-`~/.config/proton-drive-fs/config.toml`), or wherever `-config <path>` points instead.
-`status` also reads it for `mountpoint` when none is given on the command line.
+Every flag that `login`, `mount`, and `tray` accept has a matching key in a TOML config file at `$XDG_CONFIG_HOME/proton-drive-fs/config.toml` (falls back to `~/.config/proton-drive-fs/config.toml`), or wherever `-config <path>` points. `status` also reads it for `mountpoint` when none is given on the command line.
 
-Every command that reads configuration creates that file first when it does not exist,
-with every key commented out at its default value, so a fresh install always has a
-config.toml to edit. An existing file is never rewritten, and a directory that cannot
-be written to is not an error: the built-in defaults are used instead.
+The first command you run creates that file if it doesn't exist, with every key commented out at its default value, so you always have a config.toml to edit. An existing file is never overwritten, and if the directory can't be written to, the built-in defaults are used instead.
 
 ## Precedence
 
-Values resolve in one direction only: a flag passed on the command line always wins
-over the config file, and the config file always wins over the built-in default.
-
-```mermaid
-flowchart LR
-    Defaults["Built-in defaults"] --> File["config.toml"]
-    File --> Flag["Flag on the command line"]
-    Flag --> Effective["Effective value"]
-```
+Values resolve in one direction: a flag on the command line always wins over the config file, and the config file always wins over the built-in default.
 
 ## config init and config show
 
@@ -29,23 +15,15 @@ proton-drive-fs config init [-config path] [-force]
 proton-drive-fs config show [-config path] [flags...]
 ```
 
-`config init` writes a fully commented config file with every key at its default value
-and a one-line explanation; uncomment a line to set it. It refuses to overwrite an
-existing file unless `-force` is passed. Since every command writes that same file when
-it is missing, `config init` is mostly useful with `-force` to reset an edited file, or
-with `-config` to write one somewhere else.
+`config init` writes a fully commented config file with every key at its default value and a one-line explanation. Uncomment a line to set it. It refuses to overwrite an existing file unless `-force` is passed. Since every command already creates that same file when it's missing, `config init` is mostly useful with `-force` to reset an edited file, or with `-config` to write one somewhere else.
 
-`config show` prints the effective configuration after merging defaults, the file, and
-any flag passed to `config show` itself, with a trailing comment naming where each
-value came from (`default`, `file`, or `flag`, plus `unset` for `mountpoint` alone,
-which has no built-in default): useful to check what `mount` or `login` would actually
-resolve to before running them.
+`config show` prints the effective configuration after merging defaults, the file, and any flags you pass to `config show` itself. Each value has a trailing comment naming where it came from (`default`, `file`, or `flag`, plus `unset` for `mountpoint` alone, which has no built-in default). Useful to check what `mount` or `login` would actually resolve to before running them.
 
 ## Keys
 
 | Key | Flag | Default | Meaning |
 | --- | --- | --- | --- |
-| `mountpoint` | positional for `mount`/`unmount`/`status`, `-mountpoint` for `tray` | none, required | Mountpoint `mount`, `unmount`, `status`, and `tray` fall back to when none is given on the command line. There is no default; see [Keeping indexers out of the mount](troubleshooting.md#keeping-indexers-out-of-the-mount) when choosing one. |
+| `mountpoint` | positional for `mount`/`unmount`/`status`, `-mountpoint` for `tray` | none, required | Mountpoint `mount`, `unmount`, `status`, and `tray` fall back to when none is given on the command line. There is no default; see [Indexer spam](troubleshooting.md#indexer-spam) when choosing one. |
 | `ttl` | `-ttl` | `30s` | How long a directory listing stays cached before it is fetched again. |
 | `poll` | `-poll` | `10s` | How often the event feed is polled for remote changes. |
 | `op_timeout` | `-op-timeout` | `60s` | Deadline for one filesystem operation's network calls. |
@@ -67,10 +45,4 @@ See [Usage](usage.md) for the full description of each flag.
 
 ## Cache directory
 
-The persisted listing cache stores decrypted file and folder names on disk (under
-`cache_dir/listings/`, mode 0600) so a folder listed once loads instantly on the next
-cold start, the same trade-off the session file already makes for the account
-password. It shares `cache_size`'s byte budget with the block cache (under
-`cache_dir/blocks/`); set `cache_size = "0"` to disable both. See
-[Where things live](troubleshooting.md#where-things-live) for the exact paths and
-[Logs](troubleshooting.md#logs) for cache hit and miss log levels.
+The persisted listing cache stores decrypted file and folder names on disk (under `cache_dir/listings/`, mode 0600) so a folder listed once loads instantly on the next cold start. It shares `cache_size`'s byte budget with the block cache (under `cache_dir/blocks/`). Set `cache_size = "0"` to disable both. See [General table of locations](troubleshooting.md#general-table-of-locations) for the exact paths and [Read the logs](troubleshooting.md#read-the-logs) for cache hit and miss log levels.
