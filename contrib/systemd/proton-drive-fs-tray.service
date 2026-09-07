@@ -5,7 +5,7 @@ After=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/proton-drive-fs tray
+ExecStart=@BINDIR@/proton-drive-fs tray
 Restart=on-failure
 
 [Install]

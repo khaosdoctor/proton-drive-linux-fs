@@ -1,12 +1,18 @@
 [Unit]
 Description=Proton Drive FUSE mount
 After=network-online.target
+ConditionPathExists=%h/.config/proton-drive-fs/session.json
+StartLimitIntervalSec=60
+StartLimitBurst=3
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/proton-drive-fs mount -foreground %h/ProtonDrive
-ExecStop=%h/.local/bin/proton-drive-fs unmount %h/ProtonDrive
+# Mounts at %h/ProtonDrive; change with `systemctl --user edit proton-drive-fs`
+# or by setting `mountpoint` in config.toml and dropping the argument below.
+ExecStart=@BINDIR@/proton-drive-fs mount -foreground %h/ProtonDrive
+ExecStop=@BINDIR@/proton-drive-fs unmount %h/ProtonDrive
 Restart=on-failure
+RestartSec=5s
 
 [Install]
 WantedBy=default.target

@@ -1,7 +1,7 @@
 pkgbase = proton-drive-fs-git
 	pkgdesc = FUSE virtual filesystem for Proton Drive on Linux.
 	pkgver = r0.0000000
-	pkgrel = 1
+	pkgrel = 2
 	url = https://github.com/khaosdoctor/proton-drive-linux-fs
 	arch = x86_64
 	arch = aarch64

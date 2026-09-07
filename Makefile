@@ -34,13 +34,15 @@ install: build
 	install -Dm755 $(BIN) $(PREFIX)/bin/$(BIN)
 	install -Dm644 contrib/proton-drive-fs.desktop $(PREFIX)/share/applications/proton-drive-fs.desktop
 	install -Dm644 contrib/icons/proton-drive-fs.png $(PREFIX)/share/icons/hicolor/64x64/apps/proton-drive-fs.png
-	install -Dm644 contrib/systemd/proton-drive-fs.service $(HOME)/.config/systemd/user/proton-drive-fs.service
-	install -Dm644 contrib/systemd/proton-drive-fs-tray.service $(HOME)/.config/systemd/user/proton-drive-fs-tray.service
+	mkdir -p bin/systemd
+	sed "s|@BINDIR@|$(PREFIX)/bin|g" contrib/systemd/proton-drive-fs.service > bin/systemd/proton-drive-fs.service
+	sed "s|@BINDIR@|$(PREFIX)/bin|g" contrib/systemd/proton-drive-fs-tray.service > bin/systemd/proton-drive-fs-tray.service
+	install -Dm644 bin/systemd/proton-drive-fs.service $(HOME)/.config/systemd/user/proton-drive-fs.service
+	install -Dm644 bin/systemd/proton-drive-fs-tray.service $(HOME)/.config/systemd/user/proton-drive-fs-tray.service
 	@systemctl --user daemon-reload 2>/dev/null || true
 	@echo "Installed. To enable:"
 	@echo "  systemctl --user enable --now proton-drive-fs-tray"
 	@echo "  systemctl --user enable --now proton-drive-fs"
-	@echo "Note: systemd units reference ~/.local/bin/$(BIN). If PREFIX is changed, edit the units."
 
 uninstall:
 	@rm -f $(PREFIX)/bin/$(BIN)

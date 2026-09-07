@@ -88,6 +88,39 @@ flowchart LR
     Restart --> Fine
 ```
 
+## systemd unit fails with status=203/EXEC
+
+`systemctl --user status proton-drive-fs` shows the process exiting immediately with
+`status=203/EXEC`, then `Start request repeated too quickly` and
+`Failed with result 'start-limit-hit'`. This means the unit points at a binary that is
+not there, for example a stale unit left over from an older install after you switched
+install methods.
+
+Check what the unit actually points at:
+
+```
+systemctl --user cat proton-drive-fs
+```
+
+Look at the `ExecStart=` line and confirm that path exists. Where the binary and the
+unit end up depends on how you installed:
+
+- A package (AUR, deb, rpm, apk) puts the binary at `/usr/bin/proton-drive-fs` and the
+  units at `/usr/lib/systemd/user/`.
+- `make install` puts the binary at `$PREFIX/bin/proton-drive-fs` (default
+  `~/.local/bin`) and the units at `~/.config/systemd/user/`, which also takes
+  priority over the package copy.
+
+A leftover unit in `~/.config/systemd/user/` from a previous `make install` can shadow
+the package's unit and still point at a binary you removed. Delete the stale one, or
+reinstall with the method you actually want, then reload and clear the failure:
+
+```
+systemctl --user daemon-reload
+systemctl --user reset-failed proton-drive-fs
+systemctl --user restart proton-drive-fs
+```
+
 ## Logs
 
 The mount daemon logs structured entries to the systemd user journal under the

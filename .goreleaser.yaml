@@ -1,5 +1,13 @@
 version: 2
 
+before:
+  hooks:
+    # dist/ must stay empty until after goreleaser's own dist emptiness check, so
+    # the substituted units are generated into bin/ (git-ignored, like dist/) instead.
+    - mkdir -p bin/systemd
+    - sh -c "sed 's|@BINDIR@|/usr/bin|g' contrib/systemd/proton-drive-fs.service > bin/systemd/proton-drive-fs.service"
+    - sh -c "sed 's|@BINDIR@|/usr/bin|g' contrib/systemd/proton-drive-fs-tray.service > bin/systemd/proton-drive-fs-tray.service"
+
 builds:
   - main: ./cmd/proton-drive-fs
     binary: proton-drive-fs
@@ -43,9 +51,9 @@ nfpms:
         dst: /usr/share/applications/proton-drive-fs.desktop
       - src: contrib/icons/proton-drive-fs.png
         dst: /usr/share/icons/hicolor/64x64/apps/proton-drive-fs.png
-      - src: contrib/systemd/proton-drive-fs.service
+      - src: bin/systemd/proton-drive-fs.service
         dst: /usr/lib/systemd/user/proton-drive-fs.service
-      - src: contrib/systemd/proton-drive-fs-tray.service
+      - src: bin/systemd/proton-drive-fs-tray.service
         dst: /usr/lib/systemd/user/proton-drive-fs-tray.service
       - src: contrib/io.github.khaosdoctor.proton_drive_fs.metainfo.xml
         dst: /usr/share/metainfo/io.github.khaosdoctor.proton_drive_fs.metainfo.xml
@@ -92,8 +100,10 @@ aurs:
       install -Dm644 "./LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
       install -Dm644 "./contrib/proton-drive-fs.desktop" "${pkgdir}/usr/share/applications/proton-drive-fs.desktop"
       install -Dm644 "./contrib/icons/proton-drive-fs.png" "${pkgdir}/usr/share/icons/hicolor/64x64/apps/proton-drive-fs.png"
-      install -Dm644 "./contrib/systemd/proton-drive-fs.service" "${pkgdir}/usr/lib/systemd/user/proton-drive-fs.service"
-      install -Dm644 "./contrib/systemd/proton-drive-fs-tray.service" "${pkgdir}/usr/lib/systemd/user/proton-drive-fs-tray.service"
+      sed 's|@BINDIR@|/usr/bin|g' "./contrib/systemd/proton-drive-fs.service" > "${srcdir}/proton-drive-fs.service"
+      sed 's|@BINDIR@|/usr/bin|g' "./contrib/systemd/proton-drive-fs-tray.service" > "${srcdir}/proton-drive-fs-tray.service"
+      install -Dm644 "${srcdir}/proton-drive-fs.service" "${pkgdir}/usr/lib/systemd/user/proton-drive-fs.service"
+      install -Dm644 "${srcdir}/proton-drive-fs-tray.service" "${pkgdir}/usr/lib/systemd/user/proton-drive-fs-tray.service"
       install -Dm644 "./contrib/io.github.khaosdoctor.proton_drive_fs.metainfo.xml" "${pkgdir}/usr/share/metainfo/io.github.khaosdoctor.proton_drive_fs.metainfo.xml"
 
 aur_sources:
@@ -135,8 +145,10 @@ aur_sources:
       install -Dm644 "./LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
       install -Dm644 "./contrib/proton-drive-fs.desktop" "${pkgdir}/usr/share/applications/proton-drive-fs.desktop"
       install -Dm644 "./contrib/icons/proton-drive-fs.png" "${pkgdir}/usr/share/icons/hicolor/64x64/apps/proton-drive-fs.png"
-      install -Dm644 "./contrib/systemd/proton-drive-fs.service" "${pkgdir}/usr/lib/systemd/user/proton-drive-fs.service"
-      install -Dm644 "./contrib/systemd/proton-drive-fs-tray.service" "${pkgdir}/usr/lib/systemd/user/proton-drive-fs-tray.service"
+      sed 's|@BINDIR@|/usr/bin|g' "./contrib/systemd/proton-drive-fs.service" > "${srcdir}/proton-drive-fs.service"
+      sed 's|@BINDIR@|/usr/bin|g' "./contrib/systemd/proton-drive-fs-tray.service" > "${srcdir}/proton-drive-fs-tray.service"
+      install -Dm644 "${srcdir}/proton-drive-fs.service" "${pkgdir}/usr/lib/systemd/user/proton-drive-fs.service"
+      install -Dm644 "${srcdir}/proton-drive-fs-tray.service" "${pkgdir}/usr/lib/systemd/user/proton-drive-fs-tray.service"
       install -Dm644 "./contrib/io.github.khaosdoctor.proton_drive_fs.metainfo.xml" "${pkgdir}/usr/share/metainfo/io.github.khaosdoctor.proton_drive_fs.metainfo.xml"
 
 dockers:
