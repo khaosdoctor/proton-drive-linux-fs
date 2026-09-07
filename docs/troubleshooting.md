@@ -47,7 +47,7 @@ Then __close the application completely__ and try to start it again.
 ## "Device or resource busy" on unmount
 
 ```bash
-proton-drive-fs unmount ~/ProtonDrive
+proton-drive-fs unmount path/to/mount
 ```
 
 An unmount fails as busy while a process still has a file or the mountpoint open.
@@ -59,7 +59,7 @@ If the daemon has died or deadlocked and programs are stuck on the mount instead
 just holding it open, use:
 
 ```bash
-proton-drive-fs unmount -force ~/ProtonDrive
+proton-drive-fs unmount -force path/to/mount
 ```
 
 This lazily unmounts and aborts the kernel-side FUSE connection, so anything blocked
@@ -99,7 +99,7 @@ mountpoint that is already mounted and prints the running daemon's pid and versi
 actually running with:
 
 ```sh
-proton-drive-fs status ~/ProtonDrive
+proton-drive-fs status path/to/mount
 ```
 
 `status` reports a version mismatch between the running daemon and the current binary

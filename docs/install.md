@@ -83,7 +83,7 @@ docker run --rm -it \
   --cap-add SYS_ADMIN \
   --security-opt apparmor:unconfined \
   -v ~/.config/proton-drive-fs:/root/.config/proton-drive-fs \
-  -v ~/ProtonDrive:/mnt/protondrive:rshared \
+  -v path/to/mount:/mnt/protondrive:rshared \
   ghcr.io/khaosdoctor/proton-drive-linux-fs:latest \
   mount /mnt/protondrive
 ```

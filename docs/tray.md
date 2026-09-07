@@ -42,7 +42,7 @@ stateDiagram-v2
 ```
 
 While uploads are queued the status line counts them, as in
-`Mounted at ~/ProtonDrive, syncing 312/10000`, and appends `, N failed` when some of
+`Mounted at path/to/mount, syncing 312/10000`, and appends `, N failed` when some of
 them could not be uploaded. The counts go back to zero half a minute after the queue
 drains.
 
