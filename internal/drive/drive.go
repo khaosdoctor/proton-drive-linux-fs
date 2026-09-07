@@ -241,12 +241,12 @@ func (n *Node) ResolveAttrs() {
 		return
 	}
 
-	size, modTime := n.client.resolveFileAttrs(n.Link, kr)
+	size, modTime, resolved := n.client.resolveFileAttrs(n.Link, kr)
 
 	n.attrMu.Lock()
 	n.size = size
 	n.modTime = modTime
-	n.attrsKnown = true
+	n.attrsKnown = resolved
 	n.attrMu.Unlock()
 }
 
@@ -305,7 +305,7 @@ func Open(ctx context.Context, api *proton.Client, keys *auth.Keys) (*Client, *N
 		tokenSource: keys.TokenSource,
 		apiURL:      auth.APIURL,
 	}
-	size, modTime := c.resolveFileAttrs(rootLink, rootKR)
+	size, modTime, _ := c.resolveFileAttrs(rootLink, rootKR)
 
 	root := &Node{Link: rootLink, Name: "/", client: c, kr: rootKR, size: size, modTime: modTime, attrsKnown: true}
 
@@ -449,19 +449,19 @@ func (c *Client) fetchNode(ctx context.Context, linkID string, parent *Node) (*N
 
 // resolveFileAttrs returns the best-known size and modification time for link, preferring
 // the values in its decrypted XAttr (real plaintext size) over the encrypted-size Link.Size.
-func (c *Client) resolveFileAttrs(link proton.Link, kr *crypto.KeyRing) (int64, time.Time) {
-	size := link.Size
-	modTime := time.Unix(link.ModifyTime, 0)
+func (c *Client) resolveFileAttrs(link proton.Link, kr *crypto.KeyRing) (size int64, modTime time.Time, ok bool) {
+	size = link.Size
+	modTime = time.Unix(link.ModifyTime, 0)
 
 	if link.Type != proton.LinkTypeFile || link.FileProperties == nil {
-		return size, modTime
+		return size, modTime, false
 	}
 
 	start := time.Now()
 	common, err := decryptXAttr(kr, link.FileProperties.ActiveRevision.XAttr)
 	if err != nil {
 		slog.Warn("resolving xattr failed, using encrypted size", "link", link.LinkID, "size", link.Size, "err", err)
-		return size, modTime
+		return size, modTime, false
 	}
 	slog.Debug("xattr resolved", "link", link.LinkID, logx.Elapsed(start))
 
@@ -473,7 +473,7 @@ func (c *Client) resolveFileAttrs(link proton.Link, kr *crypto.KeyRing) (int64, 
 		modTime = t
 	}
 
-	return size, modTime
+	return size, modTime, common.Size > 0
 }
 
 // decryptXAttr decrypts a Link's armored XAttr blob (encrypted to the node key, signed by the

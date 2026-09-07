@@ -1,8 +1,10 @@
 package drive
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -211,4 +213,247 @@ func TestParseXAttr(t *testing.T) {
 			}
 		})
 	}
+}
+
+// newTestFile builds a File backed by a single encrypted block. The caller controls the reported
+// size independently from the actual plaintext length so tests can simulate a size mismatch
+// (encrypted size leaking through as the reported size).
+func newTestFile(t *testing.T, plain []byte, reportedSize int64) *File {
+	t.Helper()
+
+	sk, err := crypto.GenerateSessionKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ciphertext, err := sk.Encrypt(crypto.NewPlainMessage(plain))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	orig := fetchBlock
+	fetchBlock = func(_ context.Context, _ *Client, _, _ string) ([]byte, error) {
+		return ciphertext, nil
+	}
+	t.Cleanup(func() { fetchBlock = orig })
+
+	return &File{
+		client:     &Client{},
+		sessionKey: sk,
+		blocks:     map[int]proton.Block{1: {Index: 1, BareURL: "http://example.invalid", Token: "tok"}},
+		size:       reportedSize,
+		cache:      make(map[int][]byte),
+	}
+}
+
+// newTestFileMultiBlock builds a File backed by two independently encrypted blocks, each with its
+// own ciphertext. The reported size is set by the caller.
+func newTestFileMultiBlock(t *testing.T, block1, block2 []byte, reportedSize int64) *File {
+	t.Helper()
+
+	sk, err := crypto.GenerateSessionKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ct1, err := sk.Encrypt(crypto.NewPlainMessage(block1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ct2, err := sk.Encrypt(crypto.NewPlainMessage(block2))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ciphertexts := map[int][]byte{1: ct1, 2: ct2}
+
+	orig := fetchBlock
+	fetchBlock = func(_ context.Context, _ *Client, url, _ string) ([]byte, error) {
+		switch url {
+		case "http://block1":
+			return ciphertexts[1], nil
+		case "http://block2":
+			return ciphertexts[2], nil
+		}
+		return nil, errors.New("unknown block URL")
+	}
+	t.Cleanup(func() { fetchBlock = orig })
+
+	return &File{
+		client:     &Client{},
+		sessionKey: sk,
+		blocks: map[int]proton.Block{
+			1: {Index: 1, BareURL: "http://block1", Token: "tok1"},
+			2: {Index: 2, BareURL: "http://block2", Token: "tok2"},
+		},
+		size:  reportedSize,
+		cache: make(map[int][]byte),
+	}
+}
+
+// TestReadAtSizeMismatchReturnsEOF verifies that ReadAt returns io.EOF (not a zero-length
+// success) when the reported file size is larger than the actual decrypted data. This happens
+// when the encrypted/armored size leaks through as the file's reported size, which is common
+// enough in practice that ZIP-based format readers (.xlsx, .docx, .3mf, etc.) break if the
+// read silently returns (0, nil) instead.
+func TestReadAtSizeMismatchReturnsEOF(t *testing.T) {
+	plain := bytes.Repeat([]byte("x"), 100)
+	inflatedSize := int64(112) // simulates PGP overhead leaking into the reported size
+
+	f := newTestFile(t, plain, inflatedSize)
+
+	// Offset 105 is within the reported size (112) but past the actual plaintext (100 bytes).
+	buf := make([]byte, 7)
+	n, err := f.ReadAt(context.Background(), buf, 105)
+	if n != 0 {
+		t.Errorf("ReadAt returned n=%d, want 0 (no data available at that offset)", n)
+	}
+	if !errors.Is(err, io.EOF) {
+		t.Errorf("ReadAt returned err=%v, want io.EOF", err)
+	}
+}
+
+// TestReadAtAccurateSize verifies normal behavior when the reported size matches the plaintext:
+// reading from offset 0 returns the full content, and reading at or past the end returns EOF.
+func TestReadAtAccurateSize(t *testing.T) {
+	plain := []byte("accurate-size-content")
+	f := newTestFile(t, plain, int64(len(plain)))
+
+	// Full read from the start.
+	buf := make([]byte, len(plain))
+	n, err := f.ReadAt(context.Background(), buf, 0)
+	if err != nil {
+		t.Fatalf("ReadAt(0): unexpected error: %v", err)
+	}
+	if n != len(plain) {
+		t.Fatalf("ReadAt(0): n=%d, want %d", n, len(plain))
+	}
+	if !bytes.Equal(buf[:n], plain) {
+		t.Fatalf("ReadAt(0): got %q, want %q", buf[:n], plain)
+	}
+
+	// Read at exactly the file size returns EOF.
+	n, err = f.ReadAt(context.Background(), buf, int64(len(plain)))
+	if n != 0 {
+		t.Errorf("ReadAt(size): n=%d, want 0", n)
+	}
+	if !errors.Is(err, io.EOF) {
+		t.Errorf("ReadAt(size): err=%v, want io.EOF", err)
+	}
+
+	// Read past the file size also returns EOF.
+	n, err = f.ReadAt(context.Background(), buf, int64(len(plain))+10)
+	if n != 0 {
+		t.Errorf("ReadAt(size+10): n=%d, want 0", n)
+	}
+	if !errors.Is(err, io.EOF) {
+		t.Errorf("ReadAt(size+10): err=%v, want io.EOF", err)
+	}
+}
+
+// TestReadAtPartialBlockThenEOF uses two blocks where the reported size extends past the actual
+// data. A read starting in the middle of the second block should return whatever bytes are
+// available, and a subsequent read past the actual data should return EOF.
+func TestReadAtPartialBlockThenEOF(t *testing.T) {
+	block1 := bytes.Repeat([]byte("A"), blockSize) // full first block
+	block2 := bytes.Repeat([]byte("B"), 200)        // short second block
+
+	actualLen := int64(blockSize) + 200
+	inflatedSize := actualLen + 50 // reported size extends 50 bytes past actual data
+
+	f := newTestFileMultiBlock(t, block1, block2, inflatedSize)
+
+	// Read starting 100 bytes into the second block: should get the remaining 100 bytes.
+	readOff := int64(blockSize) + 100
+	buf := make([]byte, 256)
+	n, err := f.ReadAt(context.Background(), buf, readOff)
+	if err != nil {
+		t.Fatalf("ReadAt(blockSize+100): unexpected error: %v", err)
+	}
+	if n != 100 {
+		t.Fatalf("ReadAt(blockSize+100): n=%d, want 100", n)
+	}
+	expected := bytes.Repeat([]byte("B"), 100)
+	if !bytes.Equal(buf[:n], expected) {
+		t.Fatalf("ReadAt(blockSize+100): got %q, want %q", buf[:n], expected)
+	}
+
+	// Read past actual data but within the inflated reported size: must return EOF.
+	pastDataOff := actualLen + 10
+	n, err = f.ReadAt(context.Background(), buf, pastDataOff)
+	if n != 0 {
+		t.Errorf("ReadAt(past data): n=%d, want 0", n)
+	}
+	if !errors.Is(err, io.EOF) {
+		t.Errorf("ReadAt(past data): err=%v, want io.EOF", err)
+	}
+}
+
+// TestReadAtZipEndOfCentralDirectory simulates the access pattern a ZIP reader uses: it seeks to
+// (file_size - 22) to read the End of Central Directory record (22 bytes). When the reported size
+// includes PGP overhead, that seek offset ends up past the actual plaintext, which used to return
+// (0, nil) and silently break every ZIP-based format (.xlsx, .docx, .3mf, .epub, .jar, .odt).
+func TestReadAtZipEndOfCentralDirectory(t *testing.T) {
+	const eocdSize = 22
+
+	// Build a plaintext large enough that the last 22 bytes are meaningful.
+	plain := bytes.Repeat([]byte("Z"), 200)
+	// Overwrite the last 22 bytes with a recognizable pattern.
+	copy(plain[len(plain)-eocdSize:], bytes.Repeat([]byte("E"), eocdSize))
+
+	overhead := int64(16) // simulated PGP overhead
+	inflatedSize := int64(len(plain)) + overhead
+
+	t.Run("inflated size causes EOF", func(t *testing.T) {
+		// Overhead large enough that (inflated - 22) > plaintext length.
+		bigOverhead := int64(30)
+		bigInflated := int64(len(plain)) + bigOverhead
+
+		f := newTestFile(t, plain, bigInflated)
+		// Offset = 230 - 22 = 208, past the 200-byte plaintext.
+		seekOff := bigInflated - eocdSize
+		buf := make([]byte, eocdSize)
+		n, err := f.ReadAt(context.Background(), buf, seekOff)
+		if n != 0 {
+			t.Errorf("inflated read: n=%d, want 0", n)
+		}
+		if !errors.Is(err, io.EOF) {
+			t.Errorf("inflated read: err=%v, want io.EOF", err)
+		}
+	})
+
+	t.Run("small overhead still returns partial data", func(t *testing.T) {
+		// With small overhead, (inflated - 22) is still within the plaintext. The read
+		// returns however many bytes are left from that offset to the actual end.
+		f := newTestFile(t, plain, inflatedSize)
+		seekOff := inflatedSize - eocdSize // 216 - 22 = 194, within 200 bytes
+		buf := make([]byte, eocdSize)
+		n, err := f.ReadAt(context.Background(), buf, seekOff)
+		if err != nil {
+			t.Fatalf("ReadAt: unexpected error: %v", err)
+		}
+		wantN := len(plain) - int(seekOff) // 200 - 194 = 6 bytes available
+		if n != wantN {
+			t.Fatalf("ReadAt: n=%d, want %d", n, wantN)
+		}
+	})
+
+	t.Run("accurate size returns EOCD", func(t *testing.T) {
+		f := newTestFile(t, plain, int64(len(plain)))
+
+		seekOff := int64(len(plain)) - eocdSize // 200 - 22 = 178
+		buf := make([]byte, eocdSize)
+		n, err := f.ReadAt(context.Background(), buf, seekOff)
+		if err != nil {
+			t.Fatalf("ReadAt: unexpected error: %v", err)
+		}
+		if n != eocdSize {
+			t.Fatalf("ReadAt: n=%d, want %d", n, eocdSize)
+		}
+
+		want := bytes.Repeat([]byte("E"), eocdSize)
+		if !bytes.Equal(buf[:n], want) {
+			t.Fatalf("ReadAt: got %q, want %q", buf[:n], want)
+		}
+	})
 }

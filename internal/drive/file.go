@@ -189,6 +189,9 @@ func (f *File) ReadAt(ctx context.Context, p []byte, off int64) (int, error) {
 		blockStart := blockByteOffset(idx)
 		inBlockOff := curOff - blockStart
 		if inBlockOff >= int64(len(data)) {
+			if n == 0 {
+				return 0, io.EOF
+			}
 			break
 		}
 
