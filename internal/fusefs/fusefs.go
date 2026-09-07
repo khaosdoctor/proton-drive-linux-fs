@@ -464,7 +464,7 @@ func (st *mountState) invalidateDir(linkID string) {
 		return
 	}
 	d.invalidate()
-	slog.Info("remote change applied", "path", displayPath(d.path))
+	slog.Debug("remote change applied", "path", displayPath(d.path), "link", linkID)
 }
 
 func (st *mountState) invalidateAll() {
@@ -478,7 +478,7 @@ func (st *mountState) invalidateAll() {
 	for _, d := range dirs {
 		d.invalidate()
 	}
-	slog.Info("remote change applied", "path", "/", "scope", "full refresh")
+	slog.Debug("remote change applied", "path", "/", "scope", "full refresh")
 }
 
 // displayPath returns p, or "/" for the mount root, whose own path is "".
@@ -1096,7 +1096,7 @@ func (d *dirNode) findChild(ctx context.Context, name string) (*drive.Node, sysc
 // re-listing the parent.
 func (d *dirNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	target := path.Join(d.path, name)
-	slog.Info("creating folder", "path", target)
+	slog.Debug("creating folder", "path", target)
 
 	defer d.st.track("mkdir", target)()
 	opCtx, cancel := context.WithTimeout(ctx, d.st.opTimeout)
@@ -1161,7 +1161,7 @@ func (d *dirNode) remove(ctx context.Context, name string) syscall.Errno {
 	}
 
 	targetPath := path.Join(d.path, name)
-	slog.Info("deleting", "path", targetPath)
+	slog.Debug("deleting", "path", targetPath)
 
 	defer d.st.track("remove", targetPath)()
 	opCtx, cancel := context.WithTimeout(ctx, d.st.opTimeout)
@@ -1206,7 +1206,7 @@ func (d *dirNode) Rename(ctx context.Context, name string, newParent fs.InodeEmb
 	if d == newDir {
 		action = "renaming"
 	}
-	slog.Info(action, "from", from, "to", to)
+	slog.Debug(action, "from", from, "to", to)
 
 	defer d.st.track("rename", from+" -> "+to)()
 	opCtx, cancel := context.WithTimeout(ctx, d.st.opTimeout)
@@ -1434,7 +1434,7 @@ func (f *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 		return nil, 0, syscall.EIO
 	}
 
-	slog.Info("opening file", "path", f.currentName())
+	slog.Debug("opening file", "path", f.currentName(), "link", node.Link.LinkID)
 
 	// Every open mode below can read, so the denylist applies to all of them.
 	if parent != nil {

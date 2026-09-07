@@ -64,6 +64,7 @@ func (c *Client) putJSONOnce(ctx context.Context, path string, body any) (int, e
 	req.Header.Set("Accept", "application/vnd.protonmail.v1+json")
 	req.Header.Set("Content-Type", "application/json")
 
+	slog.Debug("api request", "method", "PUT", "path", path)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return 0, err

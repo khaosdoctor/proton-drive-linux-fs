@@ -294,6 +294,7 @@ func (f *File) fetchAndCacheBlock(ctx context.Context, idx int, debug bool) ([]b
 	transfer := f.ensureTransfer()
 
 	dlStart := time.Now()
+	slog.Debug("downloading block", "link", f.linkID, "block", idx, "url", blk.BareURL)
 	ciphertext, err := fetchBlock(ctx, f.client, blk.BareURL, blk.Token)
 	releaseSlot()
 	if err != nil {

@@ -56,7 +56,7 @@ func (st *mountState) fetchThumb(ctx context.Context, job thumbJob) {
 		st.thumbFailed(job, err)
 		return
 	}
-	slog.Info("thumbnail written", "path", job.relPath)
+	slog.Debug("thumbnail written", "path", job.relPath, "uri", st.thumbs.URI(job.relPath))
 
 	st.mu.Lock()
 	delete(st.thumbInflight, thumbKey(job.node))
