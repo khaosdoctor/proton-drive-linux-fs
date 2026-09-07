@@ -1471,6 +1471,7 @@ func (d *dirNode) fillEntryOut(out *fuse.EntryOut, child *drive.Node) {
 		return
 	}
 
+	child.ResolveAttrs()
 	out.Mode = fuse.S_IFREG | 0o644
 	out.Size = uint64(child.Size())
 	out.Mtime = uint64(child.ModTime().Unix())

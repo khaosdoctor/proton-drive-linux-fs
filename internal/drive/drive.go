@@ -227,6 +227,15 @@ func (n *Node) ModTime() time.Time {
 	return n.modTime
 }
 
+// SetPlaintextSize overrides the node's size with a known-correct plaintext value and marks the
+// attrs as resolved. Used when XAttr decryption failed but the real size was computed from blocks.
+func (n *Node) SetPlaintextSize(size int64) {
+	n.attrMu.Lock()
+	n.size = size
+	n.attrsKnown = true
+	n.attrMu.Unlock()
+}
+
 // inheritAttrs carries src's already-resolved size and mtime over to n, so a move does not throw
 // away attributes that cost an XAttr decrypt to learn.
 func (n *Node) inheritAttrs(src *Node) {

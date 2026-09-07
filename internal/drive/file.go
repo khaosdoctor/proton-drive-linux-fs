@@ -119,6 +119,7 @@ func (c *Client) OpenFile(ctx context.Context, n *Node, path string) (*File, err
 				"encrypted_size", n.Link.Size,
 				"plaintext_size", computed)
 			f.size = computed
+			n.SetPlaintextSize(computed)
 		}
 	}
 
