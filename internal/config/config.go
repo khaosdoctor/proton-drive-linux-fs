@@ -77,6 +77,7 @@ var defaultDenyReaders = []string{
 // and the config file both start here so the two can never drift apart.
 func Defaults() Config {
 	return Config{
+		Mountpoint:   defaultMountpoint(),
 		TTL:          "30s",
 		Poll:         "10s",
 		OpTimeout:    "60s",
@@ -91,6 +92,16 @@ func Defaults() Config {
 		LogLevel:     "info",
 		fileKeys:     map[string]bool{},
 	}
+}
+
+// defaultMountpoint returns ~/ProtonDrive, so a fresh install works without editing the config
+// file first. Returns "" if the home directory cannot be determined.
+func defaultMountpoint() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, "ProtonDrive")
 }
 
 // defaultCacheDir returns the default on-disk cache root for blocks and persisted directory

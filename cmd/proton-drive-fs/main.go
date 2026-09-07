@@ -365,8 +365,19 @@ func runMount(args []string) int {
 
 	session, err := auth.Load()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "error: no saved session, run \"proton-drive-fs login\" first:", err)
-		return 1
+		if !term.IsTerminal(int(os.Stdin.Fd())) {
+			fmt.Fprintln(os.Stderr, "error: no saved session, run \"proton-drive-fs login\" first:", err)
+			return 1
+		}
+		fmt.Println("no saved session found, logging in now")
+		if code := runLogin(args); code != 0 {
+			return code
+		}
+		session, err = auth.Load()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error: loading session after login:", err)
+			return 1
+		}
 	}
 
 	api, keys, err := session.Client()

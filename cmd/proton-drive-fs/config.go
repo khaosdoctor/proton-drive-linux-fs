@@ -249,13 +249,7 @@ func printConfig(cfg config.Config, explicit map[string]bool) {
 		fmt.Printf("%s = %s # %s\n", key, value, source(key))
 	}
 
-	mountpointSource := source("mountpoint")
-	if mountpointSource == "default" {
-		// mountpoint has no built-in default (see config.Defaults), so falling through to
-		// "default" here would claim one exists; "unset" says nothing provided it instead.
-		mountpointSource = "unset"
-	}
-	fmt.Printf("mountpoint = %s # %s\n", strconv.Quote(cfg.Mountpoint), mountpointSource)
+	line("mountpoint", strconv.Quote(cfg.Mountpoint))
 	line("ttl", strconv.Quote(cfg.TTL))
 	line("poll", strconv.Quote(cfg.Poll))
 	line("op_timeout", strconv.Quote(cfg.OpTimeout))
