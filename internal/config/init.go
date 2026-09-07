@@ -63,6 +63,18 @@ func Init(path string, force bool) error {
 	return os.WriteFile(path, []byte(defaultFileContents()), 0600)
 }
 
+// LoadOrInit is Load with one extra step: when no file exists at path, it first writes the
+// commented default file Init writes, so a fresh install always has a config.toml to edit instead
+// of an empty config directory. Every command that reads configuration goes through this. A write
+// failure (a read-only home, an unwritable XDG_CONFIG_HOME) is deliberately ignored: the built-in
+// defaults still load and the command still runs.
+func LoadOrInit(path string) (Config, error) {
+	if path != "" {
+		_ = Init(path, false)
+	}
+	return Load(path)
+}
+
 // defaultFileContents renders every config key as a commented "# key = default" line with its
 // explanation, so the file round-trips through Load unchanged (nothing is actually set) until the
 // user uncomments a line.

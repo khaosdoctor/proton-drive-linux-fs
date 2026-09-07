@@ -97,14 +97,11 @@ other mount-management items hidden from its menu. There is no default mountpoin
 `-mountpoint`, or the config file's `mountpoint` key, and the systemd unit has no
 argument to give it at all.
 
-Set `mountpoint` in the config file:
-
-```
-proton-drive-fs config init
-```
-
-then uncomment the `mountpoint` line and set it, and check what proton-drive-fs
-actually resolved:
+Set `mountpoint` in the config file, which any command already created for you at
+`$XDG_CONFIG_HOME/proton-drive-fs/config.toml` (falls back to
+`~/.config/proton-drive-fs/config.toml`); the tray's `Open config folder` item opens
+the directory holding it. Uncomment the `mountpoint` line and set it, then check what
+proton-drive-fs actually resolved:
 
 ```
 proton-drive-fs config show

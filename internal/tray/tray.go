@@ -105,6 +105,9 @@ func icon(s State) []byte {
 type Options struct {
 	Mountpoint string
 	LogPath    string
+	// ConfigPath is the config.toml the tray was started with; its directory is what the "Open
+	// config folder" menu item opens. Empty hides that item.
+	ConfigPath string
 	Version    string
 	Commit     string
 	Mounted    func() bool
@@ -243,6 +246,7 @@ type app struct {
 	pause, resume        *systray.MenuItem
 	openFolder, openLogs *systray.MenuItem
 	openDebugLogs        *systray.MenuItem
+	openConfig           *systray.MenuItem
 	login, logout        *systray.MenuItem
 	about, openDashboard *systray.MenuItem
 	hintUntil            atomic.Int64
@@ -292,6 +296,10 @@ func (a *app) onReady() {
 	a.openFolder = systray.AddMenuItem("Open folder", "Open "+a.opts.Mountpoint+" in the file manager")
 	a.openLogs = systray.AddMenuItem("Open logs", "Show the mount log")
 	a.openDebugLogs = systray.AddMenuItem("Open debug logs", "Show the mount log at debug verbosity")
+	if a.configDir() != "" {
+		a.openConfig = systray.AddMenuItem("Open config folder", "Open "+a.configDir()+" in the file manager")
+		onClick(a.openConfig, a.showConfigFolder)
+	}
 	systray.AddSeparator()
 
 	a.login = systray.AddMenuItem("Log in", "Log in to Proton in a terminal")
@@ -577,6 +585,22 @@ func setPausedViaAPIOrFile(paused bool) error {
 func (a *app) showFolder() {
 	if err := exec.Command("xdg-open", a.opts.Mountpoint).Start(); err != nil {
 		slog.Warn("xdg-open failed", "path", a.opts.Mountpoint, "err", err)
+	}
+}
+
+// configDir is the directory holding the config file the tray was started with, i.e. what "Open
+// config folder" opens, or "" when no config path was given.
+func (a *app) configDir() string {
+	if a.opts.ConfigPath == "" {
+		return ""
+	}
+	return filepath.Dir(a.opts.ConfigPath)
+}
+
+func (a *app) showConfigFolder() {
+	dir := a.configDir()
+	if err := exec.Command("xdg-open", dir).Start(); err != nil {
+		slog.Warn("xdg-open failed", "path", dir, "err", err)
 	}
 }
 

@@ -87,7 +87,7 @@ func prompt(reader *bufio.Reader, label string) (string, error) {
 
 func runLogin(args []string) int {
 	configPath := resolveConfigPath(args)
-	cfg, err := config.Load(configPath)
+	cfg, err := config.LoadOrInit(configPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error: loading config:", err)
 		return 1
@@ -280,7 +280,7 @@ func parseLogLevel(s string) (slog.Level, error) {
 
 func runMount(args []string) int {
 	configPath := resolveConfigPath(args)
-	cfg, err := config.Load(configPath)
+	cfg, err := config.LoadOrInit(configPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error: loading config:", err)
 		return 1
@@ -634,7 +634,7 @@ func printLastLines(path string, n int) {
 
 func runUnmount(args []string) int {
 	configPath := resolveConfigPath(args)
-	cfg, err := config.Load(configPath)
+	cfg, err := config.LoadOrInit(configPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error: loading config:", err)
 		return 1
@@ -949,7 +949,7 @@ func runVersion() int {
 // that daemon is this binary, so a stale daemon left running after a rebuild is easy to spot.
 func runStatus(args []string) int {
 	configPath := resolveConfigPath(args)
-	cfg, err := config.Load(configPath)
+	cfg, err := config.LoadOrInit(configPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error: loading config:", err)
 		return 1

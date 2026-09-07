@@ -205,7 +205,7 @@ func runConfigInit(args []string) int {
 // exactly what those subcommands would resolve to, without mounting or logging in.
 func runConfigShow(args []string) int {
 	configPath := resolveConfigPath(args)
-	cfg, err := config.Load(configPath)
+	cfg, err := config.LoadOrInit(configPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error: loading config:", err)
 		return 1

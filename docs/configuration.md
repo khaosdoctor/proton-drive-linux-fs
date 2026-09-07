@@ -5,6 +5,11 @@ Every flag `login`, `mount`, and `tray` accept also has a key in a TOML config f
 `~/.config/proton-drive-fs/config.toml`), or wherever `-config <path>` points instead.
 `status` also reads it for `mountpoint` when none is given on the command line.
 
+Every command that reads configuration creates that file first when it does not exist,
+with every key commented out at its default value, so a fresh install always has a
+config.toml to edit. An existing file is never rewritten, and a directory that cannot
+be written to is not an error: the built-in defaults are used instead.
+
 ## Precedence
 
 Values resolve in one direction only: a flag passed on the command line always wins
@@ -26,7 +31,9 @@ proton-drive-fs config show [-config path] [flags...]
 
 `config init` writes a fully commented config file with every key at its default value
 and a one-line explanation; uncomment a line to set it. It refuses to overwrite an
-existing file unless `-force` is passed.
+existing file unless `-force` is passed. Since every command writes that same file when
+it is missing, `config init` is mostly useful with `-force` to reset an edited file, or
+with `-config` to write one somewhere else.
 
 `config show` prints the effective configuration after merging defaults, the file, and
 any flag passed to `config show` itself, with a trailing comment naming where each

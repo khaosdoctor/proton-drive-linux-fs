@@ -1,12 +1,10 @@
 # Quick start
 
-Three complete flows, pick the one that matches how you run proton-drive-fs. See
-[Install](install.md) for every way to get the binary and [Usage](usage.md) for every
-subcommand and flag.
+Three complete flows, pick the one that matches how you run proton-drive-fs. See [Install](install.md) for every way to get the binary and [Usage](usage.md) for every subcommand and flag.
 
-## Installed package (normal flow)
+## Installed package
 
-Install the binary. Pick whichever matches how you got it:
+Install the binary. Download the one for your distro:
 
 ```
 sudo dpkg -i proton-drive-fs_*.deb
@@ -24,7 +22,7 @@ sudo pacman -U proton-drive-fs_*.pkg.tar.zst
 sudo apk add --allow-untrusted proton-drive-fs_*.apk
 ```
 
-or without a package:
+Or without a package, directly through Go:
 
 ```
 go install github.com/khaosdoctor/proton-drive-linux-fs/cmd/proton-drive-fs@latest
@@ -78,10 +76,11 @@ Unmount when done:
 proton-drive-fs unmount ~/ProtonDrive
 ```
 
-Repeating the same flags on every run gets old fast; `proton-drive-fs config init`
-writes a `config.toml` with every setting commented out at its default, so you can
-uncomment and edit the ones you want instead of passing flags each time. See
-[Configuration](configuration.md).
+Repeating the same flags on every run gets old fast. The first command you run writes
+`$XDG_CONFIG_HOME/proton-drive-fs/config.toml` (falls back to
+`~/.config/proton-drive-fs/config.toml`) with every setting commented out at its
+default, so you can uncomment and edit the ones you want instead of passing flags each
+time. See [Configuration](configuration.md).
 
 ## systemd user units
 

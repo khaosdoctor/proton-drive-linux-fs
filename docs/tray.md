@@ -57,6 +57,7 @@ The menu holds a status line (`Mounted at <path>`, `Not mounted`, `Not logged in
 - `Pause syncing` or `Resume syncing` when mounted.
 - `Open folder` when mounted.
 - `Open logs` and `Open debug logs`.
+- `Open config folder`.
 - `Log in` when logged out.
 - `Log out` when logged in.
 - `Quit`.
@@ -67,9 +68,10 @@ When neither `-mountpoint`, the config file, nor the mountpoint remembered from 
 previous run resolves to a path, the tray still starts rather than exiting: the status
 line reads `No mountpoint configured`, and `Mount`, `Unmount`, `Restart mount`,
 `Pause syncing`/`Resume syncing`, and `Open folder` stay hidden, since none of them has
-a mountpoint to act on. `About`, `Open logs`, `Open debug logs`, `Log in`/`Log out`, and
-`Quit` stay available. Fix it with `proton-drive-fs config init` followed by an edit to
-set `mountpoint`, or by restarting the tray with `-mountpoint <path>`.
+a mountpoint to act on. `About`, `Open logs`, `Open debug logs`, `Open config folder`,
+`Log in`/`Log out`, and `Quit` stay available. Fix it with `Open config folder` followed
+by an edit to `config.toml` setting `mountpoint`, or by restarting the tray with
+`-mountpoint <path>`.
 
 `Mount` and `Unmount` run this same binary, so a mount started from the menu is the
 same detached mount you get from a shell, and it survives the tray closing. `Quit`
@@ -86,7 +88,9 @@ first terminal it finds on `PATH`, trying `$TERMINAL` first and then
 yourself for ten seconds. `Open logs` follows the journal in a terminal when the mount
 logs there, and otherwise opens the log file with `xdg-open`. `Open debug logs` does
 the same at debug verbosity (`journalctl --user -t proton-drive-fs -p debug -f`); see
-[Logs](troubleshooting.md#logs) for what shows up at each level.
+[Logs](troubleshooting.md#logs) for what shows up at each level. `Open config folder`
+opens the directory holding the `config.toml` the tray was started with, created at
+startup when it was missing; see [Configuration](configuration.md).
 
 ## Pause semantics
 

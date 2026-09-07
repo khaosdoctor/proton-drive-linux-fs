@@ -60,7 +60,7 @@ func runAbout() int {
 
 func runTray(args []string) int {
 	configPath := resolveConfigPath(args)
-	cfg, err := config.Load(configPath)
+	cfg, err := config.LoadOrInit(configPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error: loading config:", err)
 		return 1
@@ -90,6 +90,7 @@ func runTray(args []string) int {
 	tray.Run(tray.Options{
 		Mountpoint: mp,
 		LogPath:    logPath,
+		ConfigPath: configPath,
 		Version:    version,
 		Commit:     commit,
 		Mounted:    func() bool { return isMounted(mp) },

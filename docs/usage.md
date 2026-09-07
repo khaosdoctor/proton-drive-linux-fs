@@ -151,8 +151,11 @@ proton-drive-fs config show [-config path] [flags...]
 ```
 
 Manages the TOML config file every `login`, `mount`, and `tray` flag also has a key
-in. See [Configuration](configuration.md) for the precedence between defaults, the
-file, and a flag, the full key table, and what `config init` and `config show` print.
+in. The file is created on its own by the first command that reads it, so `config init`
+is for rewriting one that already exists (`-force`) or writing one to another path
+(`-config`). See [Configuration](configuration.md) for the precedence between defaults,
+the file, and a flag, the full key table, and what `config init` and `config show`
+print.
 
 ## Systemd user units
 
@@ -168,8 +171,8 @@ systemctl --user enable --now proton-drive-fs-tray
 
 Both units run the binary from `~/.local/bin`; edit `ExecStart` if yours lives
 elsewhere. The mount unit runs `mount -foreground` with no mountpoint argument, so it
-needs `mountpoint` set in config.toml (`proton-drive-fs config init`, then edit the
-file); its `ExecStop` runs `unmount` the same way. Its output goes to the journal as
+needs `mountpoint` set in config.toml (run any command once to create the file, then
+edit it); its `ExecStop` runs `unmount` the same way. Its output goes to the journal as
 part of the unit.
 
 ## make restart

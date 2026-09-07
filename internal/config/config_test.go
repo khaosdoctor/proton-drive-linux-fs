@@ -176,3 +176,29 @@ func TestInitOutputRoundTripsThroughLoad(t *testing.T) {
 		t.Fatalf("Init with force=true should overwrite: %v", err)
 	}
 }
+
+func TestLoadOrInitCreatesAndKeepsExistingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sub", "config.toml")
+
+	cfg, err := LoadOrInit(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("LoadOrInit should have created %s: %v", path, err)
+	}
+	if cfg.TTL != Defaults().TTL {
+		t.Errorf("TTL = %q, want the default %q", cfg.TTL, Defaults().TTL)
+	}
+
+	if err := os.WriteFile(path, []byte("ttl = \"90s\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = LoadOrInit(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TTL != "90s" {
+		t.Errorf("TTL = %q, want 90s: LoadOrInit must not overwrite an existing file", cfg.TTL)
+	}
+}
