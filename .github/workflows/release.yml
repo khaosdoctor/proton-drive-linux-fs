@@ -72,15 +72,15 @@ jobs:
       - name: checkout or create apt-repo branch
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_URL: "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
         run: |
-          if git ls-remote --exit-code --heads origin apt-repo >/dev/null 2>&1; then
-            git clone --single-branch --branch apt-repo \
-              "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" apt-repo
+          if git ls-remote --exit-code --heads "$REPO_URL" apt-repo >/dev/null 2>&1; then
+            git clone --single-branch --branch apt-repo "$REPO_URL" apt-repo
           else
             mkdir -p apt-repo
             cd apt-repo
             git init -b apt-repo
-            git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+            git remote add origin "$REPO_URL"
           fi
 
       - name: download .deb files from the release
