@@ -151,6 +151,7 @@ jobs:
           git push origin apt-repo
 
       - name: trigger docs deploy
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
