@@ -49,13 +49,6 @@ sudo apt install proton-drive-fs
 
 If the repository is not yet signed (no `public.key` available), use `[trusted=yes]` instead of `[signed-by=...]`.
 
-## Homebrew
-
-```sh
-brew tap khaosdoctor/tap
-brew install proton-drive-fs
-```
-
 ## Native packages
 
 `.deb`, `.rpm`, `.apk`, and Arch packages are also attached to each [release](https://github.com/khaosdoctor/proton-drive-linux-fs/releases). Install one with the matching package manager, then enable the tray with `systemctl --user enable --now proton-drive-fs-tray`.

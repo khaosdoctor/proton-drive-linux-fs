@@ -70,18 +70,6 @@ checksum:
 source:
   enabled: true
 
-homebrew_casks:
-  - repository:
-      owner: khaosdoctor
-      name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-    homepage: https://github.com/khaosdoctor/proton-drive-linux-fs
-    description: FUSE virtual filesystem for Proton Drive on Linux.
-    binaries:
-      - proton-drive-fs
-    dependencies:
-      - formula: libfuse
-    skip_upload: '{{ if isEnvSet "HOMEBREW_TAP_TOKEN" }}auto{{ else }}true{{ end }}'
 
 aurs:
   - name: proton-drive-fs-bin

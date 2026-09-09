@@ -59,7 +59,7 @@ jobs:
           # `skip_upload` template in .goreleaser.yaml keeps the AUR publishers
           # from running instead of failing the release.
           AUR_KEY: ${{ secrets.AUR_KEY }}
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
 
   apt-repo:
     needs: release
