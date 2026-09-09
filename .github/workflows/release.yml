@@ -68,19 +68,18 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: apt-repo
-          path: apt-repo
-        continue-on-error: true
-
-      - name: initialise apt-repo branch if missing
+      - name: checkout or create apt-repo branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ ! -d apt-repo/.git ]; then
+          if git ls-remote --exit-code --heads origin apt-repo >/dev/null 2>&1; then
+            git clone --single-branch --branch apt-repo \
+              "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" apt-repo
+          else
             mkdir -p apt-repo
             cd apt-repo
             git init -b apt-repo
-            git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+            git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
           fi
 
       - name: download .deb files from the release
