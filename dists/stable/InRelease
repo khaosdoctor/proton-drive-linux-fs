@@ -1,0 +1,22 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Origin: proton-drive-fs
+Label: proton-drive-fs
+Suite: stable
+Codename: stable
+Architectures: amd64 arm64
+Components: main
+Description: APT repository for proton-drive-fs
+SHA256:
+ 58aaf2ef6356770c18a373ab24b113e94735faa6cf1e5c2e2990670983d872d2      539 main/binary-amd64/Packages
+ 6d17f9bde2f256cd5e9ecf05e02b9a909dcbb6d654b24edf4f0561b677c34d59      407 main/binary-amd64/Packages.gz
+ 2b14a609a8578b7edb7673125be916fd84e0251c825b598f1a0e25c9d2d98be4      539 main/binary-arm64/Packages
+ 2f155bdbccc68453bdc13c3ac5c420c737f9d378faa29bdeeda708d600af9859      409 main/binary-arm64/Packages.gz
+-----BEGIN PGP SIGNATURE-----
+
+iHUEARYKAB0WIQQJBPWUvieSBfGCZQ3WENBUk8WNNwUCaqHalwAKCRDWENBUk8WN
+N7tJAQC/FeX/qK/qko4XgIwiI379F9Fd4IAMhnsEe9EDYhfqPgD/WbwqobFJTi4X
+vbUFJy88RPNgfpcH/in1n6K7Zw2UtA0=
+=O//1
+-----END PGP SIGNATURE-----
