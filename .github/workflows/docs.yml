@@ -28,6 +28,18 @@ jobs:
           python-version: "3.12"
       - run: pip install mkdocs-material
       - run: mkdocs build --strict
+
+      - name: include APT repository
+        continue-on-error: true
+        run: |
+          git fetch origin apt-repo:apt-repo 2>/dev/null || exit 0
+          git worktree add /tmp/apt-repo apt-repo
+          mkdir -p site/apt
+          cp -r /tmp/apt-repo/pool /tmp/apt-repo/dists site/apt/
+          # Include the GPG public key if it was generated
+          [ -f /tmp/apt-repo/public.key ] && cp /tmp/apt-repo/public.key site/apt/
+          git worktree remove /tmp/apt-repo
+
       - if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v3
         with:

@@ -12,6 +12,9 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    outputs:
+      new_tag: ${{ steps.tag.outputs.new_tag }}
+      previous_tag: ${{ steps.tag.outputs.previous_tag }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -56,3 +59,101 @@ jobs:
           # `skip_upload` template in .goreleaser.yaml keeps the AUR publishers
           # from running instead of failing the release.
           AUR_KEY: ${{ secrets.AUR_KEY }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+  apt-repo:
+    needs: release
+    if: needs.release.outputs.new_tag != '' && needs.release.outputs.new_tag != needs.release.outputs.previous_tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: apt-repo
+          path: apt-repo
+        continue-on-error: true
+
+      - name: initialise apt-repo branch if missing
+        run: |
+          if [ ! -d apt-repo/.git ]; then
+            mkdir -p apt-repo
+            cd apt-repo
+            git init
+            git checkout -b apt-repo
+            git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+          fi
+
+      - name: download .deb files from the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p apt-repo/pool/main
+          gh release download "${{ needs.release.outputs.new_tag }}" \
+            --repo "${{ github.repository }}" \
+            --pattern "*.deb" \
+            --dir apt-repo/pool/main
+
+      - name: build APT metadata
+        run: |
+          cd apt-repo
+          mkdir -p dists/stable/main/binary-amd64
+          mkdir -p dists/stable/main/binary-arm64
+
+          # Packages index per arch
+          dpkg-scanpackages --arch amd64 pool/ > dists/stable/main/binary-amd64/Packages
+          dpkg-scanpackages --arch arm64 pool/ > dists/stable/main/binary-arm64/Packages
+          gzip -k -f dists/stable/main/binary-amd64/Packages
+          gzip -k -f dists/stable/main/binary-arm64/Packages
+
+          # Release file
+          cd dists/stable
+          printf '%s\n' \
+            "Origin: proton-drive-fs" \
+            "Label: proton-drive-fs" \
+            "Suite: stable" \
+            "Codename: stable" \
+            "Architectures: amd64 arm64" \
+            "Components: main" \
+            "Description: APT repository for proton-drive-fs" \
+            > Release
+
+          # Checksums
+          {
+            echo "SHA256:"
+            for f in main/binary-amd64/Packages main/binary-amd64/Packages.gz \
+                     main/binary-arm64/Packages main/binary-arm64/Packages.gz; do
+              if [ -f "$f" ]; then
+                size=$(wc -c < "$f")
+                hash=$(sha256sum "$f" | cut -d' ' -f1)
+                printf " %s %8d %s\n" "$hash" "$size" "$f"
+              fi
+            done
+          } >> Release
+
+      - name: sign Release with GPG
+        if: env.GPG_PRIVATE_KEY != ''
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          cd apt-repo/dists/stable
+          gpg --batch --yes --armor --detach-sign -o Release.gpg Release
+          gpg --batch --yes --armor --clearsign -o InRelease Release
+          gpg --batch --yes --armor --export > ../../public.key
+
+      - name: push to apt-repo branch
+        run: |
+          cd apt-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet && exit 0
+          git commit -m "Update APT repository for ${{ needs.release.outputs.new_tag }}"
+          git push origin apt-repo
+
+      - name: trigger docs deploy
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run docs.yml --repo "${{ github.repository }}"

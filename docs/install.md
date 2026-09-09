@@ -31,13 +31,34 @@ yay -S proton-drive-fs-git
 
 All three packages pull in `fuse3` as a dependency and enable the tray the same way as the native packages above.
 
+## Debian / Ubuntu (APT)
+
+Add the repository and install:
+
+```sh
+# Import the signing key (skip if the repo is unsigned)
+curl -fsSL https://khaosdoctor.github.io/proton-drive-linux-fs/apt/public.key | sudo gpg --dearmor -o /usr/share/keyrings/proton-drive-fs.gpg
+
+# Add the repository
+echo "deb [signed-by=/usr/share/keyrings/proton-drive-fs.gpg arch=$(dpkg --print-architecture)] https://khaosdoctor.github.io/proton-drive-linux-fs/apt stable main" | sudo tee /etc/apt/sources.list.d/proton-drive-fs.list
+
+# Install
+sudo apt update
+sudo apt install proton-drive-fs
+```
+
+If the repository is not yet signed (no `public.key` available), use `[trusted=yes]` instead of `[signed-by=...]`.
+
+## Homebrew
+
+```sh
+brew tap khaosdoctor/tap
+brew install proton-drive-fs
+```
+
 ## Native packages
 
-On another distro, download the native package and install locally.
-
-> Packages for those are coming
-
-`.deb`, `.rpm`, `.apk`, and Arch packages are attached to each [release](https://github.com/khaosdoctor/proton-drive-linux-fs/releases). Install one with the matching package manager, then enable the tray with `systemctl --user enable --now proton-drive-fs-tray`.
+`.deb`, `.rpm`, `.apk`, and Arch packages are also attached to each [release](https://github.com/khaosdoctor/proton-drive-linux-fs/releases). Install one with the matching package manager, then enable the tray with `systemctl --user enable --now proton-drive-fs-tray`.
 
 ## From a GitHub Release
 
