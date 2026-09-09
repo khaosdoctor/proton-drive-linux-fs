@@ -1,7 +1,8 @@
 FROM alpine:3.22
 
 RUN apk add --no-cache fuse3 ca-certificates
-COPY proton-drive-fs /usr/local/bin/
+ARG TARGETPLATFORM
+COPY ${TARGETPLATFORM}/proton-drive-fs /usr/local/bin/
 
 LABEL org.opencontainers.image.source="https://github.com/khaosdoctor/proton-drive-linux-fs"
 LABEL org.opencontainers.image.licenses="MIT"

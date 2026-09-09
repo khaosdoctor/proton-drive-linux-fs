@@ -70,20 +70,18 @@ checksum:
 source:
   enabled: true
 
-brews:
+homebrew_casks:
   - repository:
       owner: khaosdoctor
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     homepage: https://github.com/khaosdoctor/proton-drive-linux-fs
     description: FUSE virtual filesystem for Proton Drive on Linux.
-    license: MIT
+    binaries:
+      - proton-drive-fs
     dependencies:
-      - name: libfuse
-        type: build
+      - formula: libfuse
     skip_upload: '{{ if isEnvSet "HOMEBREW_TAP_TOKEN" }}auto{{ else }}true{{ end }}'
-    install: |
-      bin.install "proton-drive-fs"
 
 aurs:
   - name: proton-drive-fs-bin
@@ -166,33 +164,16 @@ aur_sources:
       install -Dm644 "${srcdir}/proton-drive-fs-tray.service" "${pkgdir}/usr/lib/systemd/user/proton-drive-fs-tray.service"
       install -Dm644 "./contrib/io.github.khaosdoctor.proton_drive_fs.metainfo.xml" "${pkgdir}/usr/share/metainfo/io.github.khaosdoctor.proton_drive_fs.metainfo.xml"
 
-dockers:
-  - image_templates:
-      - "ghcr.io/khaosdoctor/proton-drive-linux-fs:{{ .Version }}-amd64"
-      - "ghcr.io/khaosdoctor/proton-drive-linux-fs:latest-amd64"
-    use: buildx
+dockers_v2:
+  - images:
+      - "ghcr.io/khaosdoctor/proton-drive-linux-fs"
+    tags:
+      - "{{ .Version }}"
+      - latest
+    platforms:
+      - linux/amd64
+      - linux/arm64
     dockerfile: Dockerfile.goreleaser
-    goarch: amd64
-    build_flag_templates:
-      - "--platform=linux/amd64"
-  - image_templates:
-      - "ghcr.io/khaosdoctor/proton-drive-linux-fs:{{ .Version }}-arm64"
-      - "ghcr.io/khaosdoctor/proton-drive-linux-fs:latest-arm64"
-    use: buildx
-    dockerfile: Dockerfile.goreleaser
-    goarch: arm64
-    build_flag_templates:
-      - "--platform=linux/arm64"
-
-docker_manifests:
-  - name_template: "ghcr.io/khaosdoctor/proton-drive-linux-fs:{{ .Version }}"
-    image_templates:
-      - "ghcr.io/khaosdoctor/proton-drive-linux-fs:{{ .Version }}-amd64"
-      - "ghcr.io/khaosdoctor/proton-drive-linux-fs:{{ .Version }}-arm64"
-  - name_template: "ghcr.io/khaosdoctor/proton-drive-linux-fs:latest"
-    image_templates:
-      - "ghcr.io/khaosdoctor/proton-drive-linux-fs:latest-amd64"
-      - "ghcr.io/khaosdoctor/proton-drive-linux-fs:latest-arm64"
 
 changelog:
   use: github-native
