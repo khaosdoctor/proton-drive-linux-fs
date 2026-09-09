@@ -79,8 +79,7 @@ jobs:
           if [ ! -d apt-repo/.git ]; then
             mkdir -p apt-repo
             cd apt-repo
-            git init
-            git checkout -b apt-repo
+            git init -b apt-repo
             git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
           fi
 
