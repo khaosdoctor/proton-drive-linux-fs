@@ -9,14 +9,14 @@ Architectures: amd64 arm64
 Components: main
 Description: APT repository for proton-drive-fs
 SHA256:
- f540b72de744d0c94a5e136244ab3093b5a2b8cfd8542417a95a88499963cbc8      537 main/binary-amd64/Packages
- 32750549916e3283bf362ff19eff6f43824574317dd843c006ae9a9caa0d0a42      409 main/binary-amd64/Packages.gz
- d12094cc9d12ee2d8524fcb1987a1506c9eca3f37e5bd261a46a7c7e307c2060      537 main/binary-arm64/Packages
- e916d3fc8fb7ca71d96647d78d7d58481845ee60c107efcba3ef67836b0afef5      407 main/binary-arm64/Packages.gz
+ fa420fcee360a5a4703e2d39cc694640fecb8841761f2c9e13ef2acb9b445a9b      537 main/binary-amd64/Packages
+ 9ba925e73476c7cf6ec2976c18735192eca7538d33ed522f499d54da84081fa0      409 main/binary-amd64/Packages.gz
+ 901eaa07728d8ffe95ed3d387a898840c3506f7abe5727fcdff7352ab7b0ddf4      537 main/binary-arm64/Packages
+ 83dfaa2e07ea59afc0574c138ea0415246169c5749f0b86c5e0edeaea6444397      406 main/binary-arm64/Packages.gz
 -----BEGIN PGP SIGNATURE-----
 
-iHUEARYKAB0WIQQJBPWUvieSBfGCZQ3WENBUk8WNNwUCaqQ5hAAKCRDWENBUk8WN
-N1SFAPwMCbbMcMi+hm34Wahzfh0ST6w5vtMl99S3mmcbWzfWdwD+Oj5peI2nCQpW
-CZbTaddZLSzruEltws8cLGm2myW6AQw=
-=N2gl
+iHUEARYKAB0WIQQJBPWUvieSBfGCZQ3WENBUk8WNNwUCaqRCOgAKCRDWENBUk8WN
+N80hAP9hKSUstPOFcbHQF368/MwMf9jVgDjXKOLv2gdmyCCkYAD+PJ4zQ8oN/ihm
+OoBIJEbvCHrfV0dYyKLFy1HaZ16dnQw=
+=Zwh+
 -----END PGP SIGNATURE-----
