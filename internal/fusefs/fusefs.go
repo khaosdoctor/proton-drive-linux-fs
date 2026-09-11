@@ -858,6 +858,15 @@ func (d *dirNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOu
 	out.Ino = d.StableAttr().Ino
 	out.Uid = d.st.uid
 	out.Gid = d.st.gid
+	d.mu.Lock()
+	node := d.node
+	d.mu.Unlock()
+	if node != nil {
+		t := uint64(node.ModTime().Unix())
+		out.Mtime = t
+		out.Atime = t
+		out.Ctime = t
+	}
 	return 0
 }
 
@@ -1494,13 +1503,20 @@ func (d *dirNode) fillEntryOut(out *fuse.EntryOut, child *drive.Node) {
 
 	if child.IsDir() {
 		out.Mode = fuse.S_IFDIR | 0o755
+		t := uint64(child.ModTime().Unix())
+		out.Mtime = t
+		out.Atime = t
+		out.Ctime = t
 		return
 	}
 
 	child.ResolveAttrs()
 	out.Mode = fuse.S_IFREG | 0o644
 	out.Size = uint64(child.Size())
-	out.Mtime = uint64(child.ModTime().Unix())
+	t := uint64(child.ModTime().Unix())
+	out.Mtime = t
+	out.Atime = t
+	out.Ctime = t
 }
 
 // refreshNode updates an already-mounted inode's embedded drive.Node so its Getattr/Open see
@@ -1583,7 +1599,10 @@ func (f *fileNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.Attr
 		if size, ok := handle.tmpSize(); ok {
 			out.Size = uint64(size)
 			if node != nil {
-				out.Mtime = uint64(node.ModTime().Unix())
+				t := uint64(node.ModTime().Unix())
+				out.Mtime = t
+				out.Atime = t
+				out.Ctime = t
 			}
 			return 0
 		}
@@ -1598,7 +1617,10 @@ func (f *fileNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.Attr
 	node.ResolveAttrs()
 
 	out.Size = uint64(node.Size())
-	out.Mtime = uint64(node.ModTime().Unix())
+	t := uint64(node.ModTime().Unix())
+	out.Mtime = t
+	out.Atime = t
+	out.Ctime = t
 	return 0
 }
 
