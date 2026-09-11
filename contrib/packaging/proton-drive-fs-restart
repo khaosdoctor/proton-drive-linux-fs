@@ -1,0 +1,19 @@
+#!/bin/sh
+# Restart running proton-drive-fs systemd user services after a package upgrade.
+# Installed as an ALPM hook target; also called by postinstall.sh for deb/rpm.
+set -e
+
+for dir in /run/user/*/; do
+    [ -d "$dir" ] || continue
+    uid=$(basename "$dir")
+    user=$(id -nu "$uid" 2>/dev/null) || continue
+    export XDG_RUNTIME_DIR="$dir"
+    export DBUS_SESSION_BUS_ADDRESS="unix:path=${dir}bus"
+
+    su - "$user" -c 'systemctl --user daemon-reload' 2>/dev/null || true
+    for svc in proton-drive-fs proton-drive-fs-tray; do
+        su - "$user" -c "systemctl --user is-active --quiet $svc" 2>/dev/null &&
+            su - "$user" -c "systemctl --user restart $svc" 2>/dev/null &&
+            echo "Restarted $svc for $user"
+    done
+done

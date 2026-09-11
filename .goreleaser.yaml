@@ -60,6 +60,14 @@ nfpms:
       - src: LICENSE
         dst: /usr/share/licenses/proton-drive-fs/LICENSE
         type: doc
+      - src: contrib/packaging/proton-drive-fs-upgrade.hook
+        dst: /usr/share/libalpm/hooks/proton-drive-fs-upgrade.hook
+        packager: archlinux
+      - src: contrib/packaging/proton-drive-fs-restart
+        dst: /usr/share/libalpm/scripts/proton-drive-fs-restart
+        file_info:
+          mode: 0755
+        packager: archlinux
     scripts:
       postinstall: contrib/packaging/postinstall.sh
 
@@ -121,6 +129,8 @@ aurs:
       install -Dm644 "${srcdir}/proton-drive-fs.service" "${pkgdir}/usr/lib/systemd/user/proton-drive-fs.service"
       install -Dm644 "${srcdir}/proton-drive-fs-tray.service" "${pkgdir}/usr/lib/systemd/user/proton-drive-fs-tray.service"
       install -Dm644 "./contrib/io.github.khaosdoctor.proton_drive_fs.metainfo.xml" "${pkgdir}/usr/share/metainfo/io.github.khaosdoctor.proton_drive_fs.metainfo.xml"
+      install -Dm644 "./contrib/packaging/proton-drive-fs-upgrade.hook" "${pkgdir}/usr/share/libalpm/hooks/proton-drive-fs-upgrade.hook"
+      install -Dm755 "./contrib/packaging/proton-drive-fs-restart" "${pkgdir}/usr/share/libalpm/scripts/proton-drive-fs-restart"
 
 aur_sources:
   - name: proton-drive-fs
@@ -166,6 +176,8 @@ aur_sources:
       install -Dm644 "${srcdir}/proton-drive-fs.service" "${pkgdir}/usr/lib/systemd/user/proton-drive-fs.service"
       install -Dm644 "${srcdir}/proton-drive-fs-tray.service" "${pkgdir}/usr/lib/systemd/user/proton-drive-fs-tray.service"
       install -Dm644 "./contrib/io.github.khaosdoctor.proton_drive_fs.metainfo.xml" "${pkgdir}/usr/share/metainfo/io.github.khaosdoctor.proton_drive_fs.metainfo.xml"
+      install -Dm644 "./contrib/packaging/proton-drive-fs-upgrade.hook" "${pkgdir}/usr/share/libalpm/hooks/proton-drive-fs-upgrade.hook"
+      install -Dm755 "./contrib/packaging/proton-drive-fs-restart" "${pkgdir}/usr/share/libalpm/scripts/proton-drive-fs-restart"
 
 dockers_v2:
   - images:

@@ -1,0 +1,10 @@
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Path
+Target = usr/bin/proton-drive-fs
+
+[Action]
+Description = Restarting proton-drive-fs daemon...
+When = PostTransaction
+Exec = /usr/share/libalpm/scripts/proton-drive-fs-restart
