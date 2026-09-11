@@ -73,6 +73,11 @@ type Options struct {
 	// threshold. Empty allows every reader.
 	DenyReaders []string
 
+	// Registry, when set, maps file extensions to their freedesktop thumbnailer commands.
+	// The daemon runs these thumbnailers on downloaded files in the background, and blocks
+	// their processes from reading through FUSE. nil disables external thumbnailing.
+	Registry *thumbs.Registry
+
 	// MaxUploads caps how many files upload at once. <=0 uses the default.
 	MaxUploads int
 
@@ -169,6 +174,9 @@ func Mount(ctx context.Context, mountpoint string, c *drive.Client, root *drive.
 
 	if st.thumbs != nil {
 		go st.runThumbWorker(ctx)
+	}
+	if st.externalThumbJobs != nil {
+		go st.runExternalThumbWorker(ctx)
 	}
 
 	// A plain Unmount() fails while the mountpoint is busy (e.g. a shell still cd'd into it),
@@ -341,9 +349,12 @@ type mountState struct {
 	// directly; finishLoad falls back to context.Background() then.
 	ctx context.Context
 
-	thumbs      *thumbs.Store
-	thumbJobs   chan thumbJob
-	denyReaders []string
+	thumbs             *thumbs.Store
+	thumbJobs          chan thumbJob
+	registry           *thumbs.Registry
+	externalThumbJobs  chan externalThumbJob
+	denyReaders        []string
+	denyThumbnailers   []string
 
 	// uploads bounds how many files upload at once, so a bulk copy does not open one connection
 	// per file it was handed.
@@ -415,6 +426,7 @@ func newMountState(ctx context.Context, c *drive.Client, uid, gid uint32, opts O
 		opTimeout:     opts.OpTimeout,
 		metaTimeout:   opts.MetaTimeout,
 		thumbs:        opts.Thumbnails,
+		registry:      opts.Registry,
 		denyReaders:   opts.DenyReaders,
 		uploads:       newSem(opts.MaxUploads),
 		dirs:          make(map[string]*dirNode),
@@ -424,6 +436,10 @@ func newMountState(ctx context.Context, c *drive.Client, uid, gid uint32, opts O
 
 	if st.thumbs != nil {
 		st.thumbJobs = make(chan thumbJob, thumbQueueSize)
+	}
+	if st.registry != nil && st.thumbs != nil {
+		st.externalThumbJobs = make(chan externalThumbJob, externalThumbQueueSize)
+		st.denyThumbnailers = st.registry.ProcessNames()
 	}
 
 	return st

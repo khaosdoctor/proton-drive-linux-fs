@@ -418,12 +418,14 @@ func runMount(args []string) int {
 	client.SetMaxDownloads(*maxDownloads)
 
 	var thumbStore *thumbs.Store
+	var registry *thumbs.Registry
 	if *thumbnails && *thumbnailDir != "" {
 		thumbStore, err = thumbs.New(*thumbnailDir, mountpoint)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "error: resolving thumbnail directory:", err)
 			return 1
 		}
+		registry = thumbs.LoadRegistry()
 	}
 
 	fmt.Printf("mounting %s; unmount with: proton-drive-fs unmount %s\n", mountpoint, mountpoint)
@@ -437,6 +439,7 @@ func runMount(args []string) int {
 		OpTimeout:    *opTimeout,
 		Thumbnails:   thumbStore,
 		DenyReaders:  config.SplitDenyReaders(*denyReaders),
+		Registry:     registry,
 		MaxUploads:   *maxUploads,
 		OnAuthFailed: func() {
 			authRevoked.Store(true)

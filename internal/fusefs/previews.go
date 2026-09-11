@@ -2,12 +2,14 @@ package fusefs
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
 
@@ -18,10 +20,24 @@ import (
 // and drops the rest; the next listing after the TTL picks them up.
 const thumbQueueSize = 4096
 
+// externalThumbQueueSize bounds pending external thumbnailer jobs. Smaller than the Proton
+// thumbnail queue because each job downloads the full file.
+const externalThumbQueueSize = 256
+
+// externalThumbTimeout bounds the download + thumbnailer execution for one file.
+const externalThumbTimeout = 2 * time.Minute
+
 // thumbJob is one file whose Proton thumbnail should be fetched and cached.
 type thumbJob struct {
 	node    *drive.Node
 	relPath string
+}
+
+// externalThumbJob is a file that needs an external thumbnailer run on a downloaded copy.
+type externalThumbJob struct {
+	node    *drive.Node
+	relPath string
+	ext     string // file extension including dot
 }
 
 // thumbKey identifies a revision, so the same fetch is never queued twice.
@@ -69,6 +85,81 @@ func (st *mountState) thumbFailed(job thumbJob, err error) {
 	slog.Warn("thumbnail failed", "path", job.relPath, "err", err)
 }
 
+// runExternalThumbWorker downloads files and runs external thumbnailers on them. One goroutine
+// per mount; these are heavier than Proton thumbnail fetches (full file download + exec).
+func (st *mountState) runExternalThumbWorker(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case job := <-st.externalThumbJobs:
+			st.generateExternalThumb(ctx, job)
+		}
+	}
+}
+
+func (st *mountState) generateExternalThumb(ctx context.Context, job externalThumbJob) {
+	opCtx, cancel := context.WithTimeout(ctx, externalThumbTimeout)
+	defer cancel()
+
+	tmp, err := os.CreateTemp("", "proton-thumb-src-*"+job.ext)
+	if err != nil {
+		slog.Warn("external thumbnail: temp file failed", "path", job.relPath, "err", err)
+		return
+	}
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+	}()
+
+	file, err := st.client.OpenFile(opCtx, job.node, job.relPath)
+	if err != nil {
+		slog.Debug("external thumbnail: open failed", "path", job.relPath, "err", err)
+		return
+	}
+
+	buf := make([]byte, 256*1024)
+	var off int64
+	for {
+		n, readErr := file.ReadAt(opCtx, buf, off)
+		if n > 0 {
+			if _, werr := tmp.WriteAt(buf[:n], off); werr != nil {
+				_ = file.Close()
+				slog.Warn("external thumbnail: write failed", "path", job.relPath, "err", werr)
+				return
+			}
+			off += int64(n)
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			_ = file.Close()
+			slog.Debug("external thumbnail: download failed", "path", job.relPath, "err", readErr)
+			return
+		}
+	}
+	_ = file.Close()
+	_ = tmp.Close()
+
+	// ponytail: 256px = large thumbnail size from the freedesktop spec
+	img, err := st.registry.Generate(opCtx, job.ext, tmp.Name(), 256)
+	if err != nil {
+		slog.Debug("external thumbnail: generation failed", "path", job.relPath, "err", err)
+		return
+	}
+
+	if err := st.thumbs.Write(job.relPath, job.node.ModTime(), job.node.Size(), img); err != nil {
+		slog.Warn("external thumbnail: cache write failed", "path", job.relPath, "err", err)
+		return
+	}
+	slog.Debug("external thumbnail written", "path", job.relPath)
+
+	st.mu.Lock()
+	delete(st.thumbInflight, thumbKey(job.node))
+	st.mu.Unlock()
+}
+
 // queueThumbs fetches previews for the files in a fresh listing that are not already cached.
 // It runs off the FUSE handler goroutine because the freshness check reads the cache from disk.
 func (st *mountState) queueThumbs(dirPath string, children []*drive.Node) {
@@ -77,24 +168,44 @@ func (st *mountState) queueThumbs(dirPath string, children []*drive.Node) {
 	}
 
 	for _, ch := range children {
-		if !ch.HasThumbnail() {
-			continue
-		}
-
 		relPath := path.Join(dirPath, ch.Name)
 		if st.thumbs.Fresh(relPath, ch.ModTime()) {
 			continue
 		}
 
-		if !st.claimThumb(ch) {
+		if ch.HasThumbnail() {
+			if !st.claimThumb(ch) {
+				continue
+			}
+			select {
+			case st.thumbJobs <- thumbJob{node: ch, relPath: relPath}:
+			default:
+				st.releaseThumb(ch)
+				slog.Debug("thumbnail queue full, skipping", "path", relPath)
+			}
 			continue
 		}
 
+		// No Proton thumbnail; try an external thumbnailer if registered.
+		if st.registry == nil || st.externalThumbJobs == nil || ch.IsDir() {
+			continue
+		}
+		ext := filepath.Ext(ch.Name)
+		if st.registry.ForExt(ext) == "" {
+			continue
+		}
+		// ponytail: skip large files, not worth downloading just for a thumbnail
+		if limit := st.client.LargeFileLimit(); limit > 0 && ch.Size() > limit {
+			continue
+		}
+		if !st.claimThumb(ch) {
+			continue
+		}
 		select {
-		case st.thumbJobs <- thumbJob{node: ch, relPath: relPath}:
+		case st.externalThumbJobs <- externalThumbJob{node: ch, relPath: relPath, ext: ext}:
 		default:
 			st.releaseThumb(ch)
-			slog.Debug("thumbnail queue full, skipping", "path", relPath)
+			slog.Debug("external thumbnail queue full, skipping", "path", relPath)
 		}
 	}
 }
@@ -121,11 +232,15 @@ func (st *mountState) releaseThumb(n *drive.Node) {
 }
 
 // deniedReader reports whether an open of a file this size comes from a thumbnailer or indexer
-// on the denylist. Those walk every entry in a folder, and letting them read a large file turns
-// browsing into a download; the user's own applications are not on the list.
+// on the denylist. Thumbnailer processes are always blocked (the daemon generates thumbnails
+// itself); indexer processes are blocked only for files above the large-file threshold.
 func (st *mountState) deniedReader(ctx context.Context, size int64) (procName string, pid uint32, denied bool) {
-	limit := st.client.LargeFileLimit()
-	if limit <= 0 || size <= limit || len(st.denyReaders) == 0 {
+	sizeGated := false
+	if len(st.denyReaders) > 0 {
+		limit := st.client.LargeFileLimit()
+		sizeGated = limit > 0 && size > limit
+	}
+	if !sizeGated && len(st.denyThumbnailers) == 0 {
 		return "", 0, false
 	}
 
@@ -135,9 +250,16 @@ func (st *mountState) deniedReader(ctx context.Context, size int64) (procName st
 	}
 
 	for _, name := range callerNames(caller.Pid) {
-		for _, deny := range st.denyReaders {
+		for _, deny := range st.denyThumbnailers {
 			if nameMatches(deny, name) {
 				return name, caller.Pid, true
+			}
+		}
+		if sizeGated {
+			for _, deny := range st.denyReaders {
+				if nameMatches(deny, name) {
+					return name, caller.Pid, true
+				}
 			}
 		}
 	}
