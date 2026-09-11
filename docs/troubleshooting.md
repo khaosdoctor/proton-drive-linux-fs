@@ -93,6 +93,8 @@ flowchart TD
 
 ## Stale daemon after a rebuild
 
+Package upgrades (AUR, deb, rpm, apk) restart active services automatically, so this section applies only to source builds and manual installs.
+
 If an earlier unmount failed as busy, the old daemon can keep serving a mountpoint
 after you rebuild the binary. `mount` guards against this by refusing to attach to a
 mountpoint that is already mounted and prints the running daemon's pid and version. Check what is
@@ -158,7 +160,10 @@ this is convention, it _doesn't prevent it from happening_.
 
 ### The mount's own denylist
 
-The mount already refuses a read of a file above `-large-file` from a fixed list of thumbnailer and indexer process names set in the `-deny-readers` option (see [mount](usage.md#mount) for the current default list). This is done so a preview for a large file on the mount comes from Proton's own stored thumbnail instead of triggering a full download, otherwise the indexer would download the entire file list every time. Add a process name to `-deny-readers` to extend that list.
+The mount blocks processes in two tiers:
+
+- **Thumbnailer processes** (discovered from `.thumbnailer` files in `/usr/share/thumbnailers` and friends) are always blocked from reading through the mount, regardless of file size. The mount generates thumbnails itself by downloading the file and running the thumbnailer in-process, so letting them read through FUSE would be duplicate work and cause timeouts.
+- **Indexer processes** named in `-deny-readers` (see [mount](usage.md#mount) for the default list) are blocked from reading files above `-large-file`. Add a process name to `-deny-readers` to extend that list.
 
 If you prefer to deny that in the indexer itself, here's a non-exhaustive list.
 
@@ -187,7 +192,7 @@ If you prefer to deny that in the indexer itself, here's a non-exhaustive list.
   Excludes=~/mnt/protondrive
   ```
 
-  [The mount's own denylist](#the-mounts-own-denylist) already stops `tumblerd` from reading a large file on the mount, so it's only important if you _also_ want to skip small files.
+  The mount already blocks all thumbnailer processes (including `tumblerd`) from reading through FUSE and generates thumbnails itself, so this is only needed if you want to prevent `tumblerd` from even attempting to access the mount.
 
 - **`updatedb`/`mlocate`/`plocate`**: Add the mountpoint to `PRUNEPATHS`, or add
   `fuse.proton-drive-fs` to `PRUNEFS`, in `/etc/updatedb.conf`:

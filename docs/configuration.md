@@ -30,7 +30,7 @@ proton-drive-fs config show [-config path] [flags...]
 | `cache_dir` | `-cache-dir` | `$XDG_CACHE_HOME/proton-drive-fs` | Where downloaded file blocks and persisted directory listings are stored on disk. |
 | `cache_size` | `-cache-size` | `2GiB` | Total size the on-disk cache (blocks and listings together) may use; `"0"` disables both. |
 | `large_file` | `-large-file` | `300MiB` | Files larger than this bypass the on-disk block cache; `"0"` disables the threshold. |
-| `thumbnails` | `-thumbnails` | `true` | Write Proton's stored previews into the freedesktop thumbnail cache. |
+| `thumbnails` | `-thumbnails` | `true` | Write preview images into the freedesktop thumbnail cache (Proton's stored previews and system thumbnailers). |
 | `thumbnail_dir` | `-thumbnail-dir` | `$XDG_CACHE_HOME/thumbnails` | Freedesktop thumbnail cache directory. |
 | `deny_readers` | `-deny-readers` | see [Usage](usage.md#mount) | Process names refused a read of a file above `large_file`; empty allows all. |
 | `max_uploads` | `-max-uploads` | `5` | How many files upload at once. |

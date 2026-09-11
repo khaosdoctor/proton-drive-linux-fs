@@ -44,9 +44,9 @@ There is no default mountpoint. `<mountpoint>` is required unless the config fil
 | `-cache-dir` | `$XDG_CACHE_HOME/proton-drive-fs` (falls back to `~/.cache/proton-drive-fs`) | Where downloaded, decrypted file blocks (under `blocks/`) and persisted directory listings (under `listings/`) are stored on disk so they survive a remount. |
 | `-cache-size` | `2GiB` | Total size the on-disk cache is allowed to use, shared by blocks and persisted listings together. Accepts suffixes like `512MiB` or `2GiB`. A value of 0 or less disables the on-disk cache, both kinds. |
 | `-large-file` | `300MiB` | Files larger than this are still read lazily block by block, but their blocks are not stored in the on-disk cache, so one large file cannot evict everything else. 0 disables the threshold. |
-| `-thumbnails` | `true` | Write the preview image Proton stores for a file into the freedesktop thumbnail cache when a folder is listed. |
+| `-thumbnails` | `true` | Write preview images into the freedesktop thumbnail cache when a folder is listed. Uses Proton's stored previews when available, and discovers system thumbnailers (from `.thumbnailer` files) for file types Proton has no preview for. |
 | `-thumbnail-dir` | `$XDG_CACHE_HOME/thumbnails` (falls back to `~/.cache/thumbnails`) | The thumbnail cache directory to write into. This is the shared directory file managers read, not a directory of its own. |
-| `-deny-readers` | see below | Comma-separated process names refused a read of a file above `-large-file`. Passing a value replaces the default list; `-deny-readers ""` turns the refusal off. |
+| `-deny-readers` | see below | Comma-separated process names refused a read of a file above `-large-file`. Passing a value replaces the default list; `-deny-readers ""` turns the refusal off. Thumbnailer processes discovered from `.thumbnailer` files are always blocked regardless of this list or file size. |
 | `-max-uploads` | `5` | How many files upload at once. The rest wait in line instead of opening a connection each. 0 or less removes the cap. |
 | `-max-downloads` | `8` | How many file blocks download at once, across every open file. 0 or less removes the cap. |
 | `-foreground` | `false` | Stay attached to the terminal instead of detaching into the background; used by the systemd unit. |

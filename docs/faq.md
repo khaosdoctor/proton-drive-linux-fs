@@ -16,7 +16,7 @@ Your Proton password is never stored. What gets stored is the session Proton iss
 
 **Why did my file manager stop showing previews for a large file?**
 
-Files above `-large-file` (300MiB by default) are off-limits to thumbnailer and indexer processes listed in `-deny-readers`, so they can't force a full download just to generate a preview. An application you open the file with directly is not affected. See [How it works](how-it-works.md#reader-denylist).
+The mount generates thumbnails itself, so thumbnailer processes are always blocked from reading through the FUSE mount. For files below `-large-file` (300MiB by default), the mount downloads the file, runs the matching system thumbnailer, and writes the result into the freedesktop thumbnail cache. Files above that threshold only get a preview when Proton has a stored thumbnail for them. Indexer processes in `-deny-readers` are also blocked above `-large-file`. An application you open a file with directly is not affected. See [How it works](how-it-works.md#previews).
 
 **Does it work in Docker?**
 

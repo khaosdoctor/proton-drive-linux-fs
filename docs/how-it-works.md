@@ -152,8 +152,17 @@ Files larger than `-large-file` never write into `blocks/` at all. Their blocks 
 
 ## Previews
 
-Proton stores a small thumbnail next to each file it has one for. When a folder is listed, the mount downloads those thumbnails in the background and writes them into the freedesktop thumbnail cache, the shared directory file managers read to show previews without opening the files themselves.
+When a folder is listed, the mount writes preview images into the freedesktop thumbnail cache so file managers show thumbnails without opening the files themselves.
+
+Two sources of thumbnails are used, in order of preference:
+
+1. **Proton's stored previews.** Proton keeps a small thumbnail for common file types (images, PDFs, documents). The mount downloads these in the background and writes them into the cache.
+2. **System thumbnailers.** For file types Proton has no preview for, the mount discovers thumbnailer programs registered in `.thumbnailer` files under `/usr/share/thumbnailers`, `/usr/local/share/thumbnailers`, and `~/.local/share/thumbnailers` (the freedesktop thumbnailer spec). When a registered thumbnailer covers a file's MIME type, the mount downloads the file to a temp location, runs the thumbnailer on it, and writes the result into the cache. Files above `-large-file` are skipped.
+
+Because the mount generates thumbnails itself, thumbnailer processes are always blocked from reading through the FUSE mount regardless of file size. This prevents duplicate work and timeouts from thumbnailers trying to read remote files through FUSE.
 
 ## Reader denylist
 
-Some desktops run thumbnailers and search indexers that open every file in a folder to inspect it. On a network filesystem that means downloading a file's full content just to generate a preview or index it. The processes named in `-deny-readers` are refused a read of any file above `-large-file`. The open fails with a permission error and nothing downloads. Applications you open a file with directly are not on the list and are unaffected.
+Some desktops run search indexers that open every file in a folder to inspect it. On a network filesystem that means downloading a file's full content just to index it. The processes named in `-deny-readers` are refused a read of any file above `-large-file`. The open fails with a permission error and nothing downloads. Applications you open a file with directly are not on the list and are unaffected.
+
+Thumbnailer processes (discovered from `.thumbnailer` files) are always blocked, regardless of file size, since the mount handles thumbnail generation itself.
