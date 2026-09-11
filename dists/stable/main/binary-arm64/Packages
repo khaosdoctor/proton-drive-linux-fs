@@ -1,15 +1,15 @@
 Package: proton-drive-fs
-Version: 0.22.15
+Version: 0.23.0
 Architecture: arm64
 Maintainer: Lucas Santos <hello@lsantos.dev>
 Installed-Size: 14659
 Depends: fuse3
 Recommends: zenity
-Filename: pool/main/proton-drive-fs_0.22.15_arm64.deb
-Size: 5924272
-MD5sum: 3cfd54a0a1d44054a384748071419b36
-SHA1: 52959f909ec579dcd6bebb7b38979515335d6f06
-SHA256: dd6c732f2035d729e9de4f4802e859ad92464a46c614e0cb5afa43e263f848c9
+Filename: pool/main/proton-drive-fs_0.23.0_arm64.deb
+Size: 5936178
+MD5sum: 87e048112f760b6bb41f8b160e13a61e
+SHA1: 460f46ff8e82f0a084ae4bd0716a4c014f0ea275
+SHA256: 12fcb0c02436fe7159da082023a3d94837517e2e8eabe4fdd661c90bab056d59
 Priority: optional
 Homepage: https://github.com/khaosdoctor/proton-drive-linux-fs
 Description: FUSE virtual filesystem for Proton Drive on Linux.
