@@ -1411,6 +1411,16 @@ func (d *dirNode) Rename(ctx context.Context, name string, newParent fs.InodeEmb
 	opCtx, cancel := context.WithTimeout(ctx, d.st.metaTimeout)
 	defer cancel()
 
+	// POSIX rename() atomically replaces the destination when it exists. Proton's Move API does
+	// not, so trash the existing destination first.
+	if existing, err := newDir.findChild(ctx, newName); err == 0 && existing.Link.LinkID != target.Link.LinkID {
+		if trashErr := d.client.Trash(opCtx, newDir.node, existing); trashErr != nil {
+			slog.Error("trashing rename destination failed", "path", to, "err", trashErr)
+			return syscall.EIO
+		}
+		newDir.removeChild(newName)
+	}
+
 	moved, err := d.client.Move(opCtx, target, d.node, newDir.node, newName)
 	if err != nil {
 		if timedOut(opCtx) {
