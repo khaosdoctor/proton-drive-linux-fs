@@ -1403,6 +1403,9 @@ func (d *dirNode) Rename(ctx context.Context, name string, newParent fs.InodeEmb
 	}
 
 	target, errno := d.findChild(ctx, name)
+	if errno == syscall.ENOENT {
+		return d.renamePending(ctx, name, newDir, newName)
+	}
 	if errno != 0 {
 		return errno
 	}
@@ -1452,6 +1455,41 @@ func (d *dirNode) Rename(ctx context.Context, name string, newParent fs.InodeEmb
 
 	d.removeChild(name)
 	newDir.upsertChild(moved)
+
+	return 0
+}
+
+// renamePending handles rename when the source is a pending file (created via Create, not yet
+// uploaded to Proton). The file has a FUSE inode but no drive.Node in the children list.
+// We update the fileNode's name/parent so Release uploads to the final path, and if the
+// destination already exists we set fn.node so Upload creates a new revision instead of a
+// new file.
+func (d *dirNode) renamePending(ctx context.Context, name string, newDir *dirNode, newName string) syscall.Errno {
+	child := d.GetChild(name)
+	if child == nil {
+		return syscall.ENOENT
+	}
+	fn, ok := child.Operations().(*fileNode)
+	if !ok {
+		return syscall.ENOENT
+	}
+
+	from := path.Join(d.path, name)
+	to := path.Join(newDir.path, newName)
+	slog.Info("renaming pending file", "from", from, "to", to)
+
+	// If the destination exists, point the pending file at the existing drive.Node so Release
+	// uploads a new revision rather than creating a duplicate.
+	if existing, err := newDir.findChild(ctx, newName); err == 0 {
+		fn.mu.Lock()
+		fn.node = existing
+		fn.mu.Unlock()
+	}
+
+	fn.mu.Lock()
+	fn.name = newName
+	fn.parent = newDir
+	fn.mu.Unlock()
 
 	return 0
 }
