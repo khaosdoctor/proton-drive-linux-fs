@@ -2,6 +2,7 @@ package logx
 
 import (
 	"log/slog"
+	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -17,7 +18,8 @@ const journaldSocket = "/run/systemd/journal/socket"
 // Setup would pick it as the sink. Exported so main can decide whether the detached mount needs
 // a log-file fallback before it even starts the daemon.
 func JournaldAvailable() bool {
-	return statExists(journaldSocket)
+	_, err := os.Stat(journaldSocket)
+	return err == nil
 }
 
 // journaldSink writes records to the local systemd journal over its unix socket

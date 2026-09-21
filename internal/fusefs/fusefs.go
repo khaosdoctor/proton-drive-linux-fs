@@ -1950,9 +1950,7 @@ func (h *fileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.Rea
 
 	n, err := h.file.ReadAt(opCtx, dest, off)
 	if err != nil && err != io.EOF {
-		// A rate-limited read gives up (see drive.Client.waitOutRateLimit) rather than block a
-		// FUSE call for however long Proton's own backoff window runs; from the caller's
-		// perspective that is exactly what a deadline miss looks like.
+		// A rate-limited read maps to ETIMEDOUT, same as a deadline miss.
 		if timedOut(opCtx) || errors.Is(err, drive.ErrRateLimited) {
 			slog.Error("read timed out", "path", name, "timeout", st.opTimeout)
 			return nil, syscall.ETIMEDOUT

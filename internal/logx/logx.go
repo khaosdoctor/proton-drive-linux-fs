@@ -68,8 +68,3 @@ type textSink struct {
 func (s textSink) writeRecord(r slog.Record) error {
 	return s.h.Handle(context.Background(), r)
 }
-
-func statExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}

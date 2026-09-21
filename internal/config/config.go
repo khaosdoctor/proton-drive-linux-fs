@@ -90,7 +90,6 @@ var defaultDenyReaders = []string{
 // and the config file both start here so the two can never drift apart.
 func Defaults() Config {
 	return Config{
-		Mountpoint:   "",
 		TTL:          "30s",
 		Poll:         "10s",
 		OpTimeout:    "60s",

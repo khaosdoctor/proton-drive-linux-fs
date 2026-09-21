@@ -6,6 +6,7 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"html"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -155,14 +156,10 @@ func showHTML(text string) error {
 
 	path := filepath.Join(dir, "about.html")
 	html := "<!doctype html><meta charset=\"utf-8\"><title>About proton-drive-fs</title>" +
-		"<pre style=\"font-family:monospace;white-space:pre-wrap\">" + htmlEscape(text) + "</pre>"
+		"<pre style=\"font-family:monospace;white-space:pre-wrap\">" + html.EscapeString(text) + "</pre>"
 	if err := os.WriteFile(path, []byte(html), 0o600); err != nil {
 		return err
 	}
 
 	return exec.Command("xdg-open", path).Run()
-}
-
-func htmlEscape(s string) string {
-	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(s)
 }

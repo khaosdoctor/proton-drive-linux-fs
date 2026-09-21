@@ -56,12 +56,7 @@ type Client struct {
 	// downloads bounds concurrent block downloads; nil means unbounded.
 	downloads chan struct{}
 
-	// metaTimeout is the caller's patience deadline for blocking in waitOutRateLimit
-	// (see SetMetaTimeout, waitOutRateLimit).
 	metaTimeout time.Duration
-
-	// rateLimit is the shared "stop calling for a while" window every API call site funnels its
-	// errors through and checks before issuing a new request (see noteAPIError, RateLimited).
 	rateLimit rateLimit
 }
 

@@ -426,15 +426,6 @@ func blockManifest(hashes [][]byte) []byte {
 	return out
 }
 
-// blockCount returns how many blockSize chunks a file of size bytes splits into. A zero or
-// negative size has zero blocks, matching uploadBlocks never emitting a block for an empty read.
-func blockCount(size int64) int {
-	if size <= 0 {
-		return 0
-	}
-	return int((size + blockSize - 1) / blockSize)
-}
-
 // mimeTypeFor guesses a MIME type from name's extension, falling back to a generic binary type.
 func mimeTypeFor(name string) string {
 	if t := mime.TypeByExtension(path.Ext(name)); t != "" {
