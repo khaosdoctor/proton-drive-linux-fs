@@ -49,7 +49,7 @@ func TestParseLogLevel(t *testing.T) {
 	}
 }
 
-func TestSplitDenyReaders(t *testing.T) {
+func TestSplitComma(t *testing.T) {
 	tests := []struct {
 		in   string
 		want []string
@@ -61,8 +61,8 @@ func TestSplitDenyReaders(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		if got := config.SplitDenyReaders(tt.in); !slices.Equal(got, tt.want) {
-			t.Errorf("SplitDenyReaders(%q) = %v, want %v", tt.in, got, tt.want)
+		if got := config.SplitComma(tt.in); !slices.Equal(got, tt.want) {
+			t.Errorf("SplitComma(%q) = %v, want %v", tt.in, got, tt.want)
 		}
 	}
 }

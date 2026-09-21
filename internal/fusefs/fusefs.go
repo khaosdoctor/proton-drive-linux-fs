@@ -11,6 +11,7 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -72,6 +73,10 @@ type Options struct {
 	// DenyReaders are process names refused a read of a file above the client's large-file
 	// threshold. Empty allows every reader.
 	DenyReaders []string
+
+	// Exclude are filename patterns hidden from listings and rejected on create. Each entry
+	// is a filepath.Match glob, or a regexp if prefixed with "re:".
+	Exclude []string
 
 	// Registry, when set, maps file extensions to their freedesktop thumbnailer commands.
 	// The daemon runs these thumbnailers on downloaded files in the background, and blocks
@@ -355,6 +360,7 @@ type mountState struct {
 	externalThumbJobs  chan externalThumbJob
 	denyReaders        []string
 	denyThumbnailers   []string
+	excludes []func(string) bool
 
 	// uploads bounds how many files upload at once, so a bulk copy does not open one connection
 	// per file it was handed.
@@ -428,6 +434,7 @@ func newMountState(ctx context.Context, c *drive.Client, uid, gid uint32, opts O
 		thumbs:        opts.Thumbnails,
 		registry:      opts.Registry,
 		denyReaders:   opts.DenyReaders,
+		excludes: parseExcludes(opts.Exclude),
 		uploads:       newSem(opts.MaxUploads),
 		dirs:          make(map[string]*dirNode),
 		parentOf:      make(map[string]string),
@@ -446,6 +453,36 @@ func newMountState(ctx context.Context, c *drive.Client, uid, gid uint32, opts O
 }
 
 // sem is a counting semaphore. A buffered channel is the whole implementation; a nil sem lets
+func parseExcludes(patterns []string) []func(string) bool {
+	var matchers []func(string) bool
+	for _, p := range patterns {
+		if strings.HasPrefix(p, "re:") {
+			re, err := regexp.Compile(p[3:])
+			if err != nil {
+				slog.Warn("invalid exclude regex, skipping", "pattern", p[3:], "err", err)
+				continue
+			}
+			matchers = append(matchers, re.MatchString)
+			continue
+		}
+		glob := p
+		matchers = append(matchers, func(name string) bool {
+			matched, _ := filepath.Match(glob, name)
+			return matched
+		})
+	}
+	return matchers
+}
+
+func (st *mountState) excluded(name string) bool {
+	for _, match := range st.excludes {
+		if match(name) {
+			return true
+		}
+	}
+	return false
+}
+
 // everything through.
 type sem chan struct{}
 
@@ -1257,6 +1294,10 @@ func removeNode(children []*drive.Node, name string) (*drive.Node, []*drive.Node
 }
 
 func (d *dirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	if d.st.excluded(name) {
+		return nil, syscall.ENOENT
+	}
+
 	children, errno := d.load(ctx)
 	if errno != 0 {
 		return nil, errno
@@ -1329,6 +1370,10 @@ func (d *dirNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse
 // (node == nil) for it; the file isn't created on the drive until Release uploads it.
 // ponytail: whole-file temp buffer; block-level partial writes later if needed
 func (d *dirNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
+	if d.st.excluded(name) {
+		return nil, nil, 0, syscall.EPERM
+	}
+
 	tmp, err := os.CreateTemp("", "proton-drive-fs-*")
 	if err != nil {
 		slog.Error("creating temp file failed", "path", path.Join(d.path, name), "err", err)
@@ -1403,6 +1448,9 @@ func (d *dirNode) Rename(ctx context.Context, name string, newParent fs.InodeEmb
 	}
 
 	target, errno := d.findChild(ctx, name)
+	if errno == syscall.ENOENT {
+		return d.renamePending(ctx, name, newDir, newName)
+	}
 	if errno != 0 {
 		return errno
 	}
@@ -1456,6 +1504,36 @@ func (d *dirNode) Rename(ctx context.Context, name string, newParent fs.InodeEmb
 	return 0
 }
 
+// renamePending handles rename when the source is a pending file (created via Create, not yet
+// uploaded to Proton). The file has a FUSE inode but no drive.Node in the children list.
+// We update the fileNode's name/parent so Release uploads to the final path, and if the
+// destination already exists we set fn.node so Upload creates a new revision instead of a
+// new file.
+func (d *dirNode) renamePending(ctx context.Context, name string, newDir *dirNode, newName string) syscall.Errno {
+	child := d.GetChild(name)
+	if child == nil {
+		return syscall.ENOENT
+	}
+	fn, ok := child.Operations().(*fileNode)
+	if !ok {
+		return syscall.ENOENT
+	}
+
+	slog.Info("renaming pending file", "from", path.Join(d.path, name), "to", path.Join(newDir.path, newName))
+
+	existing, _ := newDir.findChild(ctx, newName)
+
+	fn.mu.Lock()
+	fn.name = newName
+	fn.parent = newDir
+	if existing != nil {
+		fn.node = existing
+	}
+	fn.mu.Unlock()
+
+	return 0
+}
+
 func (d *dirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	children, errno := d.load(ctx)
 	if errno != 0 {
@@ -1464,6 +1542,10 @@ func (d *dirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 
 	entries := make([]fuse.DirEntry, 0, len(children))
 	for _, child := range children {
+		if d.st.excluded(child.Name) {
+			continue
+		}
+
 		mode := uint32(fuse.S_IFREG)
 		if child.IsDir() {
 			mode = fuse.S_IFDIR

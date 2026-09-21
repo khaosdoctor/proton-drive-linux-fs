@@ -304,6 +304,7 @@ func runMount(args []string) int {
 	ttl, poll, opTimeout := mf.ttl, mf.poll, mf.opTimeout
 	cacheDir, cacheSize, largeFile := mf.cacheDir, mf.cacheSize, mf.largeFile
 	thumbnails, thumbnailDir, denyReaders := mf.thumbnails, mf.thumbnailDir, mf.denyReaders
+	exclude := mf.exclude
 	maxUploads, maxDownloads := mf.maxUploads, mf.maxDownloads
 	foreground, logLevel, logStderr := mf.foreground, mf.logLevel, mf.logStderr
 
@@ -319,7 +320,7 @@ func runMount(args []string) int {
 	}
 	mountpoint, err := resolveMountpoint(arg, cfg)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs mount [<mountpoint>] [-config path] [-debug] [-ttl 30s] [-poll 10s] [-op-timeout 60s] [-cache-dir path] [-cache-size 2GiB] [-large-file 300MiB] [-thumbnails] [-thumbnail-dir path] [-deny-readers names] [-max-uploads 5] [-max-downloads 8] [-foreground] [-log-level info] [-log-stderr]  (required unless mountpoint is set in the config file)")
+		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs mount [<mountpoint>] [-config path] [-debug] [-ttl 30s] [-poll 10s] [-op-timeout 60s] [-cache-dir path] [-cache-size 2GiB] [-large-file 300MiB] [-thumbnails] [-thumbnail-dir path] [-deny-readers names] [-exclude patterns] [-max-uploads 5] [-max-downloads 8] [-foreground] [-log-level info] [-log-stderr]  (required unless mountpoint is set in the config file)")
 		fmt.Fprintln(os.Stderr, noMountpointError(configPath))
 		return 2
 	}
@@ -454,7 +455,8 @@ func runMount(args []string) int {
 		PollInterval: *poll,
 		OpTimeout:    *opTimeout,
 		Thumbnails:   thumbStore,
-		DenyReaders:  config.SplitDenyReaders(*denyReaders),
+		DenyReaders:  config.SplitComma(*denyReaders),
+		Exclude:      config.SplitComma(*exclude),
 		Registry:     registry,
 		MaxUploads:   *maxUploads,
 		OnAuthFailed: func() {

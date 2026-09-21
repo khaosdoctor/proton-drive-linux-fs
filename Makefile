@@ -36,12 +36,9 @@ install: build
 	install -Dm644 contrib/icons/proton-drive-fs.png $(PREFIX)/share/icons/hicolor/64x64/apps/proton-drive-fs.png
 	mkdir -p bin/systemd
 	sed "s|@BINDIR@|$(PREFIX)/bin|g" contrib/systemd/proton-drive-fs.service > bin/systemd/proton-drive-fs.service
-	sed "s|@BINDIR@|$(PREFIX)/bin|g" contrib/systemd/proton-drive-fs-tray.service > bin/systemd/proton-drive-fs-tray.service
 	install -Dm644 bin/systemd/proton-drive-fs.service $(HOME)/.config/systemd/user/proton-drive-fs.service
-	install -Dm644 bin/systemd/proton-drive-fs-tray.service $(HOME)/.config/systemd/user/proton-drive-fs-tray.service
 	@systemctl --user daemon-reload 2>/dev/null || true
 	@echo "Installed. To enable:"
-	@echo "  systemctl --user enable --now proton-drive-fs-tray"
 	@echo "  systemctl --user enable --now proton-drive-fs"
 
 uninstall:
@@ -49,7 +46,6 @@ uninstall:
 	@rm -f $(PREFIX)/share/applications/proton-drive-fs.desktop
 	@rm -f $(PREFIX)/share/icons/hicolor/64x64/apps/proton-drive-fs.png
 	@rm -f $(HOME)/.config/systemd/user/proton-drive-fs.service
-	@rm -f $(HOME)/.config/systemd/user/proton-drive-fs-tray.service
 	@systemctl --user daemon-reload 2>/dev/null || true
 
 clean:

@@ -88,6 +88,7 @@ type mountConfigFlags struct {
 	thumbnails               *bool
 	thumbnailDir             *string
 	denyReaders              *string
+	exclude                  *string
 	maxUploads, maxDownloads *int
 	foreground               *bool
 	logLevel                 *string
@@ -137,6 +138,7 @@ func registerMountConfigFlags(fs *flag.FlagSet, cfg config.Config) (*mountConfig
 		thumbnails:   fs.Bool("thumbnails", cfg.Thumbnails, "write Proton's stored previews into the freedesktop thumbnail cache"),
 		thumbnailDir: fs.String("thumbnail-dir", cfg.ThumbnailDir, "freedesktop thumbnail cache directory"),
 		denyReaders:  fs.String("deny-readers", strings.Join(cfg.DenyReaders, ","), "comma-separated process names refused a read of a file above -large-file; empty allows all"),
+		exclude:      fs.String("exclude", strings.Join(cfg.Exclude, ","), "comma-separated filename patterns to hide and reject; prefix with re: for regexp, otherwise glob"),
 		maxUploads:   fs.Int("max-uploads", cfg.MaxUploads, "how many files upload at once; the rest wait in line"),
 		maxDownloads: fs.Int("max-downloads", cfg.MaxDownloads, "how many file blocks download at once"),
 		foreground:   fs.Bool("foreground", cfg.Foreground, "stay attached to the terminal instead of detaching into the background; used by the systemd unit"),
@@ -259,6 +261,7 @@ func printConfig(cfg config.Config, explicit map[string]bool) {
 	line("thumbnails", strconv.FormatBool(cfg.Thumbnails))
 	line("thumbnail_dir", strconv.Quote(cfg.ThumbnailDir))
 	line("deny_readers", config.QuoteArray(cfg.DenyReaders))
+	line("exclude", config.QuoteArray(cfg.Exclude))
 	line("max_uploads", strconv.Itoa(cfg.MaxUploads))
 	line("max_downloads", strconv.Itoa(cfg.MaxDownloads))
 	line("log_level", strconv.Quote(cfg.LogLevel))

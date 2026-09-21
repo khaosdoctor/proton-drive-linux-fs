@@ -31,6 +31,7 @@ type Config struct {
 	Thumbnails   bool     `toml:"thumbnails"`
 	ThumbnailDir string   `toml:"thumbnail_dir"`
 	DenyReaders  []string `toml:"deny_readers"`
+	Exclude      []string `toml:"exclude"`
 	MaxUploads   int      `toml:"max_uploads"`
 	MaxDownloads int      `toml:"max_downloads"`
 	LogLevel     string   `toml:"log_level"`
