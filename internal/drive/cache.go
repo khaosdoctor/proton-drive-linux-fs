@@ -133,6 +133,24 @@ func (c *BlockCache) Get(linkID, revID string, index int) ([]byte, bool) {
 	return data, true
 }
 
+func writeTemp(dir, pattern string, data []byte) (string, error) {
+	tmp, err := os.CreateTemp(dir, pattern)
+	if err != nil {
+		return "", err
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return "", err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", err
+	}
+	return tmpPath, nil
+}
+
 // Put writes a decrypted block to disk, then evicts the least recently used entries if the
 // cache is now over its byte limit.
 func (c *BlockCache) Put(linkID, revID string, index int, data []byte) {
@@ -145,19 +163,8 @@ func (c *BlockCache) Put(linkID, revID string, index int, data []byte) {
 		return
 	}
 
-	tmp, err := os.CreateTemp(dir, "block-*.tmp")
+	tmpPath, err := writeTemp(dir, "block-*.tmp", data)
 	if err != nil {
-		return
-	}
-	tmpPath := tmp.Name()
-
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmpPath)
-		return
-	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpPath)
 		return
 	}
 
@@ -233,19 +240,8 @@ func (c *BlockCache) PutListing(linkID string, entries []ListingEntry) {
 		return
 	}
 
-	tmp, err := os.CreateTemp(dir, "listing-*.tmp")
+	tmpPath, err := writeTemp(dir, "listing-*.tmp", data)
 	if err != nil {
-		return
-	}
-	tmpPath := tmp.Name()
-
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmpPath)
-		return
-	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpPath)
 		return
 	}
 	// Listing files hold decrypted names; keep them readable only by the owner, same as the

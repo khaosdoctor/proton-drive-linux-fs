@@ -133,20 +133,18 @@ func fit(src image.Image, max int) image.Image {
 		w = w * max / h
 		h = max
 	}
-	w = atLeastOne(w)
-	h = atLeastOne(h)
+	if w < 1 {
+		w = 1
+	}
+	if h < 1 {
+		h = 1
+	}
 
 	dst := image.NewRGBA(image.Rect(0, 0, w, h))
 	draw.CatmullRom.Scale(dst, dst.Bounds(), src, b, draw.Src, nil)
 	return dst
 }
 
-func atLeastOne(n int) int {
-	if n < 1 {
-		return 1
-	}
-	return n
-}
 
 // encodePNG encodes img and inserts the given tEXt chunks before IEND.
 func encodePNG(img image.Image, text [][2]string) ([]byte, error) {

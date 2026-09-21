@@ -949,35 +949,24 @@ func decideStale(hasCached, refreshFailed, rateLimited bool) staleDecision {
 	return failRefresh
 }
 
-// warnOncePerMinute logs at warn, at most once per minute per directory, guarding the paths that
-// would otherwise fire on every failed refresh or every FUSE call while a directory stays
-// unhealthy.
-func (d *dirNode) warnOncePerMinute(msg string, args ...any) {
+func (d *dirNode) logOncePerMinute(fn func(string, ...any), msg string, args ...any) {
 	now := time.Now()
 	last := d.lastWarnedAt.Load()
 	if last != 0 && now.Sub(time.Unix(0, last)) < time.Minute {
 		return
 	}
 	if !d.lastWarnedAt.CompareAndSwap(last, now.UnixNano()) {
-		return // another goroutine just logged it
+		return
 	}
-	slog.Warn(msg, args...)
+	fn(msg, args...)
 }
 
-// errorOncePerMinute logs at error, at most once per minute per directory, guarding the paths that
-// would otherwise fire on every failed refresh or every FUSE call while a directory stays
-// unhealthy. It shares the same lastWarnedAt field as warnOncePerMinute so one message per
-// directory per minute is emitted across both helpers.
+func (d *dirNode) warnOncePerMinute(msg string, args ...any) {
+	d.logOncePerMinute(slog.Warn, msg, args...)
+}
+
 func (d *dirNode) errorOncePerMinute(msg string, args ...any) {
-	now := time.Now()
-	last := d.lastWarnedAt.Load()
-	if last != 0 && now.Sub(time.Unix(0, last)) < time.Minute {
-		return
-	}
-	if !d.lastWarnedAt.CompareAndSwap(last, now.UnixNano()) {
-		return // another goroutine just logged it
-	}
-	slog.Error(msg, args...)
+	d.logOncePerMinute(slog.Error, msg, args...)
 }
 
 // load returns the cached children, refetching them once ttl has elapsed. The fetch itself runs

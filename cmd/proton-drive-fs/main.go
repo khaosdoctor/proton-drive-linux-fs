@@ -596,10 +596,7 @@ func mountDetached(args []string, mountpoint string) int {
 	exited := make(chan error, 1)
 	go func() { exited <- cmd.Wait() }()
 
-	absMountpoint, err := filepath.Abs(mountpoint)
-	if err != nil {
-		absMountpoint = mountpoint
-	}
+	absMountpoint := absOrSelf(mountpoint)
 
 	deadline := time.Now().Add(30 * time.Second)
 	for {
@@ -740,24 +737,16 @@ func runUnmount(args []string) int {
 		return runUnmountForce(mountpoint)
 	}
 
-	out, err := tryUnmount(mountpoint)
-	if err == nil {
-		fmt.Printf("unmounted %s\n", mountpoint)
-		return 0
-	}
-	if notMounted(out) {
-		return 0
-	}
-	if !isBusy(out, err) {
-		printUnmountError(out, err)
-		return 1
-	}
-
 	deadline := time.Now().Add(*wait)
-	for time.Now().Before(deadline) {
-		time.Sleep(500 * time.Millisecond)
+	for first := true; ; first = false {
+		if !first {
+			if !time.Now().Before(deadline) {
+				return unmountLazyWithHolders(mountpoint)
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
 
-		out, err = tryUnmount(mountpoint)
+		out, err := tryUnmount(mountpoint)
 		if err == nil {
 			fmt.Printf("unmounted %s\n", mountpoint)
 			return 0
@@ -770,8 +759,6 @@ func runUnmount(args []string) int {
 			return 1
 		}
 	}
-
-	return unmountLazyWithHolders(mountpoint)
 }
 
 // tryUnmount runs a plain fusermount unmount once and returns its combined output alongside the
@@ -834,10 +821,7 @@ type holder struct {
 // descriptor resolves under mountpoint. It only sees processes the caller can read /proc/<pid>
 // links for, which the kernel already restricts to the caller's own processes.
 func mountHolders(procRoot, mountpoint string) []holder {
-	absMountpoint, err := filepath.Abs(mountpoint)
-	if err != nil {
-		absMountpoint = mountpoint
-	}
+	absMountpoint := absOrSelf(mountpoint)
 	// A plain prefix match would also catch a sibling like /home/u/ProtonDrive2, so require the
 	// match to be the mountpoint itself or to fall under it separated by "/".
 	prefix := absMountpoint + string(filepath.Separator)
@@ -925,10 +909,7 @@ func runUnmountForce(mountpoint string) int {
 	fmt.Printf("processes holding %s:\n", mountpoint)
 	printHolders(mountHolders(procRoot, mountpoint))
 
-	absMountpoint, err := filepath.Abs(mountpoint)
-	if err != nil {
-		absMountpoint = mountpoint
-	}
+	absMountpoint := absOrSelf(mountpoint)
 
 	mountinfo, err := os.ReadFile("/proc/self/mountinfo")
 	if err != nil {

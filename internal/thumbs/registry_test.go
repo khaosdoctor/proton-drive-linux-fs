@@ -14,7 +14,7 @@ func TestLoadRegistryParsesThumbnailerFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := &Registry{byMIME: make(map[string]thumbExec)}
+	r := &Registry{byMIME: make(map[string]string)}
 	r.loadDir(dir)
 
 	for _, mt := range []string{"text/x-test", "application/x-test"} {
@@ -31,7 +31,7 @@ func TestRegistrySkipsMissingTryExec(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := &Registry{byMIME: make(map[string]thumbExec)}
+	r := &Registry{byMIME: make(map[string]string)}
 	r.loadDir(dir)
 
 	if len(r.byMIME) != 0 {
@@ -40,10 +40,10 @@ func TestRegistrySkipsMissingTryExec(t *testing.T) {
 }
 
 func TestProcessNames(t *testing.T) {
-	r := &Registry{byMIME: map[string]thumbExec{
-		"text/x-scad":        {exec: "/usr/local/bin/scad-thumbnailer-script %i %s %o"},
-		"application/x-scad": {exec: "/usr/local/bin/scad-thumbnailer-script %i %s %o"},
-		"model/stl":          {exec: "/usr/local/bin/stl-thumbnailer-script %i %s %o"},
+	r := &Registry{byMIME: map[string]string{
+		"text/x-scad":        "/usr/local/bin/scad-thumbnailer-script %i %s %o",
+		"application/x-scad": "/usr/local/bin/scad-thumbnailer-script %i %s %o",
+		"model/stl":          "/usr/local/bin/stl-thumbnailer-script %i %s %o",
 	}}
 
 	names := r.ProcessNames()
