@@ -145,7 +145,6 @@ func fit(src image.Image, max int) image.Image {
 	return dst
 }
 
-
 // encodePNG encodes img and inserts the given tEXt chunks before IEND.
 func encodePNG(img image.Image, text [][2]string) ([]byte, error) {
 	var buf bytes.Buffer

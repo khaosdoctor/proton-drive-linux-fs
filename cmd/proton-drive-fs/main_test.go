@@ -92,20 +92,8 @@ func TestDetachedArgs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := detachedArgs(tt.in)
-
-			if len(got) != len(tt.want) {
-				t.Fatalf("want len %d, got len %d", len(tt.want), len(got))
-			}
-
-			for i, v := range got {
-				if v != tt.want[i] {
-					t.Errorf("index %d: want %q, got %q", i, tt.want[i], v)
-				}
-			}
-
-			if len(got) >= 2 && got[1] != "-foreground" {
-				t.Errorf("want -foreground at index 1, got %q", got[1])
+			if got := detachedArgs(tt.in); !slices.Equal(got, tt.want) {
+				t.Errorf("got %v, want %v", got, tt.want)
 			}
 		})
 	}

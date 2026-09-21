@@ -155,9 +155,9 @@ func showHTML(text string) error {
 	}
 
 	path := filepath.Join(dir, "about.html")
-	html := "<!doctype html><meta charset=\"utf-8\"><title>About proton-drive-fs</title>" +
+	page := "<!doctype html><meta charset=\"utf-8\"><title>About proton-drive-fs</title>" +
 		"<pre style=\"font-family:monospace;white-space:pre-wrap\">" + html.EscapeString(text) + "</pre>"
-	if err := os.WriteFile(path, []byte(html), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(page), 0o600); err != nil {
 		return err
 	}
 
