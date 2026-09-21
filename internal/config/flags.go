@@ -28,7 +28,7 @@ var fields = []field{
 	{"large-file", "large_file", func(cfg *Config, v any) { cfg.LargeFile = v.(string) }},
 	{"thumbnails", "thumbnails", func(cfg *Config, v any) { cfg.Thumbnails = v.(bool) }},
 	{"thumbnail-dir", "thumbnail_dir", func(cfg *Config, v any) { cfg.ThumbnailDir = v.(string) }},
-	{"deny-readers", "deny_readers", func(cfg *Config, v any) { cfg.DenyReaders = SplitDenyReaders(v.(string)) }},
+	{"deny-readers", "deny_readers", func(cfg *Config, v any) { cfg.DenyReaders = SplitComma(v.(string)) }},
 	{"max-uploads", "max_uploads", func(cfg *Config, v any) { cfg.MaxUploads = v.(int) }},
 	{"max-downloads", "max_downloads", func(cfg *Config, v any) { cfg.MaxDownloads = v.(int) }},
 	{"foreground", "foreground", func(cfg *Config, v any) { cfg.Foreground = v.(bool) }},
@@ -49,9 +49,6 @@ func SplitComma(s string) []string {
 	}
 	return out
 }
-
-// SplitDenyReaders splits a comma-separated -deny-readers value, dropping blank entries.
-func SplitDenyReaders(s string) []string { return SplitComma(s) }
 
 // ApplyFlags overlays cfg with every flag in fs that was explicitly set on the command line,
 // detected via fs.Visit. A flag left at its default is not touched here: every caller in

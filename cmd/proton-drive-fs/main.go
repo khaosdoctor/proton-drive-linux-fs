@@ -455,7 +455,7 @@ func runMount(args []string) int {
 		PollInterval: *poll,
 		OpTimeout:    *opTimeout,
 		Thumbnails:   thumbStore,
-		DenyReaders:  config.SplitDenyReaders(*denyReaders),
+		DenyReaders:  config.SplitComma(*denyReaders),
 		Exclude:      config.SplitComma(*exclude),
 		Registry:     registry,
 		MaxUploads:   *maxUploads,

@@ -360,8 +360,7 @@ type mountState struct {
 	externalThumbJobs  chan externalThumbJob
 	denyReaders        []string
 	denyThumbnailers   []string
-	excludeGlobs       []string
-	excludeRegexps     []*regexp.Regexp
+	excludes []func(string) bool
 
 	// uploads bounds how many files upload at once, so a bulk copy does not open one connection
 	// per file it was handed.
@@ -435,8 +434,7 @@ func newMountState(ctx context.Context, c *drive.Client, uid, gid uint32, opts O
 		thumbs:        opts.Thumbnails,
 		registry:      opts.Registry,
 		denyReaders:   opts.DenyReaders,
-		excludeGlobs:  parseExcludeGlobs(opts.Exclude),
-		excludeRegexps: parseExcludeRegexps(opts.Exclude),
+		excludes: parseExcludes(opts.Exclude),
 		uploads:       newSem(opts.MaxUploads),
 		dirs:          make(map[string]*dirNode),
 		parentOf:      make(map[string]string),
@@ -455,38 +453,30 @@ func newMountState(ctx context.Context, c *drive.Client, uid, gid uint32, opts O
 }
 
 // sem is a counting semaphore. A buffered channel is the whole implementation; a nil sem lets
-func parseExcludeGlobs(patterns []string) []string {
-	var globs []string
-	for _, p := range patterns {
-		if !strings.HasPrefix(p, "re:") {
-			globs = append(globs, p)
-		}
-	}
-	return globs
-}
-
-func parseExcludeRegexps(patterns []string) []*regexp.Regexp {
-	var regexps []*regexp.Regexp
+func parseExcludes(patterns []string) []func(string) bool {
+	var matchers []func(string) bool
 	for _, p := range patterns {
 		if strings.HasPrefix(p, "re:") {
-			if re, err := regexp.Compile(p[3:]); err == nil {
-				regexps = append(regexps, re)
-			} else {
+			re, err := regexp.Compile(p[3:])
+			if err != nil {
 				slog.Warn("invalid exclude regex, skipping", "pattern", p[3:], "err", err)
+				continue
 			}
+			matchers = append(matchers, re.MatchString)
+			continue
 		}
+		glob := p
+		matchers = append(matchers, func(name string) bool {
+			matched, _ := filepath.Match(glob, name)
+			return matched
+		})
 	}
-	return regexps
+	return matchers
 }
 
 func (st *mountState) excluded(name string) bool {
-	for _, glob := range st.excludeGlobs {
-		if matched, _ := filepath.Match(glob, name); matched {
-			return true
-		}
-	}
-	for _, re := range st.excludeRegexps {
-		if re.MatchString(name) {
+	for _, match := range st.excludes {
+		if match(name) {
 			return true
 		}
 	}
@@ -1529,21 +1519,16 @@ func (d *dirNode) renamePending(ctx context.Context, name string, newDir *dirNod
 		return syscall.ENOENT
 	}
 
-	from := path.Join(d.path, name)
-	to := path.Join(newDir.path, newName)
-	slog.Info("renaming pending file", "from", from, "to", to)
+	slog.Info("renaming pending file", "from", path.Join(d.path, name), "to", path.Join(newDir.path, newName))
 
-	// If the destination exists, point the pending file at the existing drive.Node so Release
-	// uploads a new revision rather than creating a duplicate.
-	if existing, err := newDir.findChild(ctx, newName); err == 0 {
-		fn.mu.Lock()
-		fn.node = existing
-		fn.mu.Unlock()
-	}
+	existing, _ := newDir.findChild(ctx, newName)
 
 	fn.mu.Lock()
 	fn.name = newName
 	fn.parent = newDir
+	if existing != nil {
+		fn.node = existing
+	}
 	fn.mu.Unlock()
 
 	return 0
