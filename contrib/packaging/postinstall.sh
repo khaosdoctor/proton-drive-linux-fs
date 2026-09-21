@@ -14,20 +14,19 @@ elif [ -d /run/user ]; then
     export XDG_RUNTIME_DIR="$dir"
     export DBUS_SESSION_BUS_ADDRESS="unix:path=${dir}bus"
     su - "$user" -c 'systemctl --user daemon-reload' 2>/dev/null || true
-    for svc in proton-drive-fs proton-drive-fs-tray; do
-      su - "$user" -c "systemctl --user is-active --quiet $svc" 2>/dev/null &&
-        su - "$user" -c "systemctl --user restart $svc" 2>/dev/null &&
-        echo "Restarted $svc for $user"
-    done
+    su - "$user" -c "systemctl --user is-active --quiet proton-drive-fs" 2>/dev/null &&
+      su - "$user" -c "systemctl --user restart proton-drive-fs" 2>/dev/null &&
+      echo "Restarted proton-drive-fs for $user"
+    # Remove the legacy tray service unconditionally (may be enabled but not running).
+    su - "$user" -c "systemctl --user disable --now --quiet proton-drive-fs-tray" 2>/dev/null || true
   done
 fi
 
 cat <<'EOF'
 proton-drive-fs installed.
 
-If the systemd user units are not yet enabled:
+If the systemd user unit is not yet enabled:
 
-  systemctl --user enable --now proton-drive-fs-tray
   systemctl --user enable --now proton-drive-fs
 
 Log in first with: proton-drive-fs login

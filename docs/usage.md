@@ -121,14 +121,13 @@ Manages the TOML config file. The file is created on its own by the first comman
 
 ## Systemd user units
 
-Two user units live in `contrib/systemd/`: `proton-drive-fs.service` keeps the mount running, and `proton-drive-fs-tray.service` keeps the tray icon running with the graphical session. Copy the ones you want to `~/.config/systemd/user/` (or run `make install`, which does this for you), then enable them:
+A single user unit lives in `contrib/systemd/`: `proton-drive-fs.service` runs `mount -foreground`, which handles both the FUSE mount and the system tray icon (the tray starts automatically when a display server is available). Copy it to `~/.config/systemd/user/` (or run `make install`, which does this), then enable it:
 
 ```sh
 systemctl --user enable --now proton-drive-fs
-systemctl --user enable --now proton-drive-fs-tray
 ```
 
-Both units run the binary from `~/.local/bin`. Edit `ExecStart` if yours is somewhere else. The mount unit runs `mount -foreground` with no mountpoint argument, so it needs `mountpoint` set in config.toml (run any command once to create the file, then edit it). Output goes to the journal as part of the unit.
+The unit runs the binary from `~/.local/bin`. Edit `ExecStart` if yours is somewhere else. It runs `mount -foreground` with no mountpoint argument, so it needs `mountpoint` set in config.toml (run any command once to create the file, then edit it). Output goes to the journal as part of the unit.
 
 ## make restart
 

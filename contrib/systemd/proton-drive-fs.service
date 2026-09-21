@@ -1,5 +1,5 @@
 [Unit]
-Description=Proton Drive FUSE mount
+Description=Proton Drive FS (mount + tray)
 After=network-online.target
 ConditionPathExists=%h/.config/proton-drive-fs/session.json
 StartLimitIntervalSec=60
@@ -7,8 +7,8 @@ StartLimitBurst=3
 
 [Service]
 Type=simple
-# Takes its mountpoint from `mountpoint` in config.toml; set it with `proton-drive-fs config
-# init` and an edit.
+# The mount daemon shows a system tray icon automatically when a display server
+# is available; pass -no-tray to disable it.
 ExecStart=@BINDIR@/proton-drive-fs mount -foreground
 ExecStop=@BINDIR@/proton-drive-fs unmount
 Restart=on-failure

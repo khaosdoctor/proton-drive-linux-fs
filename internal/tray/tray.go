@@ -114,6 +114,10 @@ type Options struct {
 	Commit     string
 	Mounted    func() bool
 	LoggedIn   func() bool
+	// OnQuit, when set, is called instead of running an unmount subprocess. Used in embedded
+	// mode where the mount daemon and tray share a process: the caller cancels the mount's
+	// context, and the tray exits via the context passed to RunEmbedded.
+	OnQuit func()
 }
 
 // snapshot is one round of status detection.
@@ -265,7 +269,23 @@ func Run(opts Options) {
 	systray.Run(a.onReady, a.onExit)
 }
 
+// RunEmbedded starts the tray in a goroutine alongside an already-running mount daemon
+// and returns immediately. The tray stops when ctx is cancelled. Unlike Run, the Quit
+// menu item calls opts.OnQuit (which should cancel the mount's context) instead of
+// running an unmount subprocess.
+func RunEmbedded(ctx context.Context, opts Options) {
+	a := &app{opts: opts, refresh: make(chan struct{}, 1), shown: -1}
+	go systray.Run(a.onReady, func() {})
+	go func() {
+		<-ctx.Done()
+		systray.Quit()
+	}()
+}
+
 func (a *app) onExit() {
+	if a.opts.OnQuit != nil {
+		return
+	}
 	a.stopDaemon()
 }
 
@@ -342,19 +362,25 @@ func (a *app) onReady() {
 	onClick(a.logout, func() { a.runSelf("logout") })
 	onClick(a.about, a.showAbout)
 	onClick(quit, func() {
-		a.stopDaemon()
+		if a.opts.OnQuit != nil {
+			a.opts.OnQuit()
+		} else {
+			a.stopDaemon()
+		}
 		systray.Quit()
 	})
 
 	go a.poll()
 
-	go func() {
-		sig := make(chan os.Signal, 1)
-		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-		<-sig
-		a.stopDaemon()
-		systray.Quit()
-	}()
+	if a.opts.OnQuit == nil {
+		go func() {
+			sig := make(chan os.Signal, 1)
+			signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+			<-sig
+			a.stopDaemon()
+			systray.Quit()
+		}()
+	}
 }
 
 // showAbout displays the About dialog; a failure (no zenity and no xdg-open, say) only gets a

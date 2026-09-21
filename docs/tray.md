@@ -67,11 +67,18 @@ install -Dm644 contrib/icons/proton-drive-fs.png ~/.local/share/icons/hicolor/64
 
 `make install` does both of these for you.
 
-## Tray unit
+## Embedded mode
 
-To start the tray with the graphical session instead of by hand, use the
-`proton-drive-fs-tray.service` user unit described in [Usage](usage.md#systemd-user-units).
+Since v0.x the mount daemon (`proton-drive-fs mount -foreground`) starts the tray automatically when a display server is available (`$DISPLAY` or `$WAYLAND_DISPLAY`). A single `proton-drive-fs.service` systemd unit runs both; the separate `proton-drive-fs-tray.service` is no longer needed.
+
+To disable the tray in the daemon, pass `-no-tray`:
+
+```sh
+proton-drive-fs mount -foreground -no-tray
+```
+
+The standalone `proton-drive-fs tray` subcommand still works for running the tray separately.
 
 ## Restart-needed hint
 
-The tray and the mount daemon are separate processes and can end up on different binary versions after a rebuild. The status line's ` (daemon X, restart needed)` suffix and the `Restart mount` menu item exist for this case: unmount the stale daemon and mount again with the current binary.
+When the tray runs standalone (not embedded), it and the mount daemon can end up on different binary versions after a rebuild. The status line's ` (daemon X, restart needed)` suffix and the `Restart mount` menu item exist for this case: unmount the stale daemon and mount again with the current binary.

@@ -28,6 +28,7 @@ import (
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/logx"
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/state"
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/thumbs"
+	"github.com/khaosdoctor/proton-drive-linux-fs/internal/tray"
 )
 
 var version = "dev"
@@ -290,6 +291,7 @@ func runMount(args []string) int {
 	fs := flag.NewFlagSet("mount", flag.ContinueOnError)
 	fs.String("config", configPath, "path to config.toml")
 	debug := fs.Bool("debug", false, "enable FUSE debug logging")
+	noTray := fs.Bool("no-tray", false, "do not show the system tray icon (default: show it when a display server is available)")
 	mf, err := registerMountConfigFlags(fs, cfg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -426,6 +428,20 @@ func runMount(args []string) int {
 			return 1
 		}
 		registry = thumbs.LoadRegistry()
+	}
+
+	if !*noTray && hasDisplay() {
+		logPath, _ := mountLogPath()
+		tray.RunEmbedded(ctx, tray.Options{
+			Mountpoint: mountpoint,
+			LogPath:    logPath,
+			ConfigPath: configPath,
+			Version:    version,
+			Commit:     commit,
+			Mounted:    func() bool { return isMounted(mountpoint) },
+			LoggedIn:   func() bool { _, err := auth.Load(); return err == nil },
+			OnQuit:     stop,
+		})
 	}
 
 	fmt.Printf("mounting %s; unmount with: proton-drive-fs unmount %s\n", mountpoint, mountpoint)
@@ -662,6 +678,10 @@ func mountedAt(procMounts string, mountpoint string) bool {
 		}
 	}
 	return false
+}
+
+func hasDisplay() bool {
+	return os.Getenv("DISPLAY") != "" || os.Getenv("WAYLAND_DISPLAY") != ""
 }
 
 func escapeMountField(s string) string {

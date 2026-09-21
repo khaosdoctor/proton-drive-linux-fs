@@ -12,6 +12,7 @@ optdepends=(
 	'libsecret: store the key password in the OS keyring'
 )
 makedepends=('git' 'go')
+install=proton-drive-fs-git.install
 provides=('proton-drive-fs')
 conflicts=('proton-drive-fs' 'proton-drive-fs-bin')
 source=("$pkgname::git+https://github.com/khaosdoctor/proton-drive-linux-fs.git")
@@ -61,9 +62,7 @@ package() {
 	install -Dm644 "./contrib/proton-drive-fs.desktop" "$pkgdir/usr/share/applications/proton-drive-fs.desktop"
 	install -Dm644 "./contrib/icons/proton-drive-fs.png" "$pkgdir/usr/share/icons/hicolor/64x64/apps/proton-drive-fs.png"
 	sed 's|@BINDIR@|/usr/bin|g' "./contrib/systemd/proton-drive-fs.service" > "$srcdir/proton-drive-fs.service"
-	sed 's|@BINDIR@|/usr/bin|g' "./contrib/systemd/proton-drive-fs-tray.service" > "$srcdir/proton-drive-fs-tray.service"
 	install -Dm644 "$srcdir/proton-drive-fs.service" "$pkgdir/usr/lib/systemd/user/proton-drive-fs.service"
-	install -Dm644 "$srcdir/proton-drive-fs-tray.service" "$pkgdir/usr/lib/systemd/user/proton-drive-fs-tray.service"
 	install -Dm644 "./contrib/io.github.khaosdoctor.proton_drive_fs.metainfo.xml" "$pkgdir/usr/share/metainfo/io.github.khaosdoctor.proton_drive_fs.metainfo.xml"
 	install -Dm644 "./contrib/packaging/proton-drive-fs-upgrade.hook" "$pkgdir/usr/share/libalpm/hooks/proton-drive-fs-upgrade.hook"
 	install -Dm755 "./contrib/packaging/proton-drive-fs-restart" "$pkgdir/usr/share/libalpm/scripts/proton-drive-fs-restart"

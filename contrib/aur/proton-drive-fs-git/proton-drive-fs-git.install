@@ -1,0 +1,13 @@
+post_upgrade() {
+    # The tray is now embedded in the mount daemon; clean up the legacy tray service.
+    if [ -d /run/user ]; then
+        for dir in /run/user/*/; do
+            [ -d "$dir" ] || continue
+            uid=$(basename "$dir")
+            user=$(id -nu "$uid" 2>/dev/null) || continue
+            XDG_RUNTIME_DIR="$dir" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=${dir}bus" \
+                su - "$user" -c "systemctl --user disable --now --quiet proton-drive-fs-tray" 2>/dev/null || true
+        done
+    fi
+}

@@ -29,7 +29,7 @@ yay -S proton-drive-fs-git
 
 > Be aware that building from HEAD is __highly experimental__, and it _will_ probably break sometime, so only do that if you're either developing against that branch or you are very bold
 
-All three packages pull in `fuse3` as a dependency and enable the tray the same way as the native packages above. An ALPM hook restarts active `proton-drive-fs` and `proton-drive-fs-tray` systemd user services automatically after a package upgrade.
+All three packages pull in `fuse3` as a dependency. An ALPM hook restarts the active `proton-drive-fs` systemd user service automatically after a package upgrade. The tray icon starts automatically when a display server is available.
 
 ## Debian / Ubuntu (APT)
 
@@ -58,7 +58,7 @@ brew install proton-drive-fs
 
 ## Native packages
 
-`.deb`, `.rpm`, `.apk`, and Arch packages are also attached to each [release](https://github.com/khaosdoctor/proton-drive-linux-fs/releases). Install one with the matching package manager, then enable the tray with `systemctl --user enable --now proton-drive-fs-tray`. On upgrades, the post-install script restarts active `proton-drive-fs` and `proton-drive-fs-tray` services for all logged-in users.
+`.deb`, `.rpm`, `.apk`, and Arch packages are also attached to each [release](https://github.com/khaosdoctor/proton-drive-linux-fs/releases). Install one with the matching package manager, then enable the service with `systemctl --user enable --now proton-drive-fs`. On upgrades, the post-install script restarts the active `proton-drive-fs` service for all logged-in users.
 
 ## From a GitHub Release
 

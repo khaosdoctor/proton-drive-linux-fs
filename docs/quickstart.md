@@ -69,14 +69,11 @@ By default this detaches into the background and prints where its logs went, alo
 mounted path/to/mount (pid 12345, logs: journalctl --user -t proton-drive-fs); unmount with: proton-drive-fs unmount path/to/mount
 ```
 
-Optionally, run the tray icon to see mount and sync status:
+When a display server is available, the mount daemon shows a system tray icon automatically. To run the tray separately instead (e.g. for a detached mount):
 
 ```sh
 proton-drive-fs tray
 ```
-
-> You can also run this first, and the use the GUI to do all the previous
-> operations
 
 Check on it any time:
 
@@ -95,18 +92,13 @@ To avoid having to write the fglags every time, the first command you run writes
 
 ## systemd user units
 
-If you installed it with `make install`, the two units are in `~/.config/systemd/user/`. If you installed through a package manager, they are in `/usr/lib/systemd/user/` instead. Either way `login` first (see above), then edit the config file to set your mountpoint, and then enable the mount:
+If you installed it with `make install`, the unit is in `~/.config/systemd/user/`. If you installed through a package manager, it is in `/usr/lib/systemd/user/` instead. Either way `login` first (see above), then edit the config file to set your mountpoint, and then enable the mount:
 
 ```sh
 systemctl --user enable --now proton-drive-fs
 ```
 
-You can also enable the tray icon alongside it to have a nice little GUI to look
-at:
-
-```sh
-systemctl --user enable --now proton-drive-fs-tray
-```
+The tray icon starts automatically when a display server is available.
 
 You can follow logs with:
 
