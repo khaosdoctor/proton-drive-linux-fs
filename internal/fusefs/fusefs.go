@@ -1809,6 +1809,7 @@ type fileHandle struct {
 var _ = (fs.FileReader)((*fileHandle)(nil))
 var _ = (fs.FileWriter)((*fileHandle)(nil))
 var _ = (fs.FileFlusher)((*fileHandle)(nil))
+var _ = (fs.FileFsyncer)((*fileHandle)(nil))
 var _ = (fs.FileReleaser)((*fileHandle)(nil))
 
 func (h *fileHandle) hasTmp() bool {
@@ -1912,6 +1913,13 @@ func (h *fileHandle) Write(ctx context.Context, data []byte, off int64) (uint32,
 	h.mu.Unlock()
 
 	return uint32(n), 0
+}
+
+// Fsync is a no-op: the temp buffer is already on local disk, so the data is durable
+// from the caller's perspective. Without this, go-fuse returns ENOSYS and apps like
+// LibreOffice, Kdenlive and KDE editors interpret that as a failed save.
+func (h *fileHandle) Fsync(ctx context.Context, flags uint32) syscall.Errno {
+	return 0
 }
 
 // Flush is a no-op: content is only uploaded once on Release.
