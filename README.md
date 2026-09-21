@@ -23,7 +23,7 @@ it's really not very performance-friendly for a lot of files. But it works.
 
 ## Current status
 
-Unofficial. Working. Not super tested for performance or production.
+Open beta working version. I am using it for a while now and it's pretty performatic, most bugs have been dealt with.
 
 I do use this personally (after all I built it for myself) so I kinda solve what I find, but expect bugs, it's all me and the robot doing this (mostly the robot). Report them on the [issue tracker](https://github.com/khaosdoctor/proton-drive-linux-fs/issues).
 
