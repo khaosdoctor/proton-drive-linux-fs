@@ -34,22 +34,24 @@ var fields = []field{
 	{"foreground", "foreground", func(cfg *Config, v any) { cfg.Foreground = v.(bool) }},
 	{"log-level", "log_level", func(cfg *Config, v any) { cfg.LogLevel = v.(string) }},
 	{"log-stderr", "log_stderr", func(cfg *Config, v any) { cfg.LogStderr = v.(bool) }},
+	{"exclude", "exclude", func(cfg *Config, v any) { cfg.Exclude = SplitComma(v.(string)) }},
 	{"hv-method", "hv_method", func(cfg *Config, v any) { cfg.HVMethod = v.(string) }},
 	{"no-browser", "no_browser", func(cfg *Config, v any) { cfg.NoBrowser = v.(bool) }},
 }
 
-// SplitDenyReaders splits a comma-separated -deny-readers value, dropping blank entries. An empty
-// value disables the denylist. Shared by ApplyFlags and cmd/proton-drive-fs's own flag parsing so
-// a config file's deny_readers array and the -deny-readers flag mean the same thing.
-func SplitDenyReaders(s string) []string {
-	var names []string
-	for _, name := range strings.Split(s, ",") {
-		if trimmed := strings.TrimSpace(name); trimmed != "" {
-			names = append(names, trimmed)
+// SplitComma splits a comma-separated string, trimming whitespace and dropping blanks.
+func SplitComma(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			out = append(out, trimmed)
 		}
 	}
-	return names
+	return out
 }
+
+// SplitDenyReaders splits a comma-separated -deny-readers value, dropping blank entries.
+func SplitDenyReaders(s string) []string { return SplitComma(s) }
 
 // ApplyFlags overlays cfg with every flag in fs that was explicitly set on the command line,
 // detected via fs.Visit. A flag left at its default is not touched here: every caller in

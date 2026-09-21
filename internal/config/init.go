@@ -26,6 +26,7 @@ var initFields = []struct {
 	{"thumbnails", "Write Proton's stored previews into the freedesktop thumbnail cache.", func(d Config) string { return strconv.FormatBool(d.Thumbnails) }},
 	{"thumbnail_dir", "Freedesktop thumbnail cache directory.", func(d Config) string { return strconv.Quote(d.ThumbnailDir) }},
 	{"deny_readers", "Process names refused a read of a file above large_file; empty allows all.", func(d Config) string { return QuoteArray(d.DenyReaders) }},
+	{"exclude", `Filename patterns to hide from listings and reject on create; prefix with "re:" for regexp, otherwise glob.`, func(d Config) string { return QuoteArray(d.Exclude) }},
 	{"max_uploads", "How many files upload at once; the rest wait in line.", func(d Config) string { return strconv.Itoa(d.MaxUploads) }},
 	{"max_downloads", "How many file blocks download at once, across every open file.", func(d Config) string { return strconv.Itoa(d.MaxDownloads) }},
 	{"log_level", "Log verbosity: debug, info, warn or error.", func(d Config) string { return strconv.Quote(d.LogLevel) }},

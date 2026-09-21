@@ -11,6 +11,7 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -72,6 +73,10 @@ type Options struct {
 	// DenyReaders are process names refused a read of a file above the client's large-file
 	// threshold. Empty allows every reader.
 	DenyReaders []string
+
+	// Exclude are filename patterns hidden from listings and rejected on create. Each entry
+	// is a filepath.Match glob, or a regexp if prefixed with "re:".
+	Exclude []string
 
 	// Registry, when set, maps file extensions to their freedesktop thumbnailer commands.
 	// The daemon runs these thumbnailers on downloaded files in the background, and blocks
@@ -355,6 +360,8 @@ type mountState struct {
 	externalThumbJobs  chan externalThumbJob
 	denyReaders        []string
 	denyThumbnailers   []string
+	excludeGlobs       []string
+	excludeRegexps     []*regexp.Regexp
 
 	// uploads bounds how many files upload at once, so a bulk copy does not open one connection
 	// per file it was handed.
@@ -428,6 +435,8 @@ func newMountState(ctx context.Context, c *drive.Client, uid, gid uint32, opts O
 		thumbs:        opts.Thumbnails,
 		registry:      opts.Registry,
 		denyReaders:   opts.DenyReaders,
+		excludeGlobs:  parseExcludeGlobs(opts.Exclude),
+		excludeRegexps: parseExcludeRegexps(opts.Exclude),
 		uploads:       newSem(opts.MaxUploads),
 		dirs:          make(map[string]*dirNode),
 		parentOf:      make(map[string]string),
@@ -446,6 +455,44 @@ func newMountState(ctx context.Context, c *drive.Client, uid, gid uint32, opts O
 }
 
 // sem is a counting semaphore. A buffered channel is the whole implementation; a nil sem lets
+func parseExcludeGlobs(patterns []string) []string {
+	var globs []string
+	for _, p := range patterns {
+		if !strings.HasPrefix(p, "re:") {
+			globs = append(globs, p)
+		}
+	}
+	return globs
+}
+
+func parseExcludeRegexps(patterns []string) []*regexp.Regexp {
+	var regexps []*regexp.Regexp
+	for _, p := range patterns {
+		if strings.HasPrefix(p, "re:") {
+			if re, err := regexp.Compile(p[3:]); err == nil {
+				regexps = append(regexps, re)
+			} else {
+				slog.Warn("invalid exclude regex, skipping", "pattern", p[3:], "err", err)
+			}
+		}
+	}
+	return regexps
+}
+
+func (st *mountState) excluded(name string) bool {
+	for _, glob := range st.excludeGlobs {
+		if matched, _ := filepath.Match(glob, name); matched {
+			return true
+		}
+	}
+	for _, re := range st.excludeRegexps {
+		if re.MatchString(name) {
+			return true
+		}
+	}
+	return false
+}
+
 // everything through.
 type sem chan struct{}
 
@@ -1257,6 +1304,10 @@ func removeNode(children []*drive.Node, name string) (*drive.Node, []*drive.Node
 }
 
 func (d *dirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	if d.st.excluded(name) {
+		return nil, syscall.ENOENT
+	}
+
 	children, errno := d.load(ctx)
 	if errno != 0 {
 		return nil, errno
@@ -1329,6 +1380,10 @@ func (d *dirNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse
 // (node == nil) for it; the file isn't created on the drive until Release uploads it.
 // ponytail: whole-file temp buffer; block-level partial writes later if needed
 func (d *dirNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
+	if d.st.excluded(name) {
+		return nil, nil, 0, syscall.EPERM
+	}
+
 	tmp, err := os.CreateTemp("", "proton-drive-fs-*")
 	if err != nil {
 		slog.Error("creating temp file failed", "path", path.Join(d.path, name), "err", err)
@@ -1502,6 +1557,10 @@ func (d *dirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 
 	entries := make([]fuse.DirEntry, 0, len(children))
 	for _, child := range children {
+		if d.st.excluded(child.Name) {
+			continue
+		}
+
 		mode := uint32(fuse.S_IFREG)
 		if child.IsDir() {
 			mode = fuse.S_IFDIR
