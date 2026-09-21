@@ -47,6 +47,7 @@ There is no default mountpoint. `<mountpoint>` is required unless the config fil
 | `-thumbnails` | `true` | Write preview images into the freedesktop thumbnail cache when a folder is listed. Uses Proton's stored previews when available, and discovers system thumbnailers (from `.thumbnailer` files) for file types Proton has no preview for. |
 | `-thumbnail-dir` | `$XDG_CACHE_HOME/thumbnails` (falls back to `~/.cache/thumbnails`) | The thumbnail cache directory to write into. This is the shared directory file managers read, not a directory of its own. |
 | `-deny-readers` | see below | Comma-separated process names refused a read of a file above `-large-file`. Passing a value replaces the default list; `-deny-readers ""` turns the refusal off. Thumbnailer processes discovered from `.thumbnailer` files are always blocked regardless of this list or file size. |
+| `-exclude` | see below | Comma-separated filename patterns to hide from directory listings and reject on create. Plain patterns use Go's `filepath.Match` (shell glob); prefix a pattern with `re:` for a regexp instead. Passing a value replaces the default list; `-exclude ""` turns exclusion off. |
 | `-max-uploads` | `5` | How many files upload at once. The rest wait in line instead of opening a connection each. 0 or less removes the cap. |
 | `-max-downloads` | `8` | How many file blocks download at once, across every open file. 0 or less removes the cap. |
 | `-foreground` | `false` | Stay attached to the terminal instead of detaching into the background; used by the systemd unit. |
@@ -59,6 +60,13 @@ The `-deny-readers` default list:
 tracker-miner-fs, tracker-extract, localsearch, baloo_file, baloo_file_extractor,
 tumblerd, ffmpegthumbnailer, totem-video-thumbnailer, gdk-pixbuf-thumbnailer,
 gnome-desktop-thumbnailer, evince-thumbnailer
+```
+
+The `-exclude` default list:
+
+```
+.DS_Store, Thumbs.db, desktop.ini, ._*, .Spotlight-V100, .Trashes, .fseventsd,
+*.swp, *.swo, *.tmp, *~, re:^\.~lock\.
 ```
 
 `mount` refuses to attach to a mountpoint that is already mounted, printing the running daemon's pid and version. See [Stale daemon after a rebuild](troubleshooting.md#stale-daemon-after-a-rebuild) for how to deal with that.

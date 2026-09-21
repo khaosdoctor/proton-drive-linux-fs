@@ -33,6 +33,7 @@ proton-drive-fs config show [-config path] [flags...]
 | `thumbnails` | `-thumbnails` | `true` | Write preview images into the freedesktop thumbnail cache (Proton's stored previews and system thumbnailers). |
 | `thumbnail_dir` | `-thumbnail-dir` | `$XDG_CACHE_HOME/thumbnails` | Freedesktop thumbnail cache directory. |
 | `deny_readers` | `-deny-readers` | see [Usage](usage.md#mount) | Process names refused a read of a file above `large_file`; empty allows all. |
+| `exclude` | `-exclude` | see [Usage](usage.md#mount) | Filename patterns to hide from listings and reject on create; prefix with `re:` for regexp, otherwise glob. |
 | `max_uploads` | `-max-uploads` | `5` | How many files upload at once. |
 | `max_downloads` | `-max-downloads` | `8` | How many file blocks download at once. |
 | `log_level` | `-log-level` | `info` | Log verbosity: `debug`, `info`, `warn`, or `error`. |

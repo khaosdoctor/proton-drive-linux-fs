@@ -59,6 +59,21 @@ func (c Config) FileKeys() map[string]bool {
 // defaultDenyReaders are the dedicated thumbnailer and indexer binaries refused a read of a large
 // file. Only processes that walk a folder on their own are listed: an application the user
 // launches to open a file, a slicer for example, must keep working.
+var defaultExclude = []string{
+	".DS_Store",
+	"Thumbs.db",
+	"desktop.ini",
+	"._*",
+	".Spotlight-V100",
+	".Trashes",
+	".fseventsd",
+	"*.swp",
+	"*.swo",
+	"*.tmp",
+	"*~",
+	`re:^\.~lock\.`,
+}
+
 var defaultDenyReaders = []string{
 	"tracker-miner-fs",
 	"tracker-extract",
@@ -88,6 +103,7 @@ func Defaults() Config {
 		Thumbnails:   true,
 		ThumbnailDir: defaultThumbnailDir(),
 		DenyReaders:  append([]string(nil), defaultDenyReaders...),
+		Exclude:      append([]string(nil), defaultExclude...),
 		MaxUploads:   5,
 		MaxDownloads: 8,
 		LogLevel:     "info",
