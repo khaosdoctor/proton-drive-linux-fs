@@ -63,7 +63,7 @@ func (r *Registry) loadFile(path string) {
 	if err != nil {
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var execLine, mimeTypes, tryExec string
 	inSection := false
@@ -145,7 +145,7 @@ func (r *Registry) Generate(ctx context.Context, ext, input string, outputSize i
 	}
 	out := tmp.Name()
 	_ = tmp.Close()
-	defer os.Remove(out)
+	defer func() { _ = os.Remove(out) }()
 
 	line := execTpl
 	line = strings.ReplaceAll(line, "%i", input)
