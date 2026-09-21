@@ -8,6 +8,15 @@ import (
 	proton "github.com/henrybear327/go-proton-api"
 )
 
+func unrecoverableAuth(err error, onAuthFailed func()) bool {
+	if onAuthFailed != nil && IsUnrecoverableAuth(err) {
+		slog.Error("session revoked, shutting down", "err", err)
+		onAuthFailed()
+		return true
+	}
+	return false
+}
+
 // Event is one remote change, already decrypted as far as possible.
 type Event struct {
 	Type     proton.LinkEventType
@@ -28,9 +37,7 @@ type Event struct {
 func (c *Client) Events(ctx context.Context, interval time.Duration, fn func(Event), paused func() bool, onAuthFailed func()) {
 	last, err := c.api.GetLatestVolumeEventID(ctx, c.volumeID)
 	if err != nil {
-		if onAuthFailed != nil && IsUnrecoverableAuth(err) {
-			slog.Error("session revoked, shutting down", "err", err)
-			onAuthFailed()
+		if unrecoverableAuth(err, onAuthFailed) {
 			return
 		}
 		slog.Warn("getting latest volume event id failed", "err", err)
@@ -53,9 +60,7 @@ func (c *Client) Events(ctx context.Context, interval time.Duration, fn func(Eve
 		if last == "" {
 			last, err = c.api.GetLatestVolumeEventID(ctx, c.volumeID)
 			if err != nil {
-				if onAuthFailed != nil && IsUnrecoverableAuth(err) {
-					slog.Error("session revoked, shutting down", "err", err)
-					onAuthFailed()
+				if unrecoverableAuth(err, onAuthFailed) {
 					return
 				}
 				slog.Warn("getting latest volume event id failed", "err", err)
@@ -66,9 +71,7 @@ func (c *Client) Events(ctx context.Context, interval time.Duration, fn func(Eve
 		for {
 			ev, err := c.api.GetVolumeEvent(ctx, c.volumeID, last)
 			if err != nil {
-				if onAuthFailed != nil && IsUnrecoverableAuth(err) {
-					slog.Error("session revoked, shutting down", "err", err)
-					onAuthFailed()
+				if unrecoverableAuth(err, onAuthFailed) {
 					return
 				}
 				slog.Warn("getting volume event failed", "event_id", last, "err", err)

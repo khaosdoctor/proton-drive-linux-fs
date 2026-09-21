@@ -15,14 +15,9 @@ import (
 	"strings"
 )
 
-// thumbExec is one parsed [Thumbnailer Entry] from a .thumbnailer file.
-type thumbExec struct {
-	exec string // Exec= line with %i/%o/%s/%u placeholders
-}
-
 // Registry maps MIME types to their freedesktop thumbnailer commands.
 type Registry struct {
-	byMIME map[string]thumbExec
+	byMIME map[string]string
 }
 
 var defaultThumbnailerDirs = []string{
@@ -32,7 +27,7 @@ var defaultThumbnailerDirs = []string{
 
 // LoadRegistry parses *.thumbnailer files from the standard directories.
 func LoadRegistry() *Registry {
-	r := &Registry{byMIME: make(map[string]thumbExec)}
+	r := &Registry{byMIME: make(map[string]string)}
 
 	dirs := append([]string(nil), defaultThumbnailerDirs...)
 	if home, err := os.UserHomeDir(); err == nil {
@@ -103,10 +98,9 @@ func (r *Registry) loadFile(path string) {
 		}
 	}
 
-	te := thumbExec{exec: execLine}
 	for _, mt := range strings.Split(mimeTypes, ";") {
 		if mt = strings.TrimSpace(mt); mt != "" {
-			r.byMIME[mt] = te
+			r.byMIME[mt] = execLine
 		}
 	}
 }
@@ -125,10 +119,7 @@ func (r *Registry) ForExt(ext string) string {
 	if i := strings.IndexByte(mt, ';'); i >= 0 {
 		mt = strings.TrimSpace(mt[:i])
 	}
-	if te, ok := r.byMIME[mt]; ok {
-		return te.exec
-	}
-	return ""
+	return r.byMIME[mt]
 }
 
 // Generate runs the thumbnailer for ext on a local input file, returning output PNG bytes.
@@ -184,7 +175,7 @@ func (r *Registry) ProcessNames() []string {
 	seen := make(map[string]bool)
 	var names []string
 	for _, te := range r.byMIME {
-		if name := execBasename(te.exec); name != "" && !seen[name] {
+		if name := execBasename(te); name != "" && !seen[name] {
 			seen[name] = true
 			names = append(names, name)
 		}

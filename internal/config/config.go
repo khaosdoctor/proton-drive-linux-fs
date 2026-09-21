@@ -56,9 +56,6 @@ func (c Config) FileKeys() map[string]bool {
 	return c.fileKeys
 }
 
-// defaultDenyReaders are the dedicated thumbnailer and indexer binaries refused a read of a large
-// file. Only processes that walk a folder on their own are listed: an application the user
-// launches to open a file, a slicer for example, must keep working.
 var defaultExclude = []string{
 	".DS_Store",
 	"Thumbs.db",
@@ -93,7 +90,7 @@ var defaultDenyReaders = []string{
 // and the config file both start here so the two can never drift apart.
 func Defaults() Config {
 	return Config{
-		Mountpoint:   defaultMountpoint(),
+		Mountpoint:   "",
 		TTL:          "30s",
 		Poll:         "10s",
 		OpTimeout:    "60s",
@@ -111,9 +108,6 @@ func Defaults() Config {
 	}
 }
 
-func defaultMountpoint() string {
-	return ""
-}
 
 // defaultCacheDir returns the default on-disk cache root for blocks and persisted directory
 // listings, or "" if the user cache directory can't be determined (cache_dir/-cache-dir can still

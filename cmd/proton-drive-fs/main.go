@@ -314,11 +314,7 @@ func runMount(args []string) int {
 		return 2
 	}
 
-	var arg string
-	if fs.NArg() >= 1 {
-		arg = fs.Arg(0)
-	}
-	mountpoint, err := resolveMountpoint(arg, cfg)
+	mountpoint, err := resolveMountpoint(fs.Arg(0), cfg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs mount [<mountpoint>] [-config path] [-debug] [-ttl 30s] [-poll 10s] [-op-timeout 60s] [-cache-dir path] [-cache-size 2GiB] [-large-file 300MiB] [-thumbnails] [-thumbnail-dir path] [-deny-readers names] [-exclude patterns] [-max-uploads 5] [-max-downloads 8] [-foreground] [-log-level info] [-log-stderr]  (required unless mountpoint is set in the config file)")
 		fmt.Fprintln(os.Stderr, noMountpointError(configPath))
@@ -596,10 +592,7 @@ func mountDetached(args []string, mountpoint string) int {
 	exited := make(chan error, 1)
 	go func() { exited <- cmd.Wait() }()
 
-	absMountpoint, err := filepath.Abs(mountpoint)
-	if err != nil {
-		absMountpoint = mountpoint
-	}
+	absMountpoint := absOrSelf(mountpoint)
 
 	deadline := time.Now().Add(30 * time.Second)
 	for {
@@ -686,9 +679,10 @@ func hasDisplay() bool {
 	return os.Getenv("DISPLAY") != "" || os.Getenv("WAYLAND_DISPLAY") != ""
 }
 
+var mountFieldReplacer = strings.NewReplacer(`\`, `\134`, " ", `\040`, "\t", `\011`, "\n", `\012`)
+
 func escapeMountField(s string) string {
-	replacer := strings.NewReplacer(`\`, `\134`, " ", `\040`, "\t", `\011`, "\n", `\012`)
-	return replacer.Replace(s)
+	return mountFieldReplacer.Replace(s)
 }
 
 // printLastLines prints up to the last n lines of the file at path to stderr.
@@ -740,24 +734,16 @@ func runUnmount(args []string) int {
 		return runUnmountForce(mountpoint)
 	}
 
-	out, err := tryUnmount(mountpoint)
-	if err == nil {
-		fmt.Printf("unmounted %s\n", mountpoint)
-		return 0
-	}
-	if notMounted(out) {
-		return 0
-	}
-	if !isBusy(out, err) {
-		printUnmountError(out, err)
-		return 1
-	}
-
 	deadline := time.Now().Add(*wait)
-	for time.Now().Before(deadline) {
-		time.Sleep(500 * time.Millisecond)
+	for first := true; ; first = false {
+		if !first {
+			if !time.Now().Before(deadline) {
+				return unmountLazyWithHolders(mountpoint)
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
 
-		out, err = tryUnmount(mountpoint)
+		out, err := tryUnmount(mountpoint)
 		if err == nil {
 			fmt.Printf("unmounted %s\n", mountpoint)
 			return 0
@@ -770,8 +756,6 @@ func runUnmount(args []string) int {
 			return 1
 		}
 	}
-
-	return unmountLazyWithHolders(mountpoint)
 }
 
 // tryUnmount runs a plain fusermount unmount once and returns its combined output alongside the
@@ -834,10 +818,7 @@ type holder struct {
 // descriptor resolves under mountpoint. It only sees processes the caller can read /proc/<pid>
 // links for, which the kernel already restricts to the caller's own processes.
 func mountHolders(procRoot, mountpoint string) []holder {
-	absMountpoint, err := filepath.Abs(mountpoint)
-	if err != nil {
-		absMountpoint = mountpoint
-	}
+	absMountpoint := absOrSelf(mountpoint)
 	// A plain prefix match would also catch a sibling like /home/u/ProtonDrive2, so require the
 	// match to be the mountpoint itself or to fall under it separated by "/".
 	prefix := absMountpoint + string(filepath.Separator)
@@ -925,10 +906,7 @@ func runUnmountForce(mountpoint string) int {
 	fmt.Printf("processes holding %s:\n", mountpoint)
 	printHolders(mountHolders(procRoot, mountpoint))
 
-	absMountpoint, err := filepath.Abs(mountpoint)
-	if err != nil {
-		absMountpoint = mountpoint
-	}
+	absMountpoint := absOrSelf(mountpoint)
 
 	mountinfo, err := os.ReadFile("/proc/self/mountinfo")
 	if err != nil {
