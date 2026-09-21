@@ -86,7 +86,7 @@ make build
 make install
 ```
 
-`make build` places the binary in the repository root. `make install` copies it to `$PREFIX/bin` (default `$HOME/.local/bin`), installs the desktop entry and icon, and installs the two systemd user units described in [Usage](usage.md). Run `make help` to see every target.
+`make build` places the binary in the repository root. `make install` copies it to `$PREFIX/bin` (default `$HOME/.local/bin`), installs the desktop entry and icon, and installs the systemd user unit described in [Usage](usage.md). Run `make help` to see every target.
 
 ## Container image
 
