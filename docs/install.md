@@ -3,25 +3,25 @@
 ## Requirements
 
 - Linux, with FUSE 3 (the `fuse3` package on most distributions) and access to `/dev/fuse`.
-- Optional: a Secret Service provider (GNOME Keyring, KWallet) to store the drive's key password in the OS keyring instead of the session file.
-- Optional: `zenity`, used by some desktops for graphical prompts.
-- Optional: a running systemd journal, otherwise a logfile is used
+- Optional: a Secret Service provider (GNOME Keyring, KWallet) if you want to keep the key password in your OS keyring instead of the session file.
+- Optional: `zenity`, some desktops use it for graphical prompts.
+- Optional: a running systemd journal, otherwise we log to a file.
 
 ## Arch Linux (AUR)
 
-The recommended way is to use the prebuilt binary, you can use any AUR helper:
+The easiest way is to use the prebuilt binary with any AUR helper:
 
 ```sh
 yay -S proton-drive-fs-bin
 ```
 
-To build from source instead:
+If you want to build from source instead:
 
 ```sh
 yay -S proton-drive-fs
 ```
 
-To build the latest commit on `main`, for unreleased changes:
+If you want the latest commit on `main`, with unreleased changes:
 
 ```sh
 yay -S proton-drive-fs-git
@@ -29,7 +29,7 @@ yay -S proton-drive-fs-git
 
 > Be aware that building from HEAD is __highly experimental__, and it _will_ probably break sometime, so only do that if you're either developing against that branch or you are very bold
 
-All three packages pull in `fuse3` as a dependency. An ALPM hook restarts the active `proton-drive-fs` systemd user service automatically after a package upgrade. The tray icon starts automatically when a display server is available.
+All three packages already pull `fuse3` as a dependency, and when you upgrade, we restart the `proton-drive-fs` service for you if it's running.
 
 ## Debian / Ubuntu (APT)
 
@@ -47,7 +47,7 @@ sudo apt update
 sudo apt install proton-drive-fs
 ```
 
-If the repository is not yet signed (no `public.key` available), use `[trusted=yes]` instead of `[signed-by=...]`.
+If the repository isn't signed yet (there's no `public.key`), use `[trusted=yes]` instead of `[signed-by=...]`.
 
 ## Homebrew (Linuxbrew)
 
@@ -58,11 +58,11 @@ brew install proton-drive-fs
 
 ## Native packages
 
-`.deb`, `.rpm`, `.apk`, and Arch packages are also attached to each [release](https://github.com/khaosdoctor/proton-drive-linux-fs/releases). Install one with the matching package manager, then enable the service with `systemctl --user enable --now proton-drive-fs`. On upgrades, the post-install script restarts the active `proton-drive-fs` service for all logged-in users.
+You can also get `.deb`, `.rpm`, `.apk`, and Arch packages from each [release](https://github.com/khaosdoctor/proton-drive-linux-fs/releases). Install it with your package manager and run `proton-drive-fs autostart` (or `autostart -headless` if you don't have a desktop). When you upgrade, we restart the service for you if it's running.
 
 ## From a GitHub Release
 
-No package for your distro? Take the raw binary instead, download the tarball from the releases page and install it manually:
+If there's no package for your distro, you can grab the tarball from the releases page and install the binary yourself:
 
 ```sh
 tar -xzf proton-drive-fs_linux_amd64.tar.gz
@@ -77,8 +77,6 @@ go install github.com/khaosdoctor/proton-drive-linux-fs/cmd/proton-drive-fs@late
 
 ## From source
 
-Run these in order:
-
 ```sh
 git clone https://github.com/khaosdoctor/proton-drive-linux-fs
 cd proton-drive-linux-fs
@@ -86,17 +84,17 @@ make build
 make install
 ```
 
-`make build` places the binary in the repository root. `make install` copies it to `$PREFIX/bin` (default `$HOME/.local/bin`), installs the desktop entry and icon, and installs the systemd user unit described in [Usage](usage.md). Run `make help` to see every target.
+`make install` puts the binary in `$PREFIX/bin` (`~/.local/bin` by default) with the desktop entry and icon. If you want it to start with your session, run `proton-drive-fs autostart` after that. You can see every target with `make help`.
 
 ## Container image
 
-If you wish to run the proton FUSE drive in a container, we got you covered too:
+If you want to run it in a container, we got you covered too:
 
 ```sh
 docker pull ghcr.io/khaosdoctor/proton-drive-linux-fs:latest
 ```
 
-Run `login` first to create a session, then `mount`, you can also copy your session file from your local computer to the container via bind mount:
+Run `login` first to create a session, then `mount`. You can also bind mount your local config directory so the container uses the session you already have:
 
 ```sh
 docker run --rm -it \
@@ -106,9 +104,7 @@ docker run --rm -it \
   -v ~/.config/proton-drive-fs:/root/.config/proton-drive-fs \
   -v path/to/mount:/mnt/protondrive:rshared \
   ghcr.io/khaosdoctor/proton-drive-linux-fs:latest \
-  mount /mnt/protondrive
+  mount -foreground /mnt/protondrive
 ```
 
-`--device /dev/fuse`, `--cap-add SYS_ADMIN`, and `--security-opt apparmor:unconfined` are what FUSE needs to create a mount inside a container.
-
-The bind mount on the config directory keeps the session across container runs, and the bind mount on the mountpoint needs `:rshared` propagation for the mount created inside the container to become visible on the host. Without it the mount stays confined to the container's own mount namespace.
+FUSE needs `--device /dev/fuse`, `--cap-add SYS_ADMIN`, and `--security-opt apparmor:unconfined` to mount inside a container. The mountpoint needs `:rshared` too, otherwise you won't see the mount on your host.

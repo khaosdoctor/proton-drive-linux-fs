@@ -1,22 +1,22 @@
 # Quick start
 
-Three complete flows, pick the one that matches how you run proton-drive-fs. See [Install](install.md) for every way to get the binary and [Usage](usage.md) for every subcommand and flag.
+There are three ways you can run proton-drive-fs, just pick the one you want. If you want every way to get the binary, check [Install](install.md), and for every subcommand and flag, check [Usage](usage.md).
 
 ## Installed package
 
-For Arch Linux, the recommended way is through the AUR, using any AUR helper:
+If you're on Arch Linux, the easiest way is through the AUR with any AUR helper:
 
 ```sh
 yay -S proton-drive-fs-bin
 ```
 
-To build from source instead:
+If you want to build from source instead:
 
 ```sh
 yay -S proton-drive-fs
 ```
 
-Otherwise, install the binary. Download the one for your distro:
+Otherwise, download the package for your distro and install it:
 
 ```sh
 sudo dpkg -i proton-drive-fs_*.deb
@@ -34,13 +34,13 @@ sudo pacman -U proton-drive-fs_*.pkg.tar.zst
 sudo apk add --allow-untrusted proton-drive-fs_*.apk
 ```
 
-Or without a package, directly through Go:
+You can also skip the package and install it with Go:
 
 ```sh
 go install github.com/khaosdoctor/proton-drive-linux-fs/cmd/proton-drive-fs@latest
 ```
 
-Or directly build from source:
+Or build it from source:
 
 ```sh
 git clone https://github.com/khaosdoctor/proton-drive-linux-fs
@@ -49,58 +49,57 @@ make build
 make install
 ```
 
-Once installed, you will have a `proton-drive-fs` binary and a systemd unit. Log in once:
+Once you have the `proton-drive-fs` binary, log in once:
 
 ```sh
 proton-drive-fs login
 ```
 
-This prompts for your username and password. On first login Proton usually opens a verification tab in your browser; solve it there, then come back to the terminal and press Enter to continue.
+This will ask for your username and password. On the first login Proton usually opens a verification tab in your browser, so solve it there, come back to the terminal and press Enter.
 
-Mount the drive:
+Then mount the drive:
 
 ```sh
 proton-drive-fs mount some/dir
 ```
 
-By default this detaches into the background and prints where its logs went, along with the command to unmount when the mount succeeds, you will see this log
+This goes to the background and, when the mount works, you'll see where the logs are and how to unmount:
 
 ```
 mounted path/to/mount (pid 12345, logs: journalctl --user -t proton-drive-fs); unmount with: proton-drive-fs unmount path/to/mount
 ```
 
-When a display server is available, the mount daemon shows a system tray icon automatically. To run the tray separately instead (e.g. for a detached mount):
+If you have a display server, you'll also get a tray icon. You can also run the tray by itself if you want:
 
 ```sh
 proton-drive-fs tray
 ```
 
-Check on it any time:
+You can check on it any time:
 
 ```sh
 proton-drive-fs status
 ```
 
-Unmount when done if it's a one off thing. Otherwise jump to the next session to
-know how to keep it running:
+If this was a one off thing, you can unmount when you're done. If you want to keep it running, jump to the next section:
 
 ```sh
 proton-drive-fs unmount path/to/mount
 ```
 
-To avoid having to write the fglags every time, the first command you run writes `$XDG_CONFIG_HOME/proton-drive-fs/config.toml` (falls back to `~/.config/proton-drive-fs/config.toml`) with every setting commented out at its default, so you can uncomment and edit the ones you want. See [Configuration](configuration.md).
+So you don't have to type the flags every time, the first command you run creates `$XDG_CONFIG_HOME/proton-drive-fs/config.toml` (or `~/.config/proton-drive-fs/config.toml`) with every setting commented out, so you just uncomment and edit the ones you want. Check [Configuration](configuration.md).
 
 ## systemd user units
 
-If you installed it with `make install`, the unit is in `~/.config/systemd/user/`. If you installed through a package manager, it is in `/usr/lib/systemd/user/` instead. Either way `login` first (see above), then edit the config file to set your mountpoint, and then enable the mount:
+After you `login`, set your mountpoint in the config file and run:
 
 ```sh
-systemctl --user enable --now proton-drive-fs
+proton-drive-fs autostart
 ```
 
-The tray icon starts automatically when a display server is available.
+If you're on a machine without a desktop, use `proton-drive-fs autostart -headless` so it starts at boot. Check [autostart](usage.md#autostart) for more.
 
-You can follow logs with:
+You can follow the logs with:
 
 ```sh
 journalctl --user -u proton-drive-fs -f
@@ -108,7 +107,7 @@ journalctl --user -u proton-drive-fs -f
 
 ## Docker
 
-The container image runs the CLI only. Log in first outside the container (or in a disposable container) so the session file is created, with the config directory bind-mounted so the session survives between runs:
+The container image only runs the CLI. You need to log in first so we have a session file, and you need to bind mount the config directory so the session is still there on the next run:
 
 ```sh
 docker run --rm -it \
@@ -121,7 +120,7 @@ docker run --rm -it \
   login
 ```
 
-Then mount, with the same bind mounts:
+Then mount it with the same bind mounts:
 
 ```sh
 docker run --rm -it \
@@ -134,12 +133,9 @@ docker run --rm -it \
   mount -foreground /mnt/protondrive
 ```
 
-`--device /dev/fuse`, `--cap-add SYS_ADMIN`, and `--security-opt apparmor:unconfined`
-are what FUSE needs to create a mount inside a container. The mountpoint bind needs
-`:rshared` propagation for the mount created inside the container to become visible on
-the host. Without it the mount stays confined to the container's own mount namespace.
+FUSE needs `--device /dev/fuse`, `--cap-add SYS_ADMIN`, and `--security-opt apparmor:unconfined` to mount inside a container. The mountpoint needs `:rshared` too, otherwise you won't see the mount on your host.
 
-Run `mount` with `-foreground` so the daemon stays attached instead of detaching into the background the way it does outside a container. If you don't, the container's main process exits right after the mount succeeds and Docker stops the container. There is no systemd journal inside the container, so logs go to the container's own stdout/stderr instead. You can read with:
+You need `-foreground` here, because if the daemon goes to the background, the container thinks it's done and Docker stops it. There's no journal inside the container, so you can read the logs with:
 
 ```sh
 docker logs -f <container>
