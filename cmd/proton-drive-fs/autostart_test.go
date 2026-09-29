@@ -15,11 +15,12 @@ func TestRenderUnit(t *testing.T) {
 		}
 	}
 
-	if !strings.Contains(graphical, "WantedBy=graphical-session.target") || !strings.Contains(graphical, "PartOf=graphical-session.target") {
-		t.Errorf("graphical unit not tied to the graphical session:\n%s", graphical)
+	// PartOf would stop the mount whenever the desktop restarts graphical-session.target.
+	if !strings.Contains(graphical, "WantedBy=graphical-session.target") || strings.Contains(graphical, "PartOf=") {
+		t.Errorf("graphical unit should start with the graphical session without being stopped by it:\n%s", graphical)
 	}
 
-	if !strings.Contains(headless, "WantedBy=default.target") || strings.Contains(headless, "PartOf=") || strings.Contains(headless, "WantedBy=graphical-session.target") {
+	if !strings.Contains(headless, "WantedBy=default.target") || strings.Contains(headless, "WantedBy=graphical-session.target") {
 		t.Errorf("headless unit still tied to the graphical session:\n%s", headless)
 	}
 }

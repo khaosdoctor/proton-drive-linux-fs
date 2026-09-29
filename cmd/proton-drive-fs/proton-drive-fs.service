@@ -2,9 +2,10 @@
 Description=Proton Drive FS (mount + tray)
 # The key password lives in the OS keyring, which is only unlockable once the
 # graphical session is up; starting earlier exhausts the restart limit.
+# No PartOf: some desktops restart graphical-session.target on suspend or lock,
+# and that would take the mount down with it.
 # "proton-drive-fs autostart -headless" retargets this to default.target.
 After=network-online.target graphical-session.target
-PartOf=graphical-session.target
 ConditionPathExists=%h/.config/proton-drive-fs/session.json
 StartLimitIntervalSec=60
 StartLimitBurst=3

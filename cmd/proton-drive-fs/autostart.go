@@ -148,7 +148,5 @@ func renderUnit(exe string, headless bool) string {
 	if !headless {
 		return unit
 	}
-
-	unit = strings.Replace(unit, "PartOf=graphical-session.target\n", "", 1)
 	return strings.Replace(unit, "WantedBy=graphical-session.target", "WantedBy=default.target", 1)
 }
