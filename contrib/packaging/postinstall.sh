@@ -14,6 +14,9 @@ elif [ -d /run/user ]; then
     export XDG_RUNTIME_DIR="$dir"
     export DBUS_SESSION_BUS_ADDRESS="unix:path=${dir}bus"
     su - "$user" -c 'systemctl --user daemon-reload' 2>/dev/null || true
+    # Move the enable symlink to the unit's current [Install] target. Headless users have no
+    # graphical session and keep their default.target link, which reenable would remove.
+    su - "$user" -c "systemctl --user is-active --quiet graphical-session.target && systemctl --user is-enabled --quiet proton-drive-fs && systemctl --user reenable --quiet proton-drive-fs" 2>/dev/null || true
     su - "$user" -c "systemctl --user is-active --quiet proton-drive-fs" 2>/dev/null &&
       su - "$user" -c "systemctl --user restart proton-drive-fs" 2>/dev/null &&
       echo "Restarted proton-drive-fs for $user"
@@ -25,9 +28,9 @@ fi
 cat <<'EOF'
 proton-drive-fs installed.
 
-If the systemd user unit is not yet enabled:
+To start it with your session (or at boot with -headless):
 
-  systemctl --user enable --now proton-drive-fs
+  proton-drive-fs autostart
 
 Log in first with: proton-drive-fs login
 EOF

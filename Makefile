@@ -34,12 +34,8 @@ install: build
 	install -Dm755 $(BIN) $(PREFIX)/bin/$(BIN)
 	install -Dm644 contrib/proton-drive-fs.desktop $(PREFIX)/share/applications/proton-drive-fs.desktop
 	install -Dm644 contrib/icons/proton-drive-fs.png $(PREFIX)/share/icons/hicolor/64x64/apps/proton-drive-fs.png
-	mkdir -p bin/systemd
-	sed "s|@BINDIR@|$(PREFIX)/bin|g" contrib/systemd/proton-drive-fs.service > bin/systemd/proton-drive-fs.service
-	install -Dm644 bin/systemd/proton-drive-fs.service $(HOME)/.config/systemd/user/proton-drive-fs.service
-	@systemctl --user daemon-reload 2>/dev/null || true
-	@echo "Installed. To enable:"
-	@echo "  systemctl --user enable --now proton-drive-fs"
+	@echo "Installed. To start it with your session (or at boot with -headless):"
+	@echo "  $(PREFIX)/bin/$(BIN) autostart"
 
 uninstall:
 	@rm -f $(PREFIX)/bin/$(BIN)

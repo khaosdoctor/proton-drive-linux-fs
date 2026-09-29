@@ -34,7 +34,7 @@ import (
 var version = "dev"
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: proton-drive-fs <login|mount|status|unmount|tray|logout|version|about|config> [args]")
+	fmt.Fprintln(os.Stderr, "usage: proton-drive-fs <login|mount|status|unmount|tray|logout|autostart|version|about|config> [args]")
 }
 
 func main() {
@@ -65,6 +65,8 @@ func run(args []string) int {
 		return runTray(args[1:])
 	case "logout":
 		return runLogout()
+	case "autostart":
+		return runAutostart(args[1:])
 	case "version":
 		return runVersion()
 	case "about":
