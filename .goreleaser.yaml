@@ -26,6 +26,8 @@ archives:
       - LICENSE
       - README.md
       - contrib/**
+      # The -bin AUR package installs the unit from this template.
+      - cmd/proton-drive-fs/proton-drive-fs.service
 
 nfpms:
   - id: proton-drive-fs
