@@ -138,7 +138,7 @@ func registerMountConfigFlags(fs *flag.FlagSet, cfg config.Config) (*mountConfig
 		thumbnails:   fs.Bool("thumbnails", cfg.Thumbnails, "write Proton's stored previews into the freedesktop thumbnail cache"),
 		thumbnailDir: fs.String("thumbnail-dir", cfg.ThumbnailDir, "freedesktop thumbnail cache directory"),
 		denyReaders:  fs.String("deny-readers", strings.Join(cfg.DenyReaders, ","), "comma-separated process names refused a read of a file above -large-file; empty allows all"),
-		exclude:      fs.String("exclude", strings.Join(cfg.Exclude, ","), "comma-separated filename patterns to hide and reject; prefix with re: for regexp, otherwise glob"),
+		exclude:      fs.String("exclude", strings.Join(cfg.Exclude, ","), "comma-separated filename patterns to hide and never upload; prefix with re: for regexp, otherwise glob"),
 		maxUploads:   fs.Int("max-uploads", cfg.MaxUploads, "how many files upload at once; the rest wait in line"),
 		maxDownloads: fs.Int("max-downloads", cfg.MaxDownloads, "how many file blocks download at once"),
 		foreground:   fs.Bool("foreground", cfg.Foreground, "stay attached to the terminal instead of detaching into the background; used by the systemd unit"),

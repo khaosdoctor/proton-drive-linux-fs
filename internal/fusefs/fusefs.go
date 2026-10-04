@@ -74,7 +74,7 @@ type Options struct {
 	// threshold. Empty allows every reader.
 	DenyReaders []string
 
-	// Exclude are filename patterns hidden from listings and rejected on create. Each entry
+	// Exclude are filename patterns hidden from listings and never uploaded. Each entry
 	// is a filepath.Match glob, or a regexp if prefixed with "re:".
 	Exclude []string
 
@@ -1284,7 +1284,15 @@ func removeNode(children []*drive.Node, name string) (*drive.Node, []*drive.Node
 
 func (d *dirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	if d.st.excluded(name) {
-		return nil, syscall.ENOENT
+		// Listings never show an excluded name; only a local, not-yet-uploaded file can have one.
+		fn := d.pendingChild(name)
+		if fn == nil {
+			return nil, syscall.ENOENT
+		}
+		var attr fuse.AttrOut
+		fn.Getattr(ctx, nil, &attr)
+		out.Attr = attr.Attr
+		return fn.EmbeddedInode(), 0
 	}
 
 	children, errno := d.load(ctx)
@@ -1359,10 +1367,6 @@ func (d *dirNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse
 // (node == nil) for it; the file isn't created on the drive until Release uploads it.
 // ponytail: whole-file temp buffer; block-level partial writes later if needed
 func (d *dirNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
-	if d.st.excluded(name) {
-		return nil, nil, 0, syscall.EPERM
-	}
-
 	tmp, err := os.CreateTemp("", "proton-drive-fs-*")
 	if err != nil {
 		slog.Error("creating temp file failed", "path", path.Join(d.path, name), "err", err)
@@ -1387,7 +1391,32 @@ func (d *dirNode) Create(ctx context.Context, name string, flags uint32, mode ui
 
 // Unlink trashes a file.
 func (d *dirNode) Unlink(ctx context.Context, name string) syscall.Errno {
+	// A parked buffer was never uploaded, so dropping it is all an unlink has to do.
+	if fn := d.pendingChild(name); fn != nil {
+		if h := fn.parkedHandle(); h != nil {
+			h.unpark(false)
+			return h.Release(ctx)
+		}
+	}
 	return d.remove(ctx, name)
+}
+
+// pendingChild returns the file mounted under name that has not been uploaded yet, if any.
+func (d *dirNode) pendingChild(name string) *fileNode {
+	child := d.GetChild(name)
+	if child == nil {
+		return nil
+	}
+	fn, ok := child.Operations().(*fileNode)
+	if !ok {
+		return nil
+	}
+	fn.mu.Lock()
+	defer fn.mu.Unlock()
+	if fn.node != nil {
+		return nil
+	}
+	return fn
 }
 
 // Rmdir trashes a folder. Proton trashes non-empty folders recursively, so this doesn't need to
@@ -1519,6 +1548,12 @@ func (d *dirNode) renamePending(ctx context.Context, name string, newDir *dirNod
 		fn.node = existing
 	}
 	fn.mu.Unlock()
+
+	// Already closed under an excluded name: nothing else will upload it, so do it now.
+	if h := fn.parkedHandle(); h != nil && !newDir.st.excluded(newName) {
+		h.unpark(true)
+		return h.Release(ctx)
+	}
 
 	return 0
 }
@@ -1873,8 +1908,9 @@ type fileHandle struct {
 
 	mu    sync.Mutex
 	tmp   *os.File // set for a write-capable handle, or a read-only view of the write handle's tmp
-	dirty bool
-	owns  bool // true only for the write handle that owns tmp: it alone closes, removes and uploads it
+	dirty  bool
+	owns   bool // true only for the write handle that owns tmp: it alone closes, removes and uploads it
+	parked bool // released under an excluded name; tmp kept until a rename uploads it or Unlink drops it
 }
 
 var _ = (fs.FileReader)((*fileHandle)(nil))
@@ -1882,6 +1918,31 @@ var _ = (fs.FileWriter)((*fileHandle)(nil))
 var _ = (fs.FileFlusher)((*fileHandle)(nil))
 var _ = (fs.FileFsyncer)((*fileHandle)(nil))
 var _ = (fs.FileReleaser)((*fileHandle)(nil))
+
+// parkedHandle returns the write handle Release parked under an excluded name, if any.
+func (f *fileNode) parkedHandle() *fileHandle {
+	f.mu.Lock()
+	h := f.handle
+	f.mu.Unlock()
+
+	if h == nil {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.parked {
+		return nil
+	}
+	return h
+}
+
+// unpark readies a parked handle for a second Release: dirty uploads the buffer, clean drops it.
+func (h *fileHandle) unpark(dirty bool) {
+	h.mu.Lock()
+	h.parked = false
+	h.dirty = dirty
+	h.mu.Unlock()
+}
 
 func (h *fileHandle) hasTmp() bool {
 	h.mu.Lock()
@@ -2030,12 +2091,30 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 	if tmp == nil || !owns {
 		return 0
 	}
+
+	fn := h.node
+	fn.mu.Lock()
+	existing := fn.node
+	name := fn.name
+	parent := fn.parent
+	fn.mu.Unlock()
+
+	// An excluded name (Orca saves "x.3mf.tmp", then renames it) is never uploaded. The buffer
+	// stays parked on the node so renamePending uploads it under the real name, or Unlink drops it.
+	// ponytail: a parked buffer never renamed or unlinked stays in $TMPDIR until the daemon exits
+	if dirty && parent.st.excluded(name) {
+		h.mu.Lock()
+		h.tmp = tmp
+		h.parked = true
+		h.mu.Unlock()
+		return 0
+	}
+
 	defer func() {
 		_ = tmp.Close()
 		_ = os.Remove(tmp.Name())
 	}()
 
-	fn := h.node
 	fn.mu.Lock()
 	if fn.handle == h {
 		fn.handle = nil
@@ -2045,12 +2124,6 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 	if !dirty {
 		return 0
 	}
-
-	fn.mu.Lock()
-	existing := fn.node
-	name := fn.name
-	parent := fn.parent
-	fn.mu.Unlock()
 
 	displayPath := path.Join(parent.path, name)
 
