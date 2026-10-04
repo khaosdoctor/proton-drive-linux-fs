@@ -1290,7 +1290,7 @@ func (d *dirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (
 			return nil, syscall.ENOENT
 		}
 		var attr fuse.AttrOut
-		fn.Getattr(ctx, nil, &attr)
+		_ = fn.Getattr(ctx, nil, &attr) // never fails: it only reads local state
 		out.Attr = attr.Attr
 		return fn.EmbeddedInode(), 0
 	}
