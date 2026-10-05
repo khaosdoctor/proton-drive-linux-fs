@@ -1628,6 +1628,16 @@ func (d *dirNode) Rename(ctx context.Context, name string, newParent fs.InodeEmb
 	d.removeChild(name)
 	newDir.upsertChild(moved)
 
+	// An existing file with a parked buffer (edited, closed, still waiting) starts its wait over
+	// under the new name, the same as a pending file does in renamePending.
+	if child := d.GetChild(name); child != nil {
+		if fn, ok := child.Operations().(*fileNode); ok {
+			if h := fn.parkedHandle(); h != nil && h.unpark(true) {
+				return h.Release(ctx)
+			}
+		}
+	}
+
 	return 0
 }
 
@@ -1867,7 +1877,7 @@ func (f *fileNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAt
 	// Prefer the handle the kernel passed in fh; fall back to this node's write handle for a
 	// bare truncate(2) or an fh that isn't the write handle (e.g. a read-only fh).
 	handle, ok := fh.(*fileHandle)
-	if !ok || !handle.hasTmp() {
+	if !ok || !handle.owns || !handle.hasTmp() {
 		f.mu.Lock()
 		handle = f.handle
 		f.mu.Unlock()
@@ -1914,8 +1924,8 @@ func (f *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 		writer := f.handle
 		f.mu.Unlock()
 		if writer != nil && readOnly {
-			if tmp := writer.sharedTmp(); tmp != nil {
-				return &fileHandle{node: f, tmp: tmp}, fuse.FOPEN_DIRECT_IO, 0
+			if r := readerOf(f, writer); r != nil {
+				return r, fuse.FOPEN_DIRECT_IO, 0
 			}
 		}
 		return nil, 0, syscall.EIO
@@ -1933,15 +1943,15 @@ func (f *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 
 	if readOnly {
 		// A dirty write handle's buffered bytes are the current content; read from the same
-		// temp file (not closed or removed here) instead of serving the stale committed
-		// revision. Direct I/O keeps the kernel from caching pre-write bytes alongside them.
+		// temp file instead of serving the stale committed revision. Direct I/O keeps the kernel
+		// from caching pre-write bytes alongside them.
 		f.mu.Lock()
 		writer := f.handle
 		f.mu.Unlock()
 
 		if writer != nil {
-			if tmp := writer.sharedTmp(); tmp != nil {
-				return &fileHandle{node: f, tmp: tmp}, fuse.FOPEN_DIRECT_IO, 0
+			if r := readerOf(f, writer); r != nil {
+				return r, fuse.FOPEN_DIRECT_IO, 0
 			}
 		}
 
@@ -2107,6 +2117,37 @@ func (h *fileHandle) park(tmp *os.File, delay time.Duration) {
 	})
 }
 
+// uploadRetryDelay is how long a buffer whose upload failed waits before the next try.
+const uploadRetryDelay = 30 * time.Second
+
+// keepForRetry parks a buffer whose upload failed, so the only copy of a save is never deleted:
+// its close already returned success, and nothing else would try again. The log names the temp
+// file, which survives a daemon exit for manual recovery.
+// ponytail: retries every uploadRetryDelay with no cap; a permanent failure (quota, a trashed
+// parent) keeps retrying until unmount
+func (h *fileHandle) keepForRetry(tmp *os.File, name string) {
+	slog.Warn("keeping the buffer to retry the upload", "path", name, "buffer", tmp.Name(), "retry_in", uploadRetryDelay)
+	h.park(tmp, uploadRetryDelay)
+}
+
+// drop lets go of a buffer that was uploaded or never written to: the node stops pointing at this
+// handle, and the temp file is closed and removed. Readers keep their own descriptors (readerOf).
+func (h *fileHandle) drop(tmp *os.File) {
+	h.mu.Lock()
+	h.tmp = nil
+	h.mu.Unlock()
+
+	fn := h.node
+	fn.mu.Lock()
+	if fn.handle == h {
+		fn.handle = nil
+	}
+	fn.mu.Unlock()
+
+	_ = tmp.Close()
+	_ = os.Remove(tmp.Name())
+}
+
 // settle uploads a buffer whose upload delay ran out, unless something took it back first.
 func (h *fileHandle) settle() {
 	h.mu.Lock()
@@ -2149,12 +2190,26 @@ func (h *fileHandle) hasTmp() bool {
 	return h.tmp != nil
 }
 
-// sharedTmp returns the write handle's temp file for a borrowing read-only handle to read from,
-// or nil if this handle has no temp buffer.
+// sharedTmp returns the write handle's temp file, or nil if this handle has no temp buffer.
 func (h *fileHandle) sharedTmp() *os.File {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.tmp
+}
+
+// readerOf returns a read-only handle on writer's temp file with its own descriptor, so it keeps
+// reading after the writer's upload closes and removes the file. Nil when there is no buffer, or
+// it was removed in the meantime.
+func readerOf(f *fileNode, writer *fileHandle) *fileHandle {
+	tmp := writer.sharedTmp()
+	if tmp == nil {
+		return nil
+	}
+	r, err := os.Open(tmp.Name())
+	if err != nil {
+		return nil
+	}
+	return &fileHandle{node: f, tmp: r}
 }
 
 func (h *fileHandle) tmpSize() (int64, bool) {
@@ -2283,13 +2338,20 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 	dirty := h.dirty
 	owns := h.owns
 	due := h.due
-	h.tmp = nil
+	if !owns {
+		h.tmp = nil
+	}
 	h.due = false
 	h.mu.Unlock()
 
-	// A borrowing read-only handle (owns == false) neither owns nor uploads the write handle's
-	// temp file; only that write handle's own Release closes and removes it.
-	if tmp == nil || !owns {
+	if tmp == nil {
+		return 0
+	}
+
+	// A reader (owns == false) has its own descriptor on the write handle's temp file (readerOf);
+	// closing it is all its Release does. Only the write handle uploads and removes the file.
+	if !owns {
+		_ = tmp.Close()
 		return 0
 	}
 
@@ -2315,31 +2377,26 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 		return 0
 	}
 
-	defer func() {
-		_ = tmp.Close()
-		_ = os.Remove(tmp.Name())
-	}()
-
-	fn.mu.Lock()
-	if fn.handle == h {
-		fn.handle = nil
-	}
-	fn.mu.Unlock()
-
 	if !dirty {
+		h.drop(tmp)
 		return 0
 	}
 
+	// The buffer stays on the node until the upload succeeds: a reader opened meanwhile still
+	// finds it, and a failed upload keeps it for a retry instead of deleting the only copy of a
+	// save whose close already returned success.
 	displayPath := path.Join(parent.path, name)
 
 	info, err := tmp.Stat()
 	if err != nil {
 		slog.Error("stat temp file failed", "path", name, "err", err)
+		h.keepForRetry(tmp, name)
 		return syscall.EIO
 	}
 
 	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
 		slog.Error("seek temp file failed", "path", name, "err", err)
+		h.keepForRetry(tmp, name)
 		return syscall.EIO
 	}
 
@@ -2354,6 +2411,7 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 	if !acquired {
 		st.uploadsFailed.Add(1)
 		slog.Warn("upload cancelled while queued", "path", name)
+		h.keepForRetry(tmp, name)
 		return syscall.EINTR
 	}
 	defer st.uploads.release()
@@ -2372,11 +2430,17 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 		st.recordFinished(recentTransfer{Path: displayPath, Action: "upload", Status: "failed", Bytes: info.Size(), Finished: time.Now(), Err: err.Error()})
 		if timedOut(opCtx) {
 			slog.Error("uploading file timed out", "path", name, "timeout", timeout)
+			h.keepForRetry(tmp, name)
 			return syscall.ETIMEDOUT
 		}
 		slog.Error("uploading file failed", "path", name, "err", err)
+		h.keepForRetry(tmp, name)
 		return syscall.EIO
 	}
+
+	// Uploaded: drop the buffer once the node points at the uploaded file (below), so an open in
+	// between never finds neither.
+	defer h.drop(tmp)
 
 	st.uploadsDone.Add(1)
 	st.recordFinished(recentTransfer{Path: displayPath, Action: "upload", Status: "done", Bytes: info.Size(), Finished: time.Now()})

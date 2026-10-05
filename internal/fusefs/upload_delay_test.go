@@ -61,6 +61,50 @@ func TestReleaseDelaysUploadAndReopenTakesItBack(t *testing.T) {
 	}
 }
 
+func TestReaderOutlivesTheDroppedBuffer(t *testing.T) {
+	fn, h := newDelayedHandle(t, &mountState{}, "model.FCStd")
+	if _, err := h.tmp.WriteString("saved"); err != nil {
+		t.Fatal(err)
+	}
+
+	r := readerOf(fn, h)
+	if r == nil {
+		t.Fatal("no reader for a buffered file")
+	}
+
+	h.drop(h.sharedTmp())
+	if fn.handle != nil {
+		t.Error("dropped handle still attached to the node")
+	}
+
+	buf := make([]byte, 5)
+	res, errno := r.Read(context.Background(), buf, 0)
+	if errno != 0 {
+		t.Fatalf("read after drop = %v, want the buffered bytes", errno)
+	}
+	if got, _ := res.Bytes(buf); string(got) != "saved" {
+		t.Errorf("read %q, want %q", got, "saved")
+	}
+	if errno := r.Release(context.Background()); errno != 0 {
+		t.Errorf("reader Release = %v", errno)
+	}
+}
+
+func TestKeepForRetryParksWithATimer(t *testing.T) {
+	st := &mountState{}
+	fn, h := newDelayedHandle(t, st, "model.FCStd")
+
+	h.keepForRetry(h.sharedTmp(), "model.FCStd")
+	defer h.unpark(false)
+
+	if fn.parkedHandle() != h || h.timer == nil || len(st.delayed) != 1 {
+		t.Fatal("failed upload was not kept for a retry")
+	}
+	if _, err := os.Stat(h.sharedTmp().Name()); err != nil {
+		t.Errorf("buffer of a failed upload removed: %v", err)
+	}
+}
+
 func TestSettleUnderExcludedNameParksAgain(t *testing.T) {
 	st := &mountState{uploadDelay: time.Hour, excludes: parseExcludes([]string{"*.tmp"})}
 	fn, h := newDelayedHandle(t, st, "model.FCStd")

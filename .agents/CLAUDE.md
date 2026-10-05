@@ -43,6 +43,9 @@ Code is in `internal/fusefs/fusefs.go`. Detail is in section 7 of `NOTAS-DE-ARQU
 - A write buffers to a local temp file and uploads on `Release`. Writes are whole-file, with one writer per file.
 - A released buffer can be parked (`fileHandle.park`). A name matching `exclude` parks with no timer. Any other name parks for its upload delay, then `settle` uploads it.
 - A rename, a reopen for write, or an unlink takes the parked buffer back (`unpark`). `unpark` returns false when the buffer was no longer parked, so two paths never upload the same buffer.
+- A rename on either path (`renamePending` for a new file, the regular `Rename` for an existing one) restarts a parked buffer's wait under the new name.
+- The buffer stays on the node (`fn.handle`) until the upload succeeds, then `drop` removes it. A failed upload calls `keepForRetry`, which parks it again for `uploadRetryDelay`; a close has already returned success, so dropping it would lose the save.
+- Readers of a buffered file get their own descriptor (`readerOf`), so they keep working after `drop` removes the temp file.
 - A parked new file is not on the drive yet, so lookups and listings include pending children.
 - Unmount flushes waiting buffers (`mountState.flushDelayed`) before the server unmounts.
 

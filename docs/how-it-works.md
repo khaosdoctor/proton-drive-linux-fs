@@ -86,6 +86,7 @@ The delay exists for apps that save in several steps. FreeCAD, for example, writ
 - **Delete**: drops the buffer. Nothing is uploaded.
 - **Listing, stat, read**: show the buffered file and its content, even though Proton does not have it yet.
 - **Unmount**: uploads every waiting buffer before the mount goes away.
+- **Failed upload**: keeps the buffer and tries again every 30 seconds. The log names the temp file, so a save is never lost to a network error.
 
 A file under an `-exclude` name is held the same way but without a timer: it stays local until it is renamed to a name outside the list.
 
