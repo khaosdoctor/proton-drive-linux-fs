@@ -32,6 +32,8 @@ type Config struct {
 	ThumbnailDir string   `toml:"thumbnail_dir"`
 	DenyReaders  []string `toml:"deny_readers"`
 	Exclude      []string `toml:"exclude"`
+	UploadDelay  string   `toml:"upload_delay"`
+	UploadDelays []string `toml:"upload_delays"`
 	MaxUploads   int      `toml:"max_uploads"`
 	MaxDownloads int      `toml:"max_downloads"`
 	LogLevel     string   `toml:"log_level"`
@@ -100,13 +102,13 @@ func Defaults() Config {
 		ThumbnailDir: defaultThumbnailDir(),
 		DenyReaders:  append([]string(nil), defaultDenyReaders...),
 		Exclude:      append([]string(nil), defaultExclude...),
+		UploadDelay:  "5s",
 		MaxUploads:   5,
-		MaxDownloads: 8,
+		MaxDownloads: 20,
 		LogLevel:     "info",
 		fileKeys:     map[string]bool{},
 	}
 }
-
 
 // defaultCacheDir returns the default on-disk cache root for blocks and persisted directory
 // listings, or "" if the user cache directory can't be determined (cache_dir/-cache-dir can still

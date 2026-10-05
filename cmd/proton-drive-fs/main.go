@@ -318,7 +318,7 @@ func runMount(args []string) int {
 
 	mountpoint, err := resolveMountpoint(fs.Arg(0), cfg)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs mount [<mountpoint>] [-config path] [-debug] [-ttl 30s] [-poll 10s] [-op-timeout 60s] [-cache-dir path] [-cache-size 2GiB] [-large-file 300MiB] [-thumbnails] [-thumbnail-dir path] [-deny-readers names] [-exclude patterns] [-max-uploads 5] [-max-downloads 8] [-foreground] [-log-level info] [-log-stderr]  (required unless mountpoint is set in the config file)")
+		fmt.Fprintln(os.Stderr, "usage: proton-drive-fs mount [<mountpoint>] [-config path] [-debug] [-ttl 30s] [-poll 10s] [-op-timeout 60s] [-cache-dir path] [-cache-size 2GiB] [-large-file 300MiB] [-thumbnails] [-thumbnail-dir path] [-deny-readers names] [-exclude patterns] [-upload-delay 5s] [-upload-delays rules] [-max-uploads 5] [-max-downloads 20] [-foreground] [-log-level info] [-log-stderr]  (required unless mountpoint is set in the config file)")
 		fmt.Fprintln(os.Stderr, noMountpointError(configPath))
 		return 2
 	}
@@ -455,6 +455,8 @@ func runMount(args []string) int {
 		Thumbnails:   thumbStore,
 		DenyReaders:  config.SplitComma(*denyReaders),
 		Exclude:      config.SplitComma(*exclude),
+		UploadDelay:  *mf.uploadDelay,
+		UploadDelays: config.SplitComma(*mf.uploadDelays),
 		Registry:     registry,
 		MaxUploads:   *maxUploads,
 		OnAuthFailed: func() {

@@ -77,7 +77,17 @@ sequenceDiagram
 
 ## Writing a file
 
-Opening a file for writing buffers the new content to a local temp file. Nothing is sent to Proton until the file closes, at which point the whole file uploads as a new revision. There is no partial write and no streaming upload while the file is still open.
+Opening a file for writing buffers the new content to a local temp file. Nothing is sent to Proton while the file is open. When it closes, the buffer waits out its upload delay (`-upload-delay`, `5s` by default, overridable per pattern with `-upload-delays`), and then the whole file uploads as a new revision. There is no partial write and no streaming upload while the file is still open.
+
+The delay exists for apps that save in several steps. FreeCAD, for example, writes `model.FCStd.<uuid>`, renames `model.FCStd` to a timestamped `.FCBak`, then renames the temp file to `model.FCStd`. While a buffer waits:
+
+- **Rename**: moves the buffer to the new name and starts the wait over under that name's delay.
+- **Open for writing**: hands the same buffer back to the app and stops the wait. The next close starts it again.
+- **Delete**: drops the buffer. Nothing is uploaded.
+- **Listing, stat, read**: show the buffered file and its content, even though Proton does not have it yet.
+- **Unmount**: uploads every waiting buffer before the mount goes away.
+
+A file under an `-exclude` name is held the same way but without a timer: it stays local until it is renamed to a name outside the list.
 
 ```mermaid
 sequenceDiagram
@@ -95,6 +105,7 @@ sequenceDiagram
     FS->>Tmp: buffer bytes
     App->>Kernel: close
     Kernel->>FS: Release
+    FS->>FS: hold the buffer for the upload delay (a rename restarts it)
     FS->>Drive: Upload(reader, size, modTime)
     Drive->>API: create file, or a new revision on an existing one
     loop each 4 MiB block
