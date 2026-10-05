@@ -39,7 +39,7 @@ Only one writer per file at a time. Concurrent writers to the same file are not 
 
 **What happens if I edit a huge file?**
 
-The whole file buffers locally while it's open, and the whole file uploads again when it closes. There is no partial or incremental upload, so editing a very large file costs a full re-upload.
+The whole file buffers locally while it's open, and the whole file uploads again once it closes and its [upload delay](usage.md#mount) passes. There is no partial or incremental upload, so editing a very large file costs a full re-upload.
 
 **Is there a trash or restore?**
 

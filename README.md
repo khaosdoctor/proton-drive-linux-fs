@@ -16,7 +16,7 @@ one really cares about doing it for this God-forsaken OS, and it was pissing me 
 
 Files and folders are listed from Proton's metadata and the file is only downloaded when something opens it for performance.
 
-Remote changes reach the mount through Proton's event feed that we keep listening, which invalidates the affected directory listings and cached file content. Writes are buffered to a local temp file and uploaded to Proton in full when the file closes.
+Remote changes reach the mount through Proton's event feed that we keep listening, which invalidates the affected directory listings and cached file content. Writes are buffered to a local temp file and uploaded to Proton in full a few seconds after the file closes.
 
 The changes are __not__ batched, everything you do is updated file by file, so
 it's really not very performance-friendly for a lot of files. But it works.

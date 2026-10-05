@@ -35,6 +35,8 @@ var fields = []field{
 	{"log-level", "log_level", func(cfg *Config, v any) { cfg.LogLevel = v.(string) }},
 	{"log-stderr", "log_stderr", func(cfg *Config, v any) { cfg.LogStderr = v.(bool) }},
 	{"exclude", "exclude", func(cfg *Config, v any) { cfg.Exclude = SplitComma(v.(string)) }},
+	{"upload-delay", "upload_delay", func(cfg *Config, v any) { cfg.UploadDelay = v.(time.Duration).String() }},
+	{"upload-delays", "upload_delays", func(cfg *Config, v any) { cfg.UploadDelays = SplitComma(v.(string)) }},
 	{"hv-method", "hv_method", func(cfg *Config, v any) { cfg.HVMethod = v.(string) }},
 	{"no-browser", "no_browser", func(cfg *Config, v any) { cfg.NoBrowser = v.(bool) }},
 }

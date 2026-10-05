@@ -4,9 +4,11 @@ Every flag that `login`, `mount`, and `tray` accept has a matching key in a TOML
 
 The first command you run creates that file if it doesn't exist, with every key commented out at its default value, so you always have a config.toml to edit. An existing file is never overwritten, and if the directory can't be written to, the built-in defaults are used instead.
 
+After an upgrade, the file keeps up with the keys the new version knows. A key added in the new version is appended at the end, commented out at its default. When a key is removed, its commented-out line goes away. Keys you set yourself are never changed or removed. Package upgrades restart the daemon, so this happens on the first start after the upgrade.
+
 ## Precedence
 
-Values resolve in one direction: a flag on the command line always wins over the config file, and the config file always wins over the built-in default.
+Values resolve in one direction: a flag on the command line overrides the config file, and the config file overrides the built-in default.
 
 ## config init and config show
 
@@ -34,8 +36,10 @@ proton-drive-fs config show [-config path] [flags...]
 | `thumbnail_dir` | `-thumbnail-dir` | `$XDG_CACHE_HOME/thumbnails` | Freedesktop thumbnail cache directory. |
 | `deny_readers` | `-deny-readers` | see [Usage](usage.md#mount) | Process names refused a read of a file above `large_file`; empty allows all. |
 | `exclude` | `-exclude` | see [Usage](usage.md#mount) | Filename patterns to hide from listings and never upload (a file created under one stays local until renamed); prefix with `re:` for regexp, otherwise glob. |
+| `upload_delay` | `-upload-delay` | `5s` | How long a saved file waits after it closes before it uploads; `"0s"` uploads on close. |
+| `upload_delays` | `-upload-delays` | `[]` | Per-pattern `upload_delay` overrides as `"pattern=duration"`; the first matching pattern is used. For example `["*.bak=1m"]`. |
 | `max_uploads` | `-max-uploads` | `5` | How many files upload at once. |
-| `max_downloads` | `-max-downloads` | `8` | How many file blocks download at once. |
+| `max_downloads` | `-max-downloads` | `20` | How many file blocks download at once. |
 | `log_level` | `-log-level` | `info` | Log verbosity: `debug`, `info`, `warn`, or `error`. |
 | `log_stderr` | `-log-stderr` | `false` | Force logging to stderr instead of the systemd journal. |
 | `foreground` | `-foreground` | `false` | Stay attached to the terminal instead of detaching into the background. |

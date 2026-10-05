@@ -78,6 +78,15 @@ type Options struct {
 	// is a filepath.Match glob, or a regexp if prefixed with "re:".
 	Exclude []string
 
+	// UploadDelay is how long a closed, written file waits before it uploads, so an app's save
+	// sequence (write "x.<uuid>", rename "x" to a backup, rename "x.<uuid>" to "x") finishes
+	// first. <=0 uploads on close.
+	UploadDelay time.Duration
+
+	// UploadDelays override UploadDelay per filename, as "pattern=duration" with pattern in
+	// Exclude's syntax. The first match wins.
+	UploadDelays []string
+
 	// Registry, when set, maps file extensions to their freedesktop thumbnailer commands.
 	// The daemon runs these thumbnailers on downloaded files in the background, and blocks
 	// their processes from reading through FUSE. nil disables external thumbnailing.
@@ -193,6 +202,8 @@ func Mount(ctx context.Context, mountpoint string, c *drive.Client, root *drive.
 		defer close(unmountDone)
 
 		<-ctx.Done()
+
+		st.flushDelayed()
 
 		slog.Info("unmounting", "path", mountpoint)
 
@@ -354,13 +365,22 @@ type mountState struct {
 	// directly; finishLoad falls back to context.Background() then.
 	ctx context.Context
 
-	thumbs             *thumbs.Store
-	thumbJobs          chan thumbJob
-	registry           *thumbs.Registry
-	externalThumbJobs  chan externalThumbJob
-	denyReaders        []string
-	denyThumbnailers   []string
-	excludes []func(string) bool
+	thumbs            *thumbs.Store
+	thumbJobs         chan thumbJob
+	registry          *thumbs.Registry
+	externalThumbJobs chan externalThumbJob
+	denyReaders       []string
+	denyThumbnailers  []string
+	excludes          []func(string) bool
+
+	uploadDelay time.Duration
+	delayRules  []delayRule
+
+	// delayed holds every write buffer waiting out its upload delay, so unmount can upload them
+	// instead of losing them; settling counts the ones uploading.
+	delayedMu sync.Mutex
+	delayed   map[*fileHandle]struct{}
+	settling  sync.WaitGroup
 
 	// uploads bounds how many files upload at once, so a bulk copy does not open one connection
 	// per file it was handed.
@@ -434,7 +454,9 @@ func newMountState(ctx context.Context, c *drive.Client, uid, gid uint32, opts O
 		thumbs:        opts.Thumbnails,
 		registry:      opts.Registry,
 		denyReaders:   opts.DenyReaders,
-		excludes: parseExcludes(opts.Exclude),
+		excludes:      parseExcludes(opts.Exclude),
+		uploadDelay:   opts.UploadDelay,
+		delayRules:    parseDelayRules(opts.UploadDelays),
 		uploads:       newSem(opts.MaxUploads),
 		dirs:          make(map[string]*dirNode),
 		parentOf:      make(map[string]string),
@@ -481,6 +503,82 @@ func (st *mountState) excluded(name string) bool {
 		}
 	}
 	return false
+}
+
+type delayRule struct {
+	match func(string) bool
+	delay time.Duration
+}
+
+// parseDelayRules parses "pattern=duration" entries, splitting at the last "=" so a regexp
+// pattern may contain one.
+func parseDelayRules(rules []string) []delayRule {
+	var out []delayRule
+	for _, r := range rules {
+		i := strings.LastIndex(r, "=")
+		if i <= 0 {
+			slog.Warn("invalid upload delay rule, want pattern=duration, skipping", "rule", r)
+			continue
+		}
+		delay, err := time.ParseDuration(r[i+1:])
+		if err != nil {
+			slog.Warn("invalid upload delay rule, skipping", "rule", r, "err", err)
+			continue
+		}
+		matchers := parseExcludes([]string{r[:i]})
+		if len(matchers) == 0 {
+			continue
+		}
+		out = append(out, delayRule{match: matchers[0], delay: delay})
+	}
+	return out
+}
+
+// delayFor returns how long a file closed under name waits before it uploads.
+func (st *mountState) delayFor(name string) time.Duration {
+	for _, r := range st.delayRules {
+		if r.match(name) {
+			return r.delay
+		}
+	}
+	return st.uploadDelay
+}
+
+func (st *mountState) trackDelayed(h *fileHandle, on bool) {
+	st.delayedMu.Lock()
+	defer st.delayedMu.Unlock()
+	if on {
+		if st.delayed == nil {
+			st.delayed = make(map[*fileHandle]struct{})
+		}
+		st.delayed[h] = struct{}{}
+		return
+	}
+	delete(st.delayed, h)
+}
+
+// flushDelayed uploads every buffer still waiting out its delay and waits for them, so an unmount
+// does not drop a save made just before it.
+// ponytail: a settle the timer started a moment before this may finish after the process exits
+func (st *mountState) flushDelayed() {
+	st.delayedMu.Lock()
+	pending := make([]*fileHandle, 0, len(st.delayed))
+	for h := range st.delayed {
+		pending = append(pending, h)
+	}
+	st.delayedMu.Unlock()
+
+	if len(pending) > 0 {
+		slog.Info("uploading delayed files before unmount", "count", len(pending))
+	}
+	for _, h := range pending {
+		st.settling.Add(1)
+		go func() {
+			defer st.settling.Done()
+			h.settle()
+		}()
+	}
+	st.settling.Wait()
 }
 
 // everything through.
@@ -1318,6 +1416,14 @@ func (d *dirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (
 		return d.makeChild(ctx, child, out), 0
 	}
 
+	// A file still waiting out its upload delay is not on the drive yet.
+	if fn := d.pendingChild(name); fn != nil {
+		var attr fuse.AttrOut
+		_ = fn.Getattr(ctx, nil, &attr) // never fails: it only reads local state
+		out.Attr = attr.Attr
+		return fn.EmbeddedInode(), 0
+	}
+
 	return nil, syscall.ENOENT
 }
 
@@ -1391,32 +1497,35 @@ func (d *dirNode) Create(ctx context.Context, name string, flags uint32, mode ui
 
 // Unlink trashes a file.
 func (d *dirNode) Unlink(ctx context.Context, name string) syscall.Errno {
-	// A parked buffer was never uploaded, so dropping it is all an unlink has to do.
-	if fn := d.pendingChild(name); fn != nil {
-		if h := fn.parkedHandle(); h != nil {
-			h.unpark(false)
-			return h.Release(ctx)
+	// A parked buffer was never uploaded, so drop it; a file that never reached the drive needs
+	// nothing else.
+	if fn := d.fileChild(name); fn != nil {
+		if h := fn.parkedHandle(); h != nil && h.unpark(false) {
+			_ = h.Release(ctx)
+			if fn.pending() {
+				return 0
+			}
 		}
 	}
 	return d.remove(ctx, name)
 }
 
-// pendingChild returns the file mounted under name that has not been uploaded yet, if any.
-func (d *dirNode) pendingChild(name string) *fileNode {
+// fileChild returns the file mounted under name, if any.
+func (d *dirNode) fileChild(name string) *fileNode {
 	child := d.GetChild(name)
 	if child == nil {
 		return nil
 	}
-	fn, ok := child.Operations().(*fileNode)
-	if !ok {
-		return nil
-	}
-	fn.mu.Lock()
-	defer fn.mu.Unlock()
-	if fn.node != nil {
-		return nil
-	}
+	fn, _ := child.Operations().(*fileNode)
 	return fn
+}
+
+// pendingChild returns the file mounted under name that has not been uploaded yet, if any.
+func (d *dirNode) pendingChild(name string) *fileNode {
+	if fn := d.fileChild(name); fn != nil && fn.pending() {
+		return fn
+	}
+	return nil
 }
 
 // Rmdir trashes a folder. Proton trashes non-empty folders recursively, so this doesn't need to
@@ -1549,9 +1658,9 @@ func (d *dirNode) renamePending(ctx context.Context, name string, newDir *dirNod
 	}
 	fn.mu.Unlock()
 
-	// Already closed under an excluded name: nothing else will upload it, so do it now.
-	if h := fn.parkedHandle(); h != nil && !newDir.st.excluded(newName) {
-		h.unpark(true)
+	// Already closed and parked: release it again under the new name, which uploads it now, starts
+	// the new name's upload delay over, or keeps it parked if the new name is excluded too.
+	if h := fn.parkedHandle(); h != nil && h.unpark(true) {
 		return h.Release(ctx)
 	}
 
@@ -1565,6 +1674,7 @@ func (d *dirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	}
 
 	entries := make([]fuse.DirEntry, 0, len(children))
+	listed := make(map[string]bool, len(children))
 	for _, child := range children {
 		if d.st.excluded(child.Name) {
 			continue
@@ -1575,11 +1685,21 @@ func (d *dirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 			mode = fuse.S_IFDIR
 		}
 
+		listed[child.Name] = true
 		entries = append(entries, fuse.DirEntry{
 			Name: child.Name,
 			Ino:  inodeNum(child.Link.LinkID),
 			Mode: mode,
 		})
+	}
+
+	// Files written here but not uploaded yet (waiting out their upload delay) belong in the
+	// listing too, or a just-saved file would vanish from it until the upload finishes.
+	for name, child := range d.Children() {
+		if listed[name] || d.st.excluded(name) || d.pendingChild(name) == nil {
+			continue
+		}
+		entries = append(entries, fuse.DirEntry{Name: name, Ino: child.StableAttr().Ino, Mode: fuse.S_IFREG})
 	}
 
 	return fs.NewListDirStream(entries), 0
@@ -1660,6 +1780,13 @@ func (f *fileNode) setNode(n *drive.Node) {
 	f.node = n
 	f.name = n.Name
 	f.mu.Unlock()
+}
+
+// pending reports whether the file has not been uploaded yet.
+func (f *fileNode) pending() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.node == nil
 }
 
 // currentName returns the file's current name, used for logging and as the Upload target name.
@@ -1767,8 +1894,30 @@ func (f *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 	parent := f.parent
 	f.mu.Unlock()
 
+	readOnly := flags&syscall.O_ACCMODE == syscall.O_RDONLY
+
+	// A parked buffer is the file's current content: a writer takes it over (an app saving again
+	// within the upload delay), which also stops its timer.
+	if h := f.parkedHandle(); h != nil && !readOnly && h.unpark(true) {
+		if flags&syscall.O_TRUNC != 0 {
+			if err := h.truncate(0); err != nil {
+				slog.Error("truncating failed", "path", f.currentName(), "err", err)
+				return nil, 0, syscall.EIO
+			}
+		}
+		return h, 0, 0
+	}
+
 	if node == nil {
-		// A pending (not yet uploaded) file only has the handle Create already returned.
+		// A pending (not yet uploaded) file only has its write handle's buffer to read from.
+		f.mu.Lock()
+		writer := f.handle
+		f.mu.Unlock()
+		if writer != nil && readOnly {
+			if tmp := writer.sharedTmp(); tmp != nil {
+				return &fileHandle{node: f, tmp: tmp}, fuse.FOPEN_DIRECT_IO, 0
+			}
+		}
 		return nil, 0, syscall.EIO
 	}
 
@@ -1782,7 +1931,7 @@ func (f *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 		}
 	}
 
-	if flags&syscall.O_ACCMODE == syscall.O_RDONLY {
+	if readOnly {
 		// A dirty write handle's buffered bytes are the current content; read from the same
 		// temp file (not closed or removed here) instead of serving the stale committed
 		// revision. Direct I/O keeps the kernel from caching pre-write bytes alongside them.
@@ -1906,11 +2055,13 @@ type fileHandle struct {
 	node *fileNode
 	file *drive.File // set for a read-only handle
 
-	mu    sync.Mutex
-	tmp   *os.File // set for a write-capable handle, or a read-only view of the write handle's tmp
+	mu     sync.Mutex
+	tmp    *os.File // set for a write-capable handle, or a read-only view of the write handle's tmp
 	dirty  bool
-	owns   bool // true only for the write handle that owns tmp: it alone closes, removes and uploads it
-	parked bool // released under an excluded name; tmp kept until a rename uploads it or Unlink drops it
+	owns   bool        // true only for the write handle that owns tmp: it alone closes, removes and uploads it
+	parked bool        // released but not uploaded: tmp kept until timer, a rename, a reopen or Unlink moves it on
+	timer  *time.Timer // set while parked for an upload delay; nil while parked under an excluded name
+	due    bool        // the upload delay ran out, so the next Release uploads instead of parking again
 }
 
 var _ = (fs.FileReader)((*fileHandle)(nil))
@@ -1919,7 +2070,7 @@ var _ = (fs.FileFlusher)((*fileHandle)(nil))
 var _ = (fs.FileFsyncer)((*fileHandle)(nil))
 var _ = (fs.FileReleaser)((*fileHandle)(nil))
 
-// parkedHandle returns the write handle Release parked under an excluded name, if any.
+// parkedHandle returns the write handle Release parked, if any.
 func (f *fileNode) parkedHandle() *fileHandle {
 	f.mu.Lock()
 	h := f.handle
@@ -1936,12 +2087,60 @@ func (f *fileNode) parkedHandle() *fileHandle {
 	return h
 }
 
-// unpark readies a parked handle for a second Release: dirty uploads the buffer, clean drops it.
-func (h *fileHandle) unpark(dirty bool) {
+// park keeps tmp after Release; with delay > 0 it uploads once delay passes without a rename,
+// reopen or unlink taking it back first.
+func (h *fileHandle) park(tmp *os.File, delay time.Duration) {
 	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.tmp = tmp
+	h.parked = true
+	if delay <= 0 {
+		return
+	}
+
+	st := h.node.mountState()
+	st.trackDelayed(h, true)
+	h.timer = time.AfterFunc(delay, func() {
+		st.settling.Add(1)
+		defer st.settling.Done()
+		h.settle()
+	})
+}
+
+// settle uploads a buffer whose upload delay ran out, unless something took it back first.
+func (h *fileHandle) settle() {
+	h.mu.Lock()
+	if !h.parked || h.timer == nil {
+		h.mu.Unlock()
+		return
+	}
+	h.timer.Stop()
+	h.parked, h.timer, h.dirty, h.due = false, nil, true, true
+	h.mu.Unlock()
+
+	h.node.mountState().trackDelayed(h, false)
+	_ = h.Release(context.Background())
+}
+
+// unpark takes a parked handle back for a second Release: dirty uploads (or delays again) the
+// buffer, clean drops it. False when it was no longer parked, e.g. its delay just ran out.
+func (h *fileHandle) unpark(dirty bool) bool {
+	h.mu.Lock()
+	if !h.parked {
+		h.mu.Unlock()
+		return false
+	}
 	h.parked = false
 	h.dirty = dirty
+	timer := h.timer
+	h.timer = nil
 	h.mu.Unlock()
+
+	if timer != nil {
+		timer.Stop()
+		h.node.mountState().trackDelayed(h, false)
+	}
+	return true
 }
 
 func (h *fileHandle) hasTmp() bool {
@@ -2083,7 +2282,9 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 	tmp := h.tmp
 	dirty := h.dirty
 	owns := h.owns
+	due := h.due
 	h.tmp = nil
+	h.due = false
 	h.mu.Unlock()
 
 	// A borrowing read-only handle (owns == false) neither owns nor uploads the write handle's
@@ -2103,10 +2304,14 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 	// stays parked on the node so renamePending uploads it under the real name, or Unlink drops it.
 	// ponytail: a parked buffer never renamed or unlinked stays in $TMPDIR until the daemon exits
 	if dirty && parent.st.excluded(name) {
-		h.mu.Lock()
-		h.tmp = tmp
-		h.parked = true
-		h.mu.Unlock()
+		h.park(tmp, 0)
+		return 0
+	}
+
+	// Anything else waits out its upload delay first, so the rest of an app's save sequence
+	// (renames, deletes) has happened by the time the file goes to the drive.
+	if delay := parent.st.delayFor(name); dirty && !due && delay > 0 {
+		h.park(tmp, delay)
 		return 0
 	}
 
@@ -2184,14 +2389,27 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 	uploadedParent := fn.parent
 	fn.mu.Unlock()
 
-	// A nil node means the upload succeeded but reading the link back did not; expire the listing
-	// so the next Lookup fetches the truth. Same when a Rename moved the file mid-upload.
-	if uploaded == nil {
-		uploadedParent.expire()
+	// A Rename that arrived mid-upload only retargeted this node (FreeCAD writes "x.FCStd.<uuid>"
+	// and renames it over "x.FCStd" while the upload runs), so the drive still has the file under
+	// the old name. Move it to where it is now.
+	if uploadedName != name || uploadedParent != parent {
+		if uploaded != nil {
+			parent.upsertChild(uploaded)
+		} else {
+			parent.expire()
+		}
+		if errno := parent.Rename(ctx, name, uploadedParent, uploadedName, 0); errno != 0 {
+			return errno
+		}
+		if moved, errno := uploadedParent.findChild(ctx, uploadedName); errno == 0 {
+			fn.setNode(moved)
+		}
 		return 0
 	}
 
-	if uploadedName != name {
+	// A nil node means the upload succeeded but reading the link back did not; expire the listing
+	// so the next Lookup fetches the truth.
+	if uploaded == nil {
 		uploadedParent.expire()
 		return 0
 	}

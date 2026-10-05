@@ -10,7 +10,7 @@ it.
 
 Remote changes reach the mount through Proton's event feed, which invalidates the
 affected directory listings and cached file content. Writes are buffered to a local
-temp file and uploaded to Proton in full when the file closes.
+temp file and uploaded to Proton in full a few seconds after the file closes.
 
 ## Status
 

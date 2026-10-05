@@ -89,6 +89,8 @@ type mountConfigFlags struct {
 	thumbnailDir             *string
 	denyReaders              *string
 	exclude                  *string
+	uploadDelay              *time.Duration
+	uploadDelays             *string
 	maxUploads, maxDownloads *int
 	foreground               *bool
 	logLevel                 *string
@@ -116,6 +118,10 @@ func registerMountConfigFlags(fs *flag.FlagSet, cfg config.Config) (*mountConfig
 	if err != nil {
 		return nil, fmt.Errorf("config op_timeout: %w", err)
 	}
+	uploadDelayDefault, err := time.ParseDuration(cfg.UploadDelay)
+	if err != nil {
+		return nil, fmt.Errorf("config upload_delay: %w", err)
+	}
 	if _, err := parseCacheSize(cfg.CacheSize); err != nil {
 		return nil, fmt.Errorf("config cache_size: %w", err)
 	}
@@ -139,6 +145,8 @@ func registerMountConfigFlags(fs *flag.FlagSet, cfg config.Config) (*mountConfig
 		thumbnailDir: fs.String("thumbnail-dir", cfg.ThumbnailDir, "freedesktop thumbnail cache directory"),
 		denyReaders:  fs.String("deny-readers", strings.Join(cfg.DenyReaders, ","), "comma-separated process names refused a read of a file above -large-file; empty allows all"),
 		exclude:      fs.String("exclude", strings.Join(cfg.Exclude, ","), "comma-separated filename patterns to hide and never upload; prefix with re: for regexp, otherwise glob"),
+		uploadDelay:  fs.Duration("upload-delay", uploadDelayDefault, "how long a saved file waits before it uploads, so an app finishes saving first; 0 uploads on close"),
+		uploadDelays: fs.String("upload-delays", strings.Join(cfg.UploadDelays, ","), "comma-separated per-pattern -upload-delay overrides as pattern=duration; the first matching pattern is used"),
 		maxUploads:   fs.Int("max-uploads", cfg.MaxUploads, "how many files upload at once; the rest wait in line"),
 		maxDownloads: fs.Int("max-downloads", cfg.MaxDownloads, "how many file blocks download at once"),
 		foreground:   fs.Bool("foreground", cfg.Foreground, "stay attached to the terminal instead of detaching into the background; used by the systemd unit"),
@@ -262,6 +270,8 @@ func printConfig(cfg config.Config, explicit map[string]bool) {
 	line("thumbnail_dir", strconv.Quote(cfg.ThumbnailDir))
 	line("deny_readers", config.QuoteArray(cfg.DenyReaders))
 	line("exclude", config.QuoteArray(cfg.Exclude))
+	line("upload_delay", strconv.Quote(cfg.UploadDelay))
+	line("upload_delays", config.QuoteArray(cfg.UploadDelays))
 	line("max_uploads", strconv.Itoa(cfg.MaxUploads))
 	line("max_downloads", strconv.Itoa(cfg.MaxDownloads))
 	line("log_level", strconv.Quote(cfg.LogLevel))

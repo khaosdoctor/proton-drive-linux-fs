@@ -25,7 +25,7 @@ func TestDefaults(t *testing.T) {
 	if !d.Thumbnails {
 		t.Fatal("Thumbnails should default to true")
 	}
-	if d.MaxUploads != 5 || d.MaxDownloads != 8 {
+	if d.MaxUploads != 5 || d.MaxDownloads != 20 {
 		t.Fatalf("unexpected upload/download defaults: %+v", d)
 	}
 	if d.LogLevel != "info" {
@@ -200,5 +200,48 @@ func TestLoadOrInitCreatesAndKeepsExistingFile(t *testing.T) {
 	}
 	if cfg.TTL != "90s" {
 		t.Errorf("TTL = %q, want 90s: LoadOrInit must not overwrite an existing file", cfg.TTL)
+	}
+}
+
+func TestUpgradeAddsNewKeysDropsGoneOnesKeepsSetOnes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	old := "# header\n\n" +
+		"# Set by the user.\nttl = \"90s\"\n\n" +
+		"# Gone from initFields.\n# Its second comment line.\n# ----\n# retired_key = \"x\"\n\n" +
+		"# Also gone, but set.\nretired_set = 3\n\n" +
+		"# Still documented.\n# poll = \"10s\"\n"
+	if err := os.WriteFile(path, []byte(old), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	added, removed, err := Upgrade(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 1 || removed[0] != "retired_key" {
+		t.Errorf("removed = %v, want [retired_key]", removed)
+	}
+	if len(added) != len(initFields)-2 {
+		t.Errorf("added %d keys, want every documented key but ttl and poll (%d)", len(added), len(initFields)-2)
+	}
+
+	data, _ := os.ReadFile(path)
+	text := string(data)
+	keep := "# header\n\n# Set by the user.\nttl = \"90s\"\n\n# Also gone, but set.\nretired_set = 3\n\n# Still documented.\n# poll = \"10s\"\n\n"
+	if !strings.HasPrefix(text, keep) {
+		t.Errorf("existing lines changed or retired block kept:\n%s", text)
+	}
+	if !strings.Contains(text, "# upload_delay = \"5s\"\n") {
+		t.Error("new key upload_delay not appended")
+	}
+	if info, _ := os.Stat(path); info.Mode().Perm() != 0600 {
+		t.Errorf("mode = %v, want 0600", info.Mode().Perm())
+	}
+
+	if added, removed, _ := Upgrade(path); added != nil || removed != nil {
+		t.Errorf("second Upgrade changed the file again: added %v, removed %v", added, removed)
+	}
+	if cfg, err := Load(path); err != nil || cfg.TTL != "90s" {
+		t.Errorf("Load after Upgrade = %q, %v; want ttl 90s", cfg.TTL, err)
 	}
 }
