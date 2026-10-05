@@ -49,3 +49,54 @@ restore path through proton-drive-fs today.
 **Why does `mount` refuse to run after I rebuilt the binary?**
 
 `mount` checks whether the mountpoint is already mounted before attaching. If an earlier unmount failed as busy, the old daemon is still serving the mount, and `mount` refuses to start a second one on top of it. See [Stale daemon after a rebuild](troubleshooting.md#stale-daemon-after-a-rebuild).
+
+**Why does `mount` fail with `cannot decode TOML integer into struct field`?**
+
+Durations and sizes in `config.toml` are quoted strings with a unit, the same text you would pass to the flag. Booleans and numbers are not quoted, and lists use brackets even with one entry.
+
+```toml
+ttl = 30                # cannot decode TOML integer into struct field config.Config.TTL of type string
+ttl = "30"              # time: missing unit in duration "30"
+ttl = "30s"             # correct
+
+cache_size = 2147483648 # cannot decode TOML integer into struct field config.Config.CacheSize of type string
+cache_size = "2GB"      # invalid size "2GB" (units are K, M, G, KiB, MiB, GiB)
+cache_size = "2GiB"     # correct
+
+thumbnails = "false"    # cannot decode TOML string into struct field config.Config.Thumbnails of type bool
+thumbnails = false      # correct
+
+max_uploads = "5"       # cannot decode TOML string into struct field config.Config.MaxUploads of type int
+max_uploads = 5         # correct
+
+exclude = "*.tmp"       # cannot decode TOML string into struct field config.Config.Exclude of type []string
+exclude = ["*.tmp"]     # correct
+```
+
+Run `proton-drive-fs config show` after editing the file. It fails with the same error `mount` would, naming the key and, for a type mismatch, the line and column.
+
+**Why does a key I set in `config.toml` have no effect?**
+
+Unknown keys are ignored without an error. Keys use underscores (`upload_delay`, not `upload-delay` as on the command line), the mountpoint key is `mountpoint`, not `mount_point`, and every key goes at the top level of the file. Keys under a section header such as `[mount]` are ignored too. `config show` marks a value read from the file with `# file`; a key you set that still shows `# default` was not read.
+
+**Why are `.DS_Store` and `.~lock` files uploading after I set `exclude`?**
+
+Setting `exclude` or `deny_readers` replaces the default list, it does not add to it. `exclude = ["*.bak"]` excludes `*.bak` and nothing else. Copy the defaults from the commented-out line `config init` writes, then add your own entries to that list.
+
+**Why is my `exclude` or `upload_delays` pattern ignored?**
+
+A broken pattern does not stop the mount. It logs a warning and is skipped, so check the logs (see [Read the logs](troubleshooting.md#read-the-logs)) when a pattern does not match.
+
+```toml
+upload_delays = ["*.bak:1m"]        # invalid upload delay rule, want pattern=duration, skipping
+upload_delays = ["*.bak=1m"]        # correct
+
+exclude = ['re:^\.~lock\.(']        # invalid exclude regex, skipping
+exclude = ['re:^a{1,3}\.tmp$']      # split at the comma into two broken patterns
+```
+
+Lists are joined with commas internally, so a pattern cannot contain a comma. Rewrite a regexp like `{1,3}` without one, or use several patterns.
+
+**Why does `config show` accept my `log_level` but `mount` refuses to start?**
+
+`log_level` is only checked when `mount` runs. `log_level = "verbose"` exits with `error: invalid -log-level: unknown level "verbose" (want debug, info, warn or error)`.
