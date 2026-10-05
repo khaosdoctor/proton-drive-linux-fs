@@ -2,35 +2,24 @@
 
 ## CAPTCHA during login
 
-On first login, or after Proton grows suspicious of a login attempt, the API replies
-with error 9001 (human verification required) instead of logging you in. `login`
-catches this and walks you through it:
+On first login, or after Proton grows suspicious of a login attempt, the API replies with error 9001 (human verification required) instead of logging you in. `login` catches this and walks you through it:
 
 ```bash
 proton-drive-fs login
 ```
 
 1. Proton lists the verification methods it offers (email, sms, captcha).
-2. `login` tries email, then sms, then captcha, unless you forced one with
-   `-hv-method`.
-3. For a CAPTCHA, the CLI prints the verify.proton.me URL and opens it in a browser
-   unless `-no-browser` is set, in which case open the URL yourself.
+2. `login` tries email, then sms, then captcha, unless you forced one with `-hv-method`.
+3. For a CAPTCHA, the CLI prints the verify.proton.me URL and opens it in a browser unless `-no-browser` is set, in which case open the URL yourself.
 4. Solve the CAPTCHA in the browser, then press Enter in the terminal to continue.
 
 ## Account temporarily locked
 
-Proton's API can return error 2028 (account temporarily locked) after several failed
-login attempts in a row. This is enforced on Proton's side, not something
-we can bypass. Wait before retrying because repeated retries while locked only
-extend the wait.
+Proton's API can return error 2028 (account temporarily locked) after several failed login attempts in a row. This is enforced on Proton's side, not something we can bypass. Wait before retrying because repeated retries while locked only extend the wait.
 
 ## Mount or app refuses to start
 
-One reason for that could be that PDFS only allows one instance of the mount per
-user at a time. If you have another mount running, or something happened to the
-previous mount and the daemon is still running, you will see an error when
-trying to mount or start the tray. You can first try to check if the daemon is
-running with:
+One reason for that could be that PDFS only allows one instance of the mount per user at a time. If you have another mount running, or something happened to the previous mount and the daemon is still running, you will see an error when trying to mount or start the tray. You can first try to check if the daemon is running with:
 
 ```sh
 ps -aux | grep proton-drive-fs
@@ -50,23 +39,17 @@ Then __close the application completely__ and try to start it again.
 proton-drive-fs unmount path/to/mount
 ```
 
-An unmount fails as busy while a process still has a file or the mountpoint open.
-`unmount` retries automatically for `-wait` (default 5s), then falls back to a lazy
-unmount that detaches the mount immediately and prints the processes still holding it
-open so the kernel drops the mount once those processes let go.
+An unmount fails as busy while a process still has a file or the mountpoint open. `unmount` retries automatically for `-wait` (default 5s), then falls back to a lazy unmount that detaches the mount immediately and prints the processes still holding it open so the kernel drops the mount once those processes let go.
 
-If the daemon has died or deadlocked and programs are stuck on the mount instead of
-just holding it open, use:
+If the daemon has died or deadlocked and programs are stuck on the mount instead of just holding it open, use:
 
 ```bash
 proton-drive-fs unmount -force path/to/mount
 ```
 
-This lazily unmounts and aborts the kernel-side FUSE connection, so anything blocked
-on the mount gets an error instead of hanging.
+This lazily unmounts and aborts the kernel-side FUSE connection, so anything blocked on the mount gets an error instead of hanging.
 
-Sometimes both things will not work, in this case the solution is to pull the
-plug with:
+Sometimes both things will not work, in this case the solution is to pull the plug with:
 
 ```bash
 fusermount3 -uz path/to/mount
@@ -95,18 +78,13 @@ flowchart TD
 
 Package upgrades (AUR, deb, rpm, apk) restart active services automatically, so this section applies only to source builds and manual installs.
 
-If an earlier unmount failed as busy, the old daemon can keep serving a mountpoint
-after you rebuild the binary. `mount` guards against this by refusing to attach to a
-mountpoint that is already mounted and prints the running daemon's pid and version. Check what is
-actually running with:
+If an earlier unmount failed as busy, the old daemon can keep serving a mountpoint after you rebuild the binary. `mount` guards against this by refusing to attach to a mountpoint that is already mounted and prints the running daemon's pid and version. Check what is actually running with:
 
 ```sh
 proton-drive-fs status path/to/mount
 ```
 
-`status` reports a version mismatch between the running daemon and the current binary
-and prints the unmount-then-mount command to fix it. `make restart` does the
-same if you're building from source:
+`status` reports a version mismatch between the running daemon and the current binary and prints the unmount-then-mount command to fix it. `make restart` does the same if you're building from source:
 
 ```sh
 make restart
@@ -114,16 +92,11 @@ make restart
 
 ## systemd unit fails, or the tray shows "No mountpoint configured"
 
-`systemctl --user status proton-drive-fs` shows the unit exiting right away, or the
-tray's status line reads `No mountpoint configured` with `Mount`, `Unmount`, and the
-other mount-management items hidden from its menu. This means that the
-mountpoint is not recognized.
+`systemctl --user status proton-drive-fs` shows the unit exiting right away, or the tray's status line reads `No mountpoint configured` with `Mount`, `Unmount`, and the other mount-management items hidden from its menu. This means that the mountpoint is not recognized.
 
-The package doesn't assume any default mountpoint, it will __require__ you to
-set it.
+The package doesn't assume any default mountpoint, it will __require__ you to set it.
 
-Check if you set `mountpoint` in the config file, which any command already created for you at
-`$XDG_CONFIG_HOME/proton-drive-fs/config.toml` or `~/.config/proton-drive-fs/config.toml`.
+Check if you set `mountpoint` in the config file, which any command already created for you at `$XDG_CONFIG_HOME/proton-drive-fs/config.toml` or `~/.config/proton-drive-fs/config.toml`.
 
 You can use the config command to open the folder, or click the tray icon:
 
@@ -140,23 +113,17 @@ systemctl --user restart proton-drive-fs
 
 ## Indexer spam
 
-If you have applications that resemble Alfred/Raycast/Spotlight in Linux, for
-example: wofi, rofi, vicinae, etc. These things have indexers that will prevent
-your mount from being unmounted forever.
+If you have applications that resemble Alfred/Raycast/Spotlight in Linux, for example: wofi, rofi, vicinae, etc. These things have indexers that will prevent your mount from being unmounted forever.
 
 A file indexer that walks the mount opens every file and directory under it, and each open turns into a metadata request over the network. When the mount is stalled or rate limited, the indexer's worker threads block in uninterruptible sleep until that request finishes.
 
 If you have Proton Drive mounted at your root `/` (for example `/mnt/Proton`), a launcher's file indexer with home-directory indexing turned on, will walk the mount, and its worker threads may stay blocked for minutes, with `readdir "/" timed out after 1m0s` in the daemon's log at the same time.
 
-> __Note:__ This can happen in basically any directory if your indexer has it
-> enabled
+> __Note:__ This can happen in basically any directory if your indexer has it enabled
 
 ### Choosing the mountpoint
 
-Where to put it a mountpoint is a choice made at mount time. A
-path outside the home directory root, for example `~/mnt/protondrive`, is walked by
-fewer indexers than a directory placed directly under the home directory. But
-this is convention, it _doesn't prevent it from happening_.
+Where to put it a mountpoint is a choice made at mount time. A path outside the home directory root, for example `~/mnt/protondrive`, is walked by fewer indexers than a directory placed directly under the home directory. But this is convention, it _doesn't prevent it from happening_.
 
 ### The mount's own denylist
 
@@ -194,16 +161,14 @@ If you prefer to deny that in the indexer itself, here's a non-exhaustive list.
 
   The mount already blocks all thumbnailer processes (including `tumblerd`) from reading through FUSE and generates thumbnails itself, so this is only needed if you want to prevent `tumblerd` from even attempting to access the mount.
 
-- **`updatedb`/`mlocate`/`plocate`**: Add the mountpoint to `PRUNEPATHS`, or add
-  `fuse.proton-drive-fs` to `PRUNEFS`, in `/etc/updatedb.conf`:
+- **`updatedb`/`mlocate`/`plocate`**: Add the mountpoint to `PRUNEPATHS`, or add `fuse.proton-drive-fs` to `PRUNEFS`, in `/etc/updatedb.conf`:
 
   ```sh
   PRUNEPATHS="... /home/you/mnt/protondrive"
   PRUNEFS="... fuse.proton-drive-fs"
   ```
 
-  `updatedb` reads this file on its next scheduled run (a daily cron job or systemd
-  timer on most distributions), so you gotta wait.
+  `updatedb` reads this file on its next scheduled run (a daily cron job or systemd timer on most distributions), so you gotta wait.
 
 - **vicinae**: Walks files under the home directory only when `search_files_in_root` is turned on in `~/.config/vicinae/settings.json` (`false` by default). Turn it off, or keep the mountpoint outside the home directory there's really no other alternative here:
 

@@ -6,8 +6,7 @@ See [docs](https://oss.lsantos.dev/proton-drive-linux-fs/).
 
 My lawyers say I have to write this so:
 
->Not affiliated with, endorsed by, or supported by Proton AG. Everything here is
->distributed as-is and with no previous warranty.
+>Not affiliated with, endorsed by, or supported by Proton AG. Everything here is distributed as-is and with no previous warranty.
 
 ## What is it
 

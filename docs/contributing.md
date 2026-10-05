@@ -14,16 +14,11 @@ make check
 
 ## Commits
 
-This repository uses [Conventional Commits](https://www.conventionalcommits.org/)
-(`feat:`, `fix:`, `docs:`, `chore:`, and so on). Commit types drive the automatic
-release: a `feat` commit bumps the minor version, `fix` and `perf` bump the patch
-version, and a `BREAKING CHANGE` footer bumps the major version. `chore`, `docs`, and
-other non-release types create no tag and no release on their own.
+This repository uses [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:`, `chore:`, and so on). Commit types drive the automatic release: a `feat` commit bumps the minor version, `fix` and `perf` bump the patch version, and a `BREAKING CHANGE` footer bumps the major version. `chore`, `docs`, and other non-release types create no tag and no release on their own.
 
 ## Branches
 
-Features and fixes go on their own branch and merge through a pull request; there is
-no direct push to `main` for anything beyond routine maintenance.
+Features and fixes go on their own branch and merge through a pull request; there is no direct push to `main` for anything beyond routine maintenance.
 
 ## Releases
 
@@ -31,8 +26,4 @@ Releases are automatic. Every push to `main` runs the release workflow, which ta
 
 ## Reporting issues
 
-Open an issue on the
-[issue tracker](https://github.com/khaosdoctor/proton-drive-linux-fs/issues). Include
-your distribution, the command you ran, and, if the mount daemon is involved, the
-relevant lines from `journalctl --user -t proton-drive-fs` or the mount log (see
-[Troubleshooting](troubleshooting.md#read-the-logs)).
+Open an issue on the [issue tracker](https://github.com/khaosdoctor/proton-drive-linux-fs/issues). Include your distribution, the command you ran, and, if the mount daemon is involved, the relevant lines from `journalctl --user -t proton-drive-fs` or the mount log (see [Troubleshooting](troubleshooting.md#read-the-logs)).

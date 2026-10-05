@@ -2,9 +2,7 @@
 
 **Why unofficial?**
 
-proton-drive-fs talks to Proton's Drive API the same way Proton's own apps do, but it
-is not written, reviewed, or supported by Proton AG. The API it relies on is not
-publicly documented and can change without notice.
+proton-drive-fs talks to Proton's Drive API the same way Proton's own apps do, but it is not written, reviewed, or supported by Proton AG. The API it relies on is not publicly documented and can change without notice.
 
 **Is it a sync client?**
 
@@ -20,14 +18,11 @@ The mount generates thumbnails itself, so thumbnailer processes are always block
 
 **Does it work in Docker?**
 
-Yes, with `--device /dev/fuse`, `--cap-add SYS_ADMIN`, and
-`--security-opt apparmor:unconfined`, plus `:rshared` propagation on the mountpoint
-bind mount so the mount becomes visible on the host. See [Install](install.md#container-image).
+Yes, with `--device /dev/fuse`, `--cap-add SYS_ADMIN`, and `--security-opt apparmor:unconfined`, plus `:rshared` propagation on the mountpoint bind mount so the mount becomes visible on the host. See [Install](install.md#container-image).
 
 **What about shared drives?**
 
-Not supported yet. Only the primary Proton share is mounted; other shares are not
-exposed.
+Not supported yet. Only the primary Proton share is mounted; other shares are not exposed.
 
 **Can I use two accounts at once?**
 
@@ -43,8 +38,7 @@ The whole file buffers locally while it's open, and the whole file uploads again
 
 **Is there a trash or restore?**
 
-Not yet. Deleting a file removes it from the mount and from Proton; there is no
-restore path through proton-drive-fs today.
+Not yet. Deleting a file removes it from the mount and from Proton; there is no restore path through proton-drive-fs today.
 
 **Why does `mount` refuse to run after I rebuilt the binary?**
 

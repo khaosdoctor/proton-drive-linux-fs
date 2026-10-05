@@ -55,8 +55,7 @@ Status reads and pause writes go through the local API first, falling back to th
 
 - Waybar: add the `tray` module to `modules-right` and `"tray": {}` to the config.
 - KDE Plasma: works with no setup.
-- GNOME: needs the AppIndicator and KStatusNotifierItem Support extension. GNOME Shell
-  has no tray of its own.
+- GNOME: needs the AppIndicator and KStatusNotifierItem Support extension. GNOME Shell has no tray of its own.
 
 ## Desktop entry
 
