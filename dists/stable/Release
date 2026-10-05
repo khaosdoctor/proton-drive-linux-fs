@@ -6,7 +6,7 @@ Architectures: amd64 arm64
 Components: main
 Description: APT repository for proton-drive-fs
 SHA256:
- 7180ac8d4ce907091c60e6761b4b6d4575f71de58ec7e8a9e902c36f7b043385      537 main/binary-amd64/Packages
- 6ebc523ed2635e4a25e48aef5b8168666c5f059c255644a67668dbbfe85cfc0d      408 main/binary-amd64/Packages.gz
- ea5e22ff8ec3565abf69d8124c3ad689a5d9ea0e4566cb4c5e5cc6f32e563a93      537 main/binary-arm64/Packages
- bfd0e8b4fc56fbd4d44010e36bbbbb31f860f02391663bf7c930f1f73f962193      408 main/binary-arm64/Packages.gz
+ 4ee860ae91d4368eb263916e91b113c360e236d42006d4f5d06ea76771259a76      537 main/binary-amd64/Packages
+ 7d62460f48a7de5866d806d68e80987b945d0d65786e3b4889fffc622765d7d9      407 main/binary-amd64/Packages.gz
+ 7d8715adfbb19b772e4f41dbf2a762ab64a1a5d80684e8532b4d79179eefbbf0      537 main/binary-arm64/Packages
+ 5f18eac1e3f9a6bd38eb4d289eaff0d1832cecd99cde6a2ea4ef4a5c0bccb954      408 main/binary-arm64/Packages.gz
