@@ -2,9 +2,9 @@
 
 Every flag that `login`, `mount`, and `tray` accept has a matching key in a TOML config file at `$XDG_CONFIG_HOME/proton-drive-fs/config.toml` (falls back to `~/.config/proton-drive-fs/config.toml`), or wherever `-config <path>` points. `status` also reads it for `mountpoint` when none is given on the command line.
 
-The first command you run creates that file if it doesn't exist, with every key commented out at its default value, so you always have a config.toml to edit. An existing file is never overwritten, and if the directory can't be written to, the built-in defaults are used instead.
+The first command you run creates that file if it doesn't exist, with every key commented out at its default value, so you always have a config.toml to edit. If the directory can't be written to, the built-in defaults are used instead.
 
-After an upgrade, the file keeps up with the keys the new version knows. A key added in the new version is appended at the end, commented out at its default. When a key is removed, its commented-out line goes away. Keys you set yourself are never changed or removed. Package upgrades restart the daemon, so this happens on the first start after the upgrade.
+An existing file is never reset to the defaults, but after an upgrade it is edited to match the keys the new version knows. A key added in the new version is appended at the end, commented out at its default. When a key is removed, its commented-out lines go away. Keys you set yourself are never changed or removed. The edit is written to a temporary file and moved into place, and a symlinked config.toml is updated where the link points. Package upgrades restart the daemon, so this happens on the first start after the upgrade.
 
 ## Precedence
 

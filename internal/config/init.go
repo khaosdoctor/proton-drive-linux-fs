@@ -233,16 +233,21 @@ func Upgrade(path string) (added, removed []string, err error) {
 	}
 	text += b.String()
 
-	info, err := os.Stat(path)
+	// A config.toml symlinked from a dotfiles repo is updated where it points, so the link stays.
+	target, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	info, err := os.Stat(target)
 	if err != nil {
 		return nil, nil, err
 	}
 	// Write beside the file and rename over it, so a crash mid-write never leaves half a config.
-	tmp := path + ".tmp"
+	tmp := target + ".tmp"
 	if err := os.WriteFile(tmp, []byte(text), info.Mode().Perm()); err != nil {
 		return nil, nil, err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := os.Rename(tmp, target); err != nil {
 		_ = os.Remove(tmp)
 		return nil, nil, err
 	}

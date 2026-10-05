@@ -203,6 +203,30 @@ func TestLoadOrInitCreatesAndKeepsExistingFile(t *testing.T) {
 	}
 }
 
+func TestUpgradeKeepsASymlinkedConfig(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "dotfiles.toml")
+	link := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(target, []byte("ttl = \"90s\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := Upgrade(link); err != nil {
+		t.Fatal(err)
+	}
+
+	if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("config.toml is no longer a symlink: %v", err)
+	}
+	data, _ := os.ReadFile(target)
+	if !strings.Contains(string(data), "# upload_delay = ") {
+		t.Error("the symlink target was not updated")
+	}
+}
+
 func TestUpgradeAddsNewKeysDropsGoneOnesKeepsSetOnes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	old := "# header\n\n" +
