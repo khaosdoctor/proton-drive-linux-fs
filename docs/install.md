@@ -4,8 +4,8 @@
 
 - Linux, with FUSE 3 (the `fuse3` package on most distributions) and access to `/dev/fuse`.
 - Optional: a Secret Service provider (GNOME Keyring, KWallet) if you want to keep the key password in your OS keyring instead of the session file.
-- Optional: `zenity`, some desktops use it for graphical prompts.
-- Optional: a running systemd journal, otherwise we log to a file.
+- Optional: `zenity`, some desktops use it for graphical prompts. This uses it for showing dialogs in tray buttons.
+- Optional: a running systemd journal, otherwise the logs go to a file (see [Read the logs](troubleshooting.md#read-the-logs)).
 
 ## Arch Linux (AUR)
 
@@ -29,7 +29,7 @@ yay -S proton-drive-fs-git
 
 > Be aware that building from HEAD is __highly experimental__, and it _will_ probably break sometime, so only do that if you're either developing against that branch or you are very bold
 
-All three packages already pull `fuse3` as a dependency, and when you upgrade, we restart the `proton-drive-fs` service for you if it's running.
+All three packages already pull `fuse3` as a dependency.
 
 ## Debian / Ubuntu (APT)
 
@@ -58,7 +58,9 @@ brew install proton-drive-fs
 
 ## Native packages
 
-You can also get `.deb`, `.rpm`, `.apk`, and Arch packages from each [release](https://github.com/khaosdoctor/proton-drive-linux-fs/releases). Install it with your package manager and run `proton-drive-fs autostart` (or `autostart -headless` if you don't have a desktop). When you upgrade, we restart the service for you if it's running.
+You can also get `.deb`, `.rpm`, `.apk`, and Arch packages from each [release](https://github.com/khaosdoctor/proton-drive-linux-fs/releases). Install it with your package manager and run `proton-drive-fs autostart` (or `autostart -headless` if you don't have a desktop).
+
+Every package (AUR, APT, deb, rpm, apk) restarts the `proton-drive-fs` service on upgrade if it's running.
 
 ## From a GitHub Release
 
@@ -88,13 +90,26 @@ make install
 
 ## Container image
 
-If you want to run it in a container, we got you covered too:
+If you want to run it in a container, I got you covered too:
 
 ```sh
 docker pull ghcr.io/khaosdoctor/proton-drive-linux-fs:latest
 ```
 
-Run `login` first to create a session, then `mount`. You can also bind mount your local config directory so the container uses the session you already have:
+The image only runs the CLI. Log in first so there's a session file, and bind mount the config directory so the session is still there on the next run (or so the container uses the session you already have):
+
+```sh
+docker run --rm -it \
+  --device /dev/fuse \
+  --cap-add SYS_ADMIN \
+  --security-opt apparmor:unconfined \
+  -v ~/.config/proton-drive-fs:/root/.config/proton-drive-fs \
+  -v path/to/mount:/mnt/protondrive:rshared \
+  ghcr.io/khaosdoctor/proton-drive-linux-fs:latest \
+  login
+```
+
+Then mount it with the same bind mounts:
 
 ```sh
 docker run --rm -it \
@@ -108,3 +123,9 @@ docker run --rm -it \
 ```
 
 FUSE needs `--device /dev/fuse`, `--cap-add SYS_ADMIN`, and `--security-opt apparmor:unconfined` to mount inside a container. The mountpoint needs `:rshared` too, otherwise you won't see the mount on your host.
+
+You need `-foreground` here, because if the daemon goes to the background, the container thinks it's done and Docker stops it. There's no journal inside the container, so you can read the logs with:
+
+```sh
+docker logs -f <container>
+```

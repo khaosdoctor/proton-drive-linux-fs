@@ -2,19 +2,19 @@
 
 ## Architecture
 
-proton-drive-fs is a single daemon built from three layers, with a persistent cache and event-driven sync that keep the mount in step with Proton without copying the whole drive locally.
+proton-drive-fs is a single daemon made of three layers. It has a persistent cache and listens to Proton's events to keep the mount up to date, so we never need to copy your whole drive locally.
 
 ## Three layers
 
-**Auth.** Logs in against Proton's API, handling two-factor codes and human verification challenges. It derives the account's key password from the login password and Proton's stored salts, then persists everything needed to restore the session (including that key password) to the local session file or the OS keyring.
+**Auth.** Logs you in against Proton's API, dealing with two-factor codes and human verification. It derives your key password from your login password and the salts Proton stores, then saves the session (check [login](usage.md#login) for where).
 
-**Drive.** Wraps Proton's Drive API into a tree of nodes (files and folders), exposing list, read, upload, create, move, and trash operations. Every file and folder name and every byte of file content is end-to-end encrypted with the account's keys. The drive layer decrypts on the way in and encrypts on the way out. It also polls Proton's event feed and turns raw events into a normalized stream the FUSE layer reacts to.
+**Drive.** Wraps Proton's Drive API into a tree of files and folders that you can list, read, upload, create, move, and trash. Every name and every byte of content is end-to-end encrypted with your account keys, so this layer decrypts everything coming in and encrypts everything going out. It also polls Proton's event feed and turns the raw events into something the FUSE layer can react to.
 
-**FUSE.** Publishes that tree as a mounted filesystem with go-fuse. Directory listings are cached per folder for the configured TTL (`-ttl`) and refetched on expiry or on a matching remote event.
+**FUSE.** Shows that tree as a mounted filesystem using go-fuse. Each folder's listing is cached for the TTL you set (`-ttl`) and fetched again when it expires or when a remote event says it changed.
 
 ### Encryption key chain
 
-Every key in the chain below unlocks the next one. Nothing past the account password is ever written to disk unencrypted. Names are encrypted to their parent folder's node key and looked up by a hash computed with that folder's own hash key rather than by the plaintext name.
+Each key in this chain unlocks the next one, and nothing after your account password is ever written to disk unencrypted. Names are encrypted with the parent folder's node key, and we look them up by a hash made with that folder's hash key, so the plaintext name is never used for lookups.
 
 ```mermaid
 flowchart TD
@@ -33,9 +33,9 @@ flowchart TD
 
 ## Reading a file
 
-Opening a file for reading does not download it in full. The FUSE layer streams and caches the file's content in fixed 4 MiB blocks, fetching only the blocks a read actually touches. Reading the first few kilobytes of a large video, for example, downloads one block.
+Opening a file doesn't download the whole thing. We read the content in 4 MiB blocks and only fetch the blocks a read actually needs, so if you read the first few kilobytes of a huge video, we download one block.
 
-Downloaded blocks are kept in an on-disk cache (`-cache-dir`, sized by `-cache-size`) so a second read of the same block, even after a remount, doesn't cost another download. Files larger than `-large-file` are still read block by block, but their blocks skip the on-disk cache so one large file can't push everything else out.
+Downloaded blocks go to an on-disk cache (`-cache-dir`, sized by `-cache-size`), so reading the same block again, even after a remount, doesn't download it again. Files bigger than `-large-file` skip that cache (check [Cache layout](#cache-layout)).
 
 ```mermaid
 sequenceDiagram
@@ -77,18 +77,18 @@ sequenceDiagram
 
 ## Writing a file
 
-Opening a file for writing buffers the new content to a local temp file. Nothing is sent to Proton while the file is open. When it closes, the buffer waits out its upload delay (`-upload-delay`, `5s` by default, overridable per pattern with `-upload-delays`), and then the whole file uploads as a new revision. There is no partial write and no streaming upload while the file is still open.
+When you open a file for writing, everything goes to a local temp file and nothing is sent to Proton while it's open. When you close it, we wait for the upload delay (`-upload-delay`, `5s` by default, and you can change it per pattern with `-upload-delays`), then upload the whole file as a new revision. There's no partial or streaming upload while the file is open.
 
-The delay exists for apps that save in several steps. FreeCAD, for example, writes `model.FCStd.<uuid>`, renames `model.FCStd` to a timestamped `.FCBak`, then renames the temp file to `model.FCStd`. While a buffer waits:
+The delay is there because a lot of apps save in several steps. FreeCAD, for example, writes `model.FCStd.<uuid>`, renames `model.FCStd` to a timestamped `.FCBak`, then renames the temp file to `model.FCStd`. While a file is waiting:
 
-- **Rename**: moves the buffer to the new name and starts the wait over under that name's delay.
-- **Open for writing**: hands the same buffer back to the app and stops the wait. The next close starts it again.
-- **Delete**: drops the buffer. Nothing is uploaded.
-- **Listing, stat, read**: show the buffered file and its content, even though Proton does not have it yet.
-- **Unmount**: uploads every waiting buffer before the mount goes away.
-- **Failed upload**: keeps the buffer and tries again every 30 seconds. The log names the temp file, so a save is never lost to a network error.
+- **Rename**: the file moves to the new name and the wait starts over with that name's delay.
+- **Open for writing**: the app gets the same buffer back and the wait stops. Closing it again starts the wait again.
+- **Delete**: we drop the buffer and nothing is uploaded.
+- **Listing, stat, read**: you see the file and its content normally, even though Proton doesn't have it yet.
+- **Unmount**: we upload everything that's still waiting before the mount goes away.
+- **Failed upload**: we keep the buffer and try again every 30 seconds. The log tells you where the temp file is, so you never lose a save because the network failed.
 
-A file under an `-exclude` name is held the same way but without a timer: it stays local until it is renamed to a name outside the list.
+A file with a name in `-exclude` is kept the same way, just without a timer. It stays local until you rename it to something outside the list.
 
 ```mermaid
 sequenceDiagram
@@ -122,9 +122,9 @@ sequenceDiagram
 
 ## Staying in sync
 
-The mount polls Proton's event feed on the interval set by `-poll`. Each event names what changed remotely, and the FUSE layer invalidates the affected directory listing and any cached blocks for a changed file, so the next read or listing picks up the current state. Pausing the tray's sync stops this poll only; reads and writes you make locally keep working.
+We poll Proton's event feed every `-poll`. Each event says what changed on the remote side, and we throw away the cached listing of that folder and any cached blocks of a changed file, so the next read or listing gets the current version. You can pause this poll from the tray (check [Pause semantics](tray.md#pause-semantics)).
 
-A directory's cached listing moves through the same states regardless of what triggers a fetch. A burst of concurrent lookups against one directory shares a single fetch instead of each starting its own.
+A folder's cached listing always goes through the same states, no matter what started the fetch. If a bunch of lookups hit the same folder at once, they all share one fetch.
 
 ```mermaid
 stateDiagram-v2
@@ -146,7 +146,7 @@ stateDiagram-v2
 
 ## Cache layout
 
-Blocks and persisted directory listings live under the same root and share one byte budget, evicted least-recently-used by file modification time.
+Blocks and listings live under the same root and share one size budget. When it's full, we delete whatever was used least recently, going by file modification time.
 
 ```mermaid
 flowchart TD
@@ -160,21 +160,21 @@ flowchart TD
     ListingPath -.-> Budget
 ```
 
-Files larger than `-large-file` never write into `blocks/` at all. Their blocks are still read lazily, block by block, but nothing from them touches disk, so one large file can't evict everything else out of the cache.
+Files bigger than `-large-file` never write anything to `blocks/`. We still read them block by block, but nothing goes to disk, so one huge file can't push everything else out of the cache.
 
 ## Previews
 
-When a folder is listed, the mount writes preview images into the freedesktop thumbnail cache so file managers show thumbnails without opening the files themselves.
+When you list a folder, we write preview images into the freedesktop thumbnail cache, so your file manager shows thumbnails without opening the files.
 
-Two sources of thumbnails are used, in order of preference:
+We get thumbnails from two places, in this order:
 
-1. **Proton's stored previews.** Proton keeps a small thumbnail for common file types (images, PDFs, documents). The mount downloads these in the background and writes them into the cache.
-2. **System thumbnailers.** For file types Proton has no preview for, the mount discovers thumbnailer programs registered in `.thumbnailer` files under `/usr/share/thumbnailers`, `/usr/local/share/thumbnailers`, and `~/.local/share/thumbnailers` (the freedesktop thumbnailer spec). When a registered thumbnailer covers a file's MIME type, the mount downloads the file to a temp location, runs the thumbnailer on it, and writes the result into the cache. Files above `-large-file` are skipped.
+1. **Proton's stored previews.** Proton keeps a small thumbnail for common file types (images, PDFs, documents). We download these in the background and write them to the cache.
+2. **System thumbnailers.** For file types Proton has no preview for, we look for thumbnailer programs registered in `.thumbnailer` files under `/usr/share/thumbnailers`, `/usr/local/share/thumbnailers`, and `~/.local/share/thumbnailers` (that's the freedesktop thumbnailer spec). If one of them handles the file's MIME type, we download the file to a temp location, run the thumbnailer on it, and write the result to the cache. Files bigger than `-large-file` are skipped.
 
-Because the mount generates thumbnails itself, thumbnailer processes are always blocked from reading through the FUSE mount regardless of file size. This prevents duplicate work and timeouts from thumbnailers trying to read remote files through FUSE.
+Since we generate thumbnails ourselves, thumbnailer processes are always blocked from reading through the mount, no matter the file size. Otherwise they'd do the same work twice and time out reading remote files through FUSE.
 
 ## Reader denylist
 
-Some desktops run search indexers that open every file in a folder to inspect it. On a network filesystem that means downloading a file's full content just to index it. The processes named in `-deny-readers` are refused a read of any file above `-large-file`. The open fails with a permission error and nothing downloads. Applications you open a file with directly are not on the list and are unaffected.
+Some desktops run search indexers that open every file in a folder to look inside it. On a network filesystem, that means downloading the whole file just to index it. So the processes in `-deny-readers` can't read any file bigger than `-large-file`: the open fails with a permission error and nothing is downloaded. The apps you open files with yourself aren't on that list, so they work normally.
 
-Thumbnailer processes (discovered from `.thumbnailer` files) are always blocked, regardless of file size, since the mount handles thumbnail generation itself.
+Thumbnailers are blocked too, at any file size (check [Previews](#previews)).
