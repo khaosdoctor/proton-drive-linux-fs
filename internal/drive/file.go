@@ -405,6 +405,9 @@ func (f *File) fetchAndCacheBlock(ctx context.Context, idx int, debug bool) ([]b
 			ciphertext, err = f.downloadBlock(ctx, blk)
 		}
 	}
+	if errors.Is(err, errNoDownloadSlot) {
+		return nil, err
+	}
 	if err != nil {
 		f.failed.Store(true)
 		return nil, err

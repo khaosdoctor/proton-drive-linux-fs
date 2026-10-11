@@ -161,6 +161,30 @@ func TestGetBlockRefreshesRejectedStorageToken(t *testing.T) {
 	}
 }
 
+// TestGetBlockQueuedTimeoutIsNotAFailure checks that a read whose ctx ends while it is still
+// queued for a download slot does not mark the file's download as failed.
+func TestGetBlockQueuedTimeoutIsNotAFailure(t *testing.T) {
+	c := &Client{}
+	c.SetMaxDownloads(1)
+	c.downloads <- struct{}{} // another file holds the only slot
+
+	f := &File{
+		client: c,
+		blocks: map[int]proton.Block{1: {Index: 1}},
+		size:   4,
+		cache:  make(map[int][]byte),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := f.getBlock(ctx, 1); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err %v, want context.DeadlineExceeded", err)
+	}
+	if f.failed.Load() {
+		t.Error("a read that never got a download slot marked the download as failed")
+	}
+}
+
 func TestIsNotFound(t *testing.T) {
 	notFound := errors.Join(errors.New("404 GET /x"), &proton.APIError{Status: http.StatusNotFound, Message: "not found"})
 	if !IsNotFound(notFound) {

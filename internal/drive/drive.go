@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"runtime"
 	"sync"
@@ -69,6 +70,10 @@ func (c *Client) SetMaxDownloads(n int) {
 	c.downloads = make(chan struct{}, n)
 }
 
+// errNoDownloadSlot marks a ctx that ended while still queued for a download slot: nothing was
+// downloaded, so the File does not count it as a failed download.
+var errNoDownloadSlot = errors.New("gave up waiting for a download slot")
+
 // acquireDownload waits for a download slot and returns the func that gives it back.
 func (c *Client) acquireDownload(ctx context.Context) (func(), error) {
 	if c.downloads == nil {
@@ -79,7 +84,7 @@ func (c *Client) acquireDownload(ctx context.Context) (func(), error) {
 	case c.downloads <- struct{}{}:
 		return func() { <-c.downloads }, nil
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, fmt.Errorf("%w: %w", errNoDownloadSlot, ctx.Err())
 	}
 }
 
