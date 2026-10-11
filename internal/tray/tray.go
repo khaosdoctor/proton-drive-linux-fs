@@ -347,6 +347,11 @@ func Run(opts Options) {
 // and returns immediately. The tray stops when ctx is cancelled. Unlike Run, the Quit
 // menu item calls opts.OnQuit (which should cancel the mount's context) instead of
 // running an unmount subprocess.
+//
+// ponytail: no reconnect. If the session bus goes away while the daemon keeps running (a graphical
+// session restart under linger), the icon disappears until the daemon restarts. fyne.io/systray
+// v1.12.2 can't be started twice in one process (Quit closes a package-level channel behind a
+// sync.Once and the menu is global state), and it reports no bus closure to watch for.
 func RunEmbedded(ctx context.Context, opts Options) {
 	a := &app{opts: opts, refresh: make(chan struct{}, 1), shown: -1}
 	go systray.Run(a.onReady, func() {})
