@@ -1938,16 +1938,19 @@ func (d *dirNode) moveLink(ctx context.Context, target *drive.Node, name string,
 
 	// POSIX rename() atomically replaces the destination when it exists. Proton's Move API does
 	// not, so trash the existing destination first.
+	var trashed *drive.Node
 	if existing, err := newDir.findChild(ctx, newName); err == 0 && existing.Link.LinkID != target.Link.LinkID {
 		if trashErr := driveTrash(opCtx, d.client, newDir.node, existing); trashErr != nil {
 			slog.Error("trashing rename destination failed", "path", to, "err", trashErr)
 			return nil, syscall.EIO
 		}
 		newDir.removeChild(newName)
+		trashed = existing
 	}
 
 	moved, err := driveMove(opCtx, d.client, target, d.node, newDir.node, newName)
 	if err != nil {
+		newDir.unlinkTrashed(newName, trashed)
 		if timedOut(opCtx) {
 			slog.Error(action+" timed out", "from", from, "to", to, "timeout", d.st.metaTimeout)
 			return nil, syscall.ETIMEDOUT
@@ -1959,6 +1962,31 @@ func (d *dirNode) moveLink(ctx context.Context, target *drive.Node, name string,
 	d.removeChild(name)
 	newDir.upsertChild(moved)
 	return moved, 0
+}
+
+// unlinkTrashed is moveLink's way back when the move failed after the destination, trashed (nil
+// when there was none), already went to the trash; the drive client has no restore call. A write
+// buffer of the file under name (an edit still waiting, possibly the newest save) would otherwise
+// upload as a revision of that trashed link, out of sight, so the file goes back to pending and
+// the buffer uploads as a new file under its name. A file with no buffer stays as it is, its
+// content in Proton's trash.
+// ponytail: an upload of that buffer already running still targets the trashed link
+func (d *dirNode) unlinkTrashed(name string, trashed *drive.Node) {
+	if trashed == nil {
+		return
+	}
+	dst := d.fileChild(name)
+	if dst == nil {
+		return
+	}
+
+	dst.mu.Lock()
+	defer dst.mu.Unlock()
+	if dst.handle == nil || dst.node == nil || dst.node.Link.LinkID != trashed.Link.LinkID {
+		return
+	}
+	slog.Warn("rename destination trashed but the move failed; its unsaved edit will upload as a new file", "path", path.Join(d.relPath(), name))
+	dst.node = nil
 }
 
 // renamePending handles rename when the source is a pending file (created via Create, not yet

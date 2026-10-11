@@ -226,6 +226,35 @@ func TestUnmountRetriesReparkedUploadsAndSavesTheRest(t *testing.T) {
 	}
 }
 
+func TestFailedMoveKeepsTheTrashedDestinationsEdit(t *testing.T) {
+	st := newWriteState()
+	st.uploadDelay = time.Hour
+	d := newTreeDir(st)
+	ctx := context.Background()
+
+	// "b" is on the drive with an edit still waiting to upload; "a" is renamed over it.
+	listedB := node("b", "b")
+	d.children = []*drive.Node{node("a", "a"), listedB}
+	b, hb := addPending(t, d, "b")
+	b.node = listedB
+	buf := hb.tmp.Name()
+	_ = hb.Release(ctx)
+	defer hb.unpark(false)
+
+	fakeDrive(t,
+		func(string) (*drive.Node, error) { return nil, errors.New("unexpected upload") },
+		func(*drive.Node, string) (*drive.Node, error) { return nil, errors.New("move refused") },
+		func(*drive.Node) error { return nil },
+	)
+
+	if errno := d.Rename(ctx, "a", d, "b", 0); errno != syscall.EIO {
+		t.Fatalf("Rename = %v, want EIO", errno)
+	}
+	if !b.pending() || b.parkedHandle() != hb || !exists(buf) {
+		t.Error("edit of the trashed destination would upload into the trash instead of as a new file")
+	}
+}
+
 func TestUnlinkPendingWithOpenWriterDropsItOnClose(t *testing.T) {
 	st := &mountState{uploadDelay: time.Hour}
 	d := newTreeDir(st)
