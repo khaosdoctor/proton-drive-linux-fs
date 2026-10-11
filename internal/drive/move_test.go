@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // TestMoveLinkReqJSON asserts every field Proton's move endpoint requires -- exactly WebClients'
@@ -125,15 +127,28 @@ func TestPutJSON(t *testing.T) {
 }
 
 // TestGetRawStatus checks that a storage GET hands back the body only on a 2xx: a 404 is a
-// not-found error and a 429 opens the backoff window, never a body to decrypt as ciphertext.
+// not-found error, a short 429 burst is retried away, and 429s on every attempt open the backoff
+// window, never a body to decrypt as ciphertext.
 func TestGetRawStatus(t *testing.T) {
+	origBase := rateLimitRetryBase
+	rateLimitRetryBase = time.Millisecond
+	t.Cleanup(func() { rateLimitRetryBase = origBase })
+
+	var burstHits, busyHits atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/ok":
 			_, _ = w.Write([]byte(r.Header.Get("pm-storage-token")))
 		case "/missing":
 			http.Error(w, "<html>not here</html>", http.StatusNotFound)
+		case "/burst":
+			if burstHits.Add(1) <= 2 {
+				w.WriteHeader(http.StatusTooManyRequests)
+				return
+			}
+			_, _ = w.Write([]byte("after burst"))
 		case "/busy":
+			busyHits.Add(1)
 			w.WriteHeader(http.StatusTooManyRequests)
 			_, _ = w.Write([]byte(`{"Code":2028,"Error":"Too many recent API requests"}`))
 		}
@@ -152,9 +167,20 @@ func TestGetRawStatus(t *testing.T) {
 		t.Errorf("missing: body %q err %v, want nil body and a not-found error", body, err)
 	}
 
+	body, err = c.getRaw(ctx, server.URL+"/burst", "tok")
+	if err != nil || string(body) != "after burst" {
+		t.Fatalf("burst: body %q err %v, want the body after two 429s", body, err)
+	}
+	if _, limited := c.RateLimited(); limited {
+		t.Error("burst: backoff window opened for a burst the retries absorbed")
+	}
+
 	body, err = c.getRaw(ctx, server.URL+"/busy", "tok")
 	if body != nil || !errors.Is(err, ErrRateLimited) {
 		t.Errorf("busy: body %q err %v, want nil body and ErrRateLimited", body, err)
+	}
+	if got := busyHits.Load(); got != rateLimitAttempts {
+		t.Errorf("busy: %d attempts, want %d", got, rateLimitAttempts)
 	}
 	if _, limited := c.RateLimited(); !limited {
 		t.Error("busy: backoff window not opened")

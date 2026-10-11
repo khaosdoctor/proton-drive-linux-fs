@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -104,11 +105,8 @@ func (c *Client) putJSONOnce(ctx context.Context, path string, body any) (int, e
 // afterResponse middleware that turns a non-2xx status into an APIError, so a final 429 or 404
 // body came back with a nil error and was decrypted as ciphertext. The headers are the ones
 // GetBlock sends (exec, plus manager_builder.go's OnBeforeRequest).
-//
-// ponytail: no in-call retry on 429/503; it opens the shared backoff window and fails this read,
-// and the reader's next attempt retries.
 func (c *Client) getRaw(ctx context.Context, url, token string) ([]byte, error) {
-	body, status, err := c.getRawOnce(ctx, url, token)
+	body, status, err := c.getRawRetrying(ctx, url, token)
 	if status != http.StatusUnauthorized {
 		return body, err
 	}
@@ -117,21 +115,79 @@ func (c *Client) getRaw(ctx context.Context, url, token string) ([]byte, error) 
 		return nil, err
 	}
 
-	body, _, err = c.getRawOnce(ctx, url, token)
+	body, _, err = c.getRawRetrying(ctx, url, token)
 	return body, err
 }
 
+// rateLimitAttempts is how many times getRawRetrying tries a GET that keeps answering 429/503,
+// the same count go-proton-api's resty client used, so a short burst never reaches the reader.
+const rateLimitAttempts = 3
+
+// maxRetryAfterWait caps one wait between those attempts: a reader is blocked on it, so a long
+// Retry-After is left to the shared backoff window instead.
+const maxRetryAfterWait = 10 * time.Second
+
+// rateLimitRetryBase is the first wait between attempts when the server sends no Retry-After,
+// doubling after each; a var so tests can shrink it.
+var rateLimitRetryBase = 500 * time.Millisecond
+
+// getRawRetrying is getRawOnce with up to rateLimitAttempts tries on 429/503, waiting out the
+// server's Retry-After (capped) or a doubling backoff between them. Only when the last attempt
+// still fails does it open the shared backoff window and return ErrRateLimited, so a burst the
+// retries absorb never blocks the other call sites.
+func (c *Client) getRawRetrying(ctx context.Context, url, token string) ([]byte, int, error) {
+	backoff := rateLimitRetryBase
+	for attempt := 1; ; attempt++ {
+		body, status, retryAfter, err := c.getRawOnce(ctx, url, token)
+		if status != http.StatusTooManyRequests && status != http.StatusServiceUnavailable {
+			return body, status, err
+		}
+
+		apiErr, _ := asAPIError(err)
+		if attempt == rateLimitAttempts {
+			c.noteRateLimitStatus(status, apiErr)
+			return nil, status, fmt.Errorf("%w: %w", ErrRateLimited, *apiErr)
+		}
+
+		wait := backoff
+		if retryAfter > 0 {
+			wait = min(retryAfter, maxRetryAfterWait)
+		}
+		backoff *= 2
+
+		select {
+		case <-ctx.Done():
+			c.noteRateLimitStatus(status, apiErr)
+			return nil, status, ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+}
+
+// retryAfter parses a Retry-After header, either delay-seconds or an HTTP date; 0 when absent or
+// unusable.
+func retryAfter(v string) time.Duration {
+	if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		return time.Until(t)
+	}
+	return 0
+}
+
 // getRawOnce issues a single GET attempt, returning the HTTP status code (0 on a transport error)
-// so getRaw can tell a 401 apart. A non-2xx status comes back as a *proton.APIError, so IsNotFound
-// and the rest of the package's error checks see it the same way as a go-proton-api error.
-func (c *Client) getRawOnce(ctx context.Context, url, token string) ([]byte, int, error) {
+// so its callers can tell a 401 or a 429/503 apart, and the response's Retry-After. A non-2xx
+// status comes back as a *proton.APIError, so IsNotFound and the rest of the package's error
+// checks see it the same way as a go-proton-api error.
+func (c *Client) getRawOnce(ctx context.Context, url, token string) ([]byte, int, time.Duration, error) {
 	if strings.HasPrefix(url, "/") {
 		url = c.apiURL + url
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 
 	uid, access := c.tokenSource()
@@ -144,13 +200,18 @@ func (c *Client) getRawOnce(ctx context.Context, url, token string) ([]byte, int
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
-	defer func() { _ = resp.Body.Close() }()
+	// Draining what the error decode left (bounded) lets the connection go back to the pool
+	// for the retry instead of being torn down.
+	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		body, err := io.ReadAll(resp.Body)
-		return body, resp.StatusCode, err
+		return body, resp.StatusCode, 0, err
 	}
 
 	// Storage hosts don't always answer with Proton's JSON error shape, so a body that doesn't
@@ -162,12 +223,7 @@ func (c *Client) getRawOnce(ctx context.Context, url, token string) ([]byte, int
 		apiErr.Message = http.StatusText(resp.StatusCode)
 	}
 
-	c.noteRateLimitStatus(resp.StatusCode, apiErr)
-	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
-		return nil, resp.StatusCode, fmt.Errorf("%w: %w", ErrRateLimited, *apiErr)
-	}
-
-	return nil, resp.StatusCode, apiErr
+	return nil, resp.StatusCode, retryAfter(resp.Header.Get("Retry-After")), apiErr
 }
 
 // payloadFieldLengths summarizes a marshaled JSON object's top-level fields as "Key=len Key2=len2
