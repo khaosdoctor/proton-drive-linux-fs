@@ -99,6 +99,27 @@ func TestBlockCacheEvictSkipsTempFiles(t *testing.T) {
 	}
 }
 
+// TestBlockCacheEvictRemovesEmptyDirs checks that evicting a revision's last block removes its
+// now-empty blocks/<linkID>/<revID>/ directories, and keeps the blocks root itself.
+func TestBlockCacheEvictRemovesEmptyDirs(t *testing.T) {
+	root := t.TempDir()
+	bc, err := OpenBlockCache(root, 15)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bc.Put("link1", "rev1", 1, make([]byte, 10))
+	time.Sleep(10 * time.Millisecond)            // distinct mtimes for LRU ordering
+	bc.Put("link2", "rev2", 1, make([]byte, 10)) // size 20 > 15: evicts link1's only block
+
+	if _, err := os.Stat(filepath.Join(root, blocksSubdir, "link1")); !os.IsNotExist(err) {
+		t.Fatalf("link1 directory still present after its last block was evicted (err %v)", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, blocksSubdir)); err != nil {
+		t.Fatalf("blocks root removed: %v", err)
+	}
+}
+
 func TestBlockCacheDisabled(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "unused")
 	bc, err := OpenBlockCache(dir, 0)

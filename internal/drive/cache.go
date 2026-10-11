@@ -336,6 +336,22 @@ func (c *BlockCache) evict() {
 			continue
 		}
 		c.size -= e.size
+		c.removeEmptyParents(filepath.Dir(e.path))
+	}
+}
+
+// removeEmptyParents removes dir, then each parent, while they are empty and still under
+// blocks/, so an evicted revision doesn't leave its blocks/<linkID>/<revID>/ shell behind. os.Remove
+// refuses a non-empty directory, which is the emptiness check. A Put that just ran MkdirAll on
+// the same directory can lose it here before writeTemp creates its file; that Put then fails
+// quietly and the block is fetched again on the next miss.
+func (c *BlockCache) removeEmptyParents(dir string) {
+	blocks := filepath.Join(c.dir, blocksSubdir) + string(filepath.Separator)
+	for strings.HasPrefix(dir, blocks) {
+		if os.Remove(dir) != nil {
+			return
+		}
+		dir = filepath.Dir(dir)
 	}
 }
 
