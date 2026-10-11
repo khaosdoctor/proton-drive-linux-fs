@@ -16,6 +16,7 @@ import (
 	"hash/crc32"
 	"image"
 	"image/png"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -66,13 +67,15 @@ func (s *Store) fileName(relPath string) string {
 
 // Fresh reports whether a large thumbnail for relPath already exists and records mtime, meaning
 // there is nothing to fetch.
+// Every listing runs this for every child, so it reads chunk headers only (see readPNGText).
 func (s *Store) Fresh(relPath string, mtime time.Time) bool {
-	data, err := os.ReadFile(filepath.Join(s.dir, "large", s.fileName(relPath)))
+	f, err := os.Open(filepath.Join(s.dir, "large", s.fileName(relPath)))
 	if err != nil {
 		return false
 	}
+	defer func() { _ = f.Close() }()
 
-	recorded, ok := pngText(data, "Thumb::MTime")
+	recorded, ok := readPNGText(f, "Thumb::MTime")
 	if !ok {
 		return false
 	}
@@ -115,6 +118,20 @@ func (s *Store) Write(relPath string, mtime time.Time, size int64, img []byte) e
 	}
 
 	return nil
+}
+
+// cacheSizes are every size directory the standard defines. Write only fills normal and large,
+// but a file manager may have added the bigger ones for the same URI.
+var cacheSizes = []string{"normal", "large", "x-large", "xx-large"}
+
+// Remove deletes the thumbnails cached for relPath in every size directory, for a file that was
+// deleted or renamed away. Left behind, they pile up for paths that no longer exist, and a new
+// file taking the path over with the same mtime would show the old preview.
+func (s *Store) Remove(relPath string) {
+	name := s.fileName(relPath)
+	for _, dir := range cacheSizes {
+		_ = os.Remove(filepath.Join(s.dir, dir, name)) // usually ENOENT: most files have no preview
+	}
 }
 
 // fit scales src down so neither edge exceeds max, preserving the aspect ratio. An image that
@@ -187,28 +204,46 @@ func writeAtomic(dir, name string, data []byte) error {
 
 const pngSignatureLen = 8
 
-// pngText returns the value of the first tEXt chunk with the given keyword.
-func pngText(data []byte, keyword string) (string, bool) {
-	off := pngSignatureLen
-	for off+8 <= len(data) {
-		length := int(binary.BigEndian.Uint32(data[off : off+4]))
-		typ := string(data[off+4 : off+8])
-		start := off + 8
-		if length < 0 || start+length > len(data) {
+// maxTextChunk caps how much of one tEXt chunk readPNGText reads. Ours are well under 1 KiB; a
+// bigger one is someone else's metadata or a corrupt length, and is skipped instead of read.
+const maxTextChunk = 64 * 1024
+
+// readPNGText returns the value of the first tEXt chunk with the given keyword. It reads chunk
+// headers and tEXt bodies only, seeking over the rest: our tEXt chunks come after IDAT (see
+// insertPNGText), and reading a whole 50-150 KB thumbnail to reach them made a listing of a
+// 5k-image folder read hundreds of MB from the cache.
+func readPNGText(r io.ReadSeeker, keyword string) (string, bool) {
+	if _, err := r.Seek(pngSignatureLen, io.SeekStart); err != nil {
+		return "", false
+	}
+
+	var hdr [8]byte
+	for {
+		if _, err := io.ReadFull(r, hdr[:]); err != nil {
+			return "", false // includes a seek past EOF from a truncated file
+		}
+		length := int64(binary.BigEndian.Uint32(hdr[:4]))
+		typ := string(hdr[4:8])
+		if typ == "IEND" {
 			return "", false
 		}
 
-		if typ == "tEXt" {
-			key, value, found := bytes.Cut(data[start:start+length], []byte{0})
-			if found && string(key) == keyword {
-				return string(value), true
+		if typ != "tEXt" || length > maxTextChunk {
+			if _, err := r.Seek(length+4, io.SeekCurrent); err != nil { // chunk data and its CRC
+				return "", false
 			}
+			continue
 		}
 
-		off = start + length + 4 // skip the chunk data and its CRC
+		body := make([]byte, length+4)
+		if _, err := io.ReadFull(r, body); err != nil {
+			return "", false
+		}
+		key, value, found := bytes.Cut(body[:length], []byte{0})
+		if found && string(key) == keyword {
+			return string(value), true
+		}
 	}
-
-	return "", false
 }
 
 // insertPNGText inserts one tEXt chunk per key/value pair immediately before the IEND chunk.

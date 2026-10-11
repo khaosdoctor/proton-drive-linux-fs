@@ -1,10 +1,15 @@
 package thumbs
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestLoadRegistryParsesThumbnailerFile(t *testing.T) {
@@ -76,6 +81,54 @@ func TestExecBasename(t *testing.T) {
 		if got := execBasename(tc.exec); got != tc.want {
 			t.Errorf("execBasename(%q) = %q, want %q", tc.exec, got, tc.want)
 		}
+	}
+}
+
+// A thumbnailer that forks a helper and then hangs must not leave the helper running once the
+// timeout kills it: in a long-running daemon those orphans pile up.
+func TestGenerateTimeoutKillsForkedChildren(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "child.pid")
+	script := filepath.Join(dir, "thumbnailer.sh")
+	content := "sleep 60 &\necho $! > " + pidFile + "\nwait\n"
+	if err := os.WriteFile(script, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &Registry{byMIME: map[string]string{"image/png": "/bin/sh " + script + " %i %o"}}
+
+	// The output temp file goes to TMPDIR; a cancelled run (timeout, or unmount on Ctrl-C) must
+	// not leave it behind.
+	tmpDir := t.TempDir()
+	t.Setenv("TMPDIR", tmpDir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	if _, err := r.Generate(ctx, ".png", filepath.Join(dir, "in.png"), 256); err == nil {
+		t.Fatal("Generate succeeded; want the timeout to kill the thumbnailer")
+	}
+
+	if left, _ := filepath.Glob(filepath.Join(tmpDir, "proton-thumb-out-*")); len(left) > 0 {
+		t.Fatalf("output temp files left after a cancelled run: %v", left)
+	}
+
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("thumbnailer never forked its child: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		t.Fatalf("pid file %q: %v", data, err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+
+	// The orphan is reaped by init or a subreaper, so give it a moment to disappear.
+	deadline := time.Now().Add(3 * time.Second)
+	for syscall.Kill(pid, 0) == nil {
+		if time.Now().After(deadline) {
+			t.Fatalf("forked child %d still running after the thumbnailer timed out", pid)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

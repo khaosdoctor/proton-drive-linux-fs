@@ -13,6 +13,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 )
 
 // Registry maps MIME types to their freedesktop thumbnailer commands.
@@ -151,7 +153,14 @@ func (r *Registry) Generate(ctx context.Context, ext, input string, outputSize i
 		return nil, fmt.Errorf("empty exec line for %q", ext)
 	}
 
+	// The thumbnailer gets its own process group and a timeout kills the whole group: some
+	// (a shell wrapper, totem forking gst helpers) leave children that would outlive a kill of the
+	// direct child and pile up in a long-running daemon. WaitDelay stops Run from blocking on an
+	// output pipe a surviving grandchild still holds.
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = 5 * time.Second
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("thumbnailer %s: %w", filepath.Base(args[0]), err)
 	}
