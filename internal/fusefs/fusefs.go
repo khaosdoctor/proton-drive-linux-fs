@@ -1449,6 +1449,20 @@ var fetchChildren = func(ctx context.Context, c *drive.Client, node *drive.Node)
 	return c.Children(ctx, node)
 }
 
+// driveMove, driveTrash and driveUpload are the drive writes Rename and Release make; overridden in
+// tests to fake them without a live drive.Client.
+var driveMove = func(ctx context.Context, c *drive.Client, n, oldParent, newParent *drive.Node, newName string) (*drive.Node, error) {
+	return c.Move(ctx, n, oldParent, newParent, newName)
+}
+
+var driveTrash = func(ctx context.Context, c *drive.Client, parent, n *drive.Node) error {
+	return c.Trash(ctx, parent, n)
+}
+
+var driveUpload = func(ctx context.Context, c *drive.Client, parent *drive.Node, name string, existing *drive.Node, r io.Reader, size int64, modTime time.Time) (*drive.Node, error) {
+	return c.Upload(ctx, parent, name, existing, r, size, modTime)
+}
+
 // clientRateLimited reports whether c's shared backoff window (see drive.Client.RateLimited) is
 // active; overridden in tests to simulate Proton rate-limiting without a live drive.Client.
 var clientRateLimited = func(c *drive.Client) (time.Duration, bool) {
@@ -1859,6 +1873,44 @@ func (d *dirNode) Rename(ctx context.Context, name string, newParent fs.InodeEmb
 		return errno
 	}
 
+	moved, errno := d.moveLink(ctx, target, name, newDir, newName)
+	if errno != 0 {
+		return errno
+	}
+
+	// A pending file under newName, or a parked edit of the file just trashed there, would
+	// otherwise still upload over the file moved in.
+	newDir.replace(ctx, newName, d.fileChild(name), target.Link.LinkID)
+
+	// The kernel holds both directories locked through this call, so the inode under name is
+	// the one it is renaming.
+	if child := d.GetChild(name); child != nil {
+		refreshNode(child, moved)
+		if fn, ok := child.Operations().(*fileNode); ok {
+			fn.mu.Lock()
+			fn.name = newName
+			fn.parent = newDir
+			fn.mu.Unlock()
+		}
+	}
+
+	// An existing file with a parked buffer (edited, closed, still waiting) starts its wait over
+	// under the new name, the same as a pending file does in renamePending.
+	if child := d.GetChild(name); child != nil {
+		if fn, ok := child.Operations().(*fileNode); ok {
+			if h := fn.parkedHandle(); h != nil && h.unpark(true) {
+				return h.Release(ctx)
+			}
+		}
+	}
+
+	return 0
+}
+
+// moveLink moves target, listed as name in d, to newName in newDir on the drive and patches both
+// cached listings, without touching any inode: Rename updates the one the kernel renamed, and
+// Release the file whose upload it moves, which by then may not be the inode under name any more.
+func (d *dirNode) moveLink(ctx context.Context, target *drive.Node, name string, newDir *dirNode, newName string) (*drive.Node, syscall.Errno) {
 	from := path.Join(d.relPath(), name)
 	to := path.Join(newDir.relPath(), newName)
 
@@ -1875,51 +1927,26 @@ func (d *dirNode) Rename(ctx context.Context, name string, newParent fs.InodeEmb
 	// POSIX rename() atomically replaces the destination when it exists. Proton's Move API does
 	// not, so trash the existing destination first.
 	if existing, err := newDir.findChild(ctx, newName); err == 0 && existing.Link.LinkID != target.Link.LinkID {
-		if trashErr := d.client.Trash(opCtx, newDir.node, existing); trashErr != nil {
+		if trashErr := driveTrash(opCtx, d.client, newDir.node, existing); trashErr != nil {
 			slog.Error("trashing rename destination failed", "path", to, "err", trashErr)
-			return syscall.EIO
+			return nil, syscall.EIO
 		}
 		newDir.removeChild(newName)
 	}
 
-	moved, err := d.client.Move(opCtx, target, d.node, newDir.node, newName)
+	moved, err := driveMove(opCtx, d.client, target, d.node, newDir.node, newName)
 	if err != nil {
 		if timedOut(opCtx) {
 			slog.Error(action+" timed out", "from", from, "to", to, "timeout", d.st.metaTimeout)
-			return syscall.ETIMEDOUT
+			return nil, syscall.ETIMEDOUT
 		}
 		slog.Error(action+" failed", "from", from, "to", to, "err", err)
-		return syscall.EIO
-	}
-
-	// A pending file under newName, or a parked edit of the file just trashed there, would
-	// otherwise still upload over the file moved in.
-	newDir.replace(ctx, newName, d.fileChild(name), target.Link.LinkID)
-
-	if child := d.GetChild(name); child != nil {
-		refreshNode(child, moved)
-		if fn, ok := child.Operations().(*fileNode); ok {
-			fn.mu.Lock()
-			fn.name = newName
-			fn.parent = newDir
-			fn.mu.Unlock()
-		}
+		return nil, syscall.EIO
 	}
 
 	d.removeChild(name)
 	newDir.upsertChild(moved)
-
-	// An existing file with a parked buffer (edited, closed, still waiting) starts its wait over
-	// under the new name, the same as a pending file does in renamePending.
-	if child := d.GetChild(name); child != nil {
-		if fn, ok := child.Operations().(*fileNode); ok {
-			if h := fn.parkedHandle(); h != nil && h.unpark(true) {
-				return h.Release(ctx)
-			}
-		}
-	}
-
-	return 0
+	return moved, 0
 }
 
 // renamePending handles rename when the source is a pending file (created via Create, not yet
@@ -1964,9 +1991,8 @@ func (d *dirNode) renamePending(ctx context.Context, name string, newDir *dirNod
 // buffer is marked gone and, when parked, dropped right away. Without this a pending file renamed
 // over another pending one (two atomic saves within the upload delay: x.tmp1 -> x, x.tmp2 -> x)
 // left the first one's timer to upload "x" as a new file, and the second then failed to create
-// "x" on every retry. src waits out an upload of it already in flight (see awaitReplaced).
-// Release's own move of a file renamed mid-upload finds that very file under name; srcLink
-// matches it there, so it is left alone.
+// "x" on every retry. src waits out an upload of it already in flight (see awaitReplaced). A
+// file under name whose link is srcLink is the moved file itself, so it is left alone.
 func (d *dirNode) replace(ctx context.Context, name string, src *fileNode, srcLink string) {
 	dst := d.fileChild(name)
 	if dst == nil || dst == src {
@@ -2945,7 +2971,7 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 	opCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	uploaded, err := fn.client.Upload(opCtx, parent.node, name, existing, tmp, info.Size(), time.Now())
+	uploaded, err := driveUpload(opCtx, fn.client, parent.node, name, existing, tmp, info.Size(), time.Now())
 	if err != nil {
 		st.uploadsFailed.Add(1)
 		// The tray's Recent menu is where a user notices a save that will not retry on its own.
@@ -2987,7 +3013,7 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 		slog.Info("deleting upload of a replaced or deleted file", "path", displayPath)
 		trashCtx, cancel := context.WithTimeout(ctx, st.metaTimeout)
 		defer cancel()
-		if err := fn.client.Trash(trashCtx, parent.node, uploaded); err != nil {
+		if err := driveTrash(trashCtx, fn.client, parent.node, uploaded); err != nil {
 			slog.Error("deleting upload of a replaced or deleted file failed", "path", displayPath, "err", err)
 		}
 		return 0
@@ -3002,19 +3028,24 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 
 	// A Rename that arrived mid-upload only retargeted this node (FreeCAD writes "x.FCStd.<uuid>"
 	// and renames it over "x.FCStd" while the upload runs), so the drive still has the file under
-	// the old name. Move it to where it is now.
+	// the old name. Move it to where it is now, by its own link and for this node only: the inode
+	// under the old name may already be another file (renamed away, then saved anew under it),
+	// which going through Rename would retarget onto this file's link.
 	if uploadedName != name || uploadedParent != parent {
-		if uploaded != nil {
-			parent.upsertChild(uploaded)
-		} else {
+		target := uploaded
+		if target == nil {
 			parent.expire()
+			found, errno := parent.findChild(ctx, name)
+			if errno != 0 {
+				return errno
+			}
+			target = found
 		}
-		if errno := parent.Rename(ctx, name, uploadedParent, uploadedName, 0); errno != 0 {
+		moved, errno := parent.moveLink(ctx, target, name, uploadedParent, uploadedName)
+		if errno != 0 {
 			return errno
 		}
-		if moved, errno := uploadedParent.findChild(ctx, uploadedName); errno == 0 {
-			fn.setNode(moved)
-		}
+		fn.setNode(moved)
 		return 0
 	}
 

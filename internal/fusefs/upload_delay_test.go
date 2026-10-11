@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"syscall"
@@ -103,6 +104,66 @@ func TestRenamePendingOverPendingDropsTheReplacedBuffer(t *testing.T) {
 	}
 	if second.replaces != first {
 		t.Error("renamed file does not wait for an upload of the file it replaced")
+	}
+}
+
+// fakeDrive swaps the drive writes for fakes for the length of a test.
+func fakeDrive(t *testing.T, upload func() (*drive.Node, error), move func(n *drive.Node, newName string) (*drive.Node, error), trash func(n *drive.Node) error) {
+	t.Helper()
+	origUpload, origMove, origTrash := driveUpload, driveMove, driveTrash
+	t.Cleanup(func() { driveUpload, driveMove, driveTrash = origUpload, origMove, origTrash })
+
+	driveUpload = func(context.Context, *drive.Client, *drive.Node, string, *drive.Node, io.Reader, int64, time.Time) (*drive.Node, error) {
+		return upload()
+	}
+	driveMove = func(_ context.Context, _ *drive.Client, n, _, _ *drive.Node, newName string) (*drive.Node, error) {
+		return move(n, newName)
+	}
+	driveTrash = func(_ context.Context, _ *drive.Client, _, n *drive.Node) error {
+		return trash(n)
+	}
+}
+
+func TestRenameDuringUploadMovesOnlyTheUploadedFile(t *testing.T) {
+	st := &mountState{
+		opTimeout:    time.Minute,
+		metaTimeout:  time.Minute,
+		dirs:         make(map[string]*dirNode),
+		parentOf:     make(map[string]string),
+		cacheListing: func(*drive.Node, []*drive.Node) {},
+	}
+	d := newTreeDir(st)
+	ctx := context.Background()
+	p, hp := addPending(t, d, "a")
+
+	// While "a" uploads, the user renames it to "b" and saves a new "a".
+	var q *fileNode
+	var movedLink string
+	fakeDrive(t,
+		func() (*drive.Node, error) {
+			if errno := d.Rename(ctx, "a", d, "b", 0); errno != 0 {
+				t.Fatalf("Rename = %v", errno)
+			}
+			d.MvChild("a", d.EmbeddedInode(), "b", true) // what go-fuse does once Rename returns
+			q, _ = addPending(t, d, "a")
+			return node("p", "a"), nil
+		},
+		func(n *drive.Node, newName string) (*drive.Node, error) {
+			movedLink = n.Link.LinkID
+			return node(n.Link.LinkID, newName), nil
+		},
+		func(*drive.Node) error { return nil },
+	)
+
+	if errno := hp.Release(ctx); errno != 0 {
+		t.Fatalf("Release = %v, want 0", errno)
+	}
+
+	if movedLink != "p" || p.node == nil || p.node.Link.LinkID != "p" || p.currentName() != "b" {
+		t.Errorf("uploaded file not moved to b by its own link (moved %q, node %v, name %q)", movedLink, p.node, p.currentName())
+	}
+	if !q.pending() || q.currentName() != "a" || q.handle == nil {
+		t.Error("the new file saved under the old name was retargeted onto the uploaded file")
 	}
 }
 
