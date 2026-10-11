@@ -1535,6 +1535,11 @@ func (d *dirNode) Unlink(ctx context.Context, name string) syscall.Errno {
 				return 0
 			}
 		}
+		// Still open or uploading (create, unlink, write, close is a common temp-file pattern):
+		// it is not on the drive yet, so there is nothing to trash, only an upload to stop.
+		if fn.unlinkPending() {
+			return 0
+		}
 	}
 	return d.remove(ctx, name)
 }
@@ -2169,10 +2174,10 @@ type fileHandle struct {
 	retryIn time.Duration
 	failed  bool
 
-	// gone is set when a rename puts another file over this buffer's file before the buffer
-	// reached the drive: Release drops it instead of uploading it, and trashes a new file an
-	// upload already in flight created. It lives on the handle, not the node, because go-fuse can
-	// hand the same inode out again for a later file under that name.
+	// gone is set when a rename puts another file over this buffer's file, or an Unlink removes
+	// it, before the buffer reached the drive: Release drops it instead of uploading it, and
+	// trashes a new file an upload already in flight created. It lives on the handle, not the
+	// node, because go-fuse can hand the same inode out again for a later file under that name.
 	gone atomic.Bool
 }
 
@@ -2218,9 +2223,25 @@ func (f *fileNode) awaitReplaced() {
 	}
 }
 
-// claim points the node at the link h's upload created, unless a rename over the file marked h
-// gone while the upload ran; false means the caller trashes what it created instead. A claimed
-// upload ends the wait chain, since every file it replaced has settled by now.
+// unlinkPending marks the write buffer of a file not on the drive yet gone, so its Release drops
+// it instead of uploading it, or trashes the new file an upload already in flight creates. False
+// when the file is on the drive, for the caller to trash it there. Under f.mu, same as claim, so
+// an upload finishing meanwhile is seen by exactly one of the two.
+// ponytail: an Unlink between claim and the parent's upsertChild finds nothing to trash (ENOENT)
+func (f *fileNode) unlinkPending() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.node != nil || f.handle == nil {
+		return false
+	}
+	f.handle.gone.Store(true)
+	return true
+}
+
+// claim points the node at the link h's upload created, unless a rename over the file or an
+// Unlink marked h gone while the upload ran; false means the caller trashes what it created
+// instead. A claimed upload ends the wait chain, since every file it replaced has settled by now.
 func (f *fileNode) claim(h *fileHandle, n *drive.Node) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -2271,7 +2292,7 @@ const (
 // permanentUploadError) parks it with no timer instead, since retrying cannot help: it stays
 // readable on the mount until a rename, a save or a delete takes it back.
 func (h *fileHandle) keepForRetry(tmp *os.File, name string, err error) {
-	// Replaced while it tried: there is no save left to keep.
+	// Replaced or unlinked while it tried: there is no save left to keep.
 	if h.gone.Load() {
 		h.drop(tmp)
 		return
@@ -2588,7 +2609,7 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 	parent := fn.parent
 	fn.mu.Unlock()
 
-	// Renamed over before it reached the drive (see dirNode.replace): nothing to upload.
+	// Renamed over (see dirNode.replace) or unlinked before it reached the drive: nothing to upload.
 	if h.gone.Load() {
 		h.drop(tmp)
 		return 0
@@ -2695,9 +2716,10 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 	st.recordFinished(recentTransfer{Path: displayPath, Action: "upload", Status: "done", Bytes: info.Size(), Finished: time.Now()})
 	slog.Info("uploaded file", "path", name, "size", logx.FormatSize(info.Size()), logx.Elapsed(uploadStart))
 
-	// Renamed over while the upload ran: a new file it created is in the way of the file that
-	// replaced it, so it goes to the trash. A revision is left alone; the file it revised was
-	// trashed by the rename, or now belongs to the replacing file, which uploads after it.
+	// Renamed over or unlinked while the upload ran: a new file it created is junk, or in the way
+	// of the file that replaced it, so it goes to the trash. A revision is left alone; the file it
+	// revised was trashed by the rename, or now belongs to the replacing file, which uploads after
+	// it. (Unlink only marks files not on the drive yet, so it never leaves a revision here.)
 	if !fn.claim(h, uploaded) {
 		if existing != nil {
 			return 0
@@ -2706,11 +2728,11 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 			parent.expire()
 			return 0
 		}
-		slog.Info("deleting replaced upload", "path", displayPath)
+		slog.Info("deleting upload of a replaced or deleted file", "path", displayPath)
 		trashCtx, cancel := context.WithTimeout(ctx, st.metaTimeout)
 		defer cancel()
 		if err := fn.client.Trash(trashCtx, parent.node, uploaded); err != nil {
-			slog.Error("deleting replaced upload failed", "path", displayPath, "err", err)
+			slog.Error("deleting upload of a replaced or deleted file failed", "path", displayPath, "err", err)
 		}
 		return 0
 	}

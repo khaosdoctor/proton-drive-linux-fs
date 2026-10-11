@@ -100,6 +100,30 @@ func TestRenamePendingOverPendingDropsTheReplacedBuffer(t *testing.T) {
 	}
 }
 
+func TestUnlinkPendingWithOpenWriterDropsItOnClose(t *testing.T) {
+	st := &mountState{uploadDelay: time.Hour}
+	d := newTreeDir(st)
+	ctx := context.Background()
+
+	// create, unlink, write, close: the file never belongs on the drive.
+	fn, h := addPending(t, d, "x")
+	buf := h.tmp.Name()
+
+	if errno := d.Unlink(ctx, "x"); errno != 0 {
+		t.Fatalf("Unlink = %v, want 0", errno)
+	}
+	if errno := h.Release(ctx); errno != 0 {
+		t.Fatalf("Release = %v, want 0", errno)
+	}
+
+	if fn.parkedHandle() != nil || fn.handle != nil || len(st.delayed) != 0 {
+		t.Error("unlinked file still waiting to upload")
+	}
+	if _, err := os.Stat(buf); !os.IsNotExist(err) {
+		t.Errorf("unlinked file's buffer still on disk: %v", err)
+	}
+}
+
 func TestReleaseDelaysUploadAndReopenTakesItBack(t *testing.T) {
 	st := &mountState{uploadDelay: time.Hour}
 	fn, h := newDelayedHandle(t, st, "model.FCStd")

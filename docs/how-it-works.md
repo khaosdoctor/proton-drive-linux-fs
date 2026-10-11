@@ -83,7 +83,7 @@ The delay is there because a lot of apps save in several steps. FreeCAD, for exa
 
 - **Rename**: the file moves to the new name and the wait starts over with that name's delay. If another file was waiting under that name, the rename replaces it and only the renamed file gets uploaded.
 - **Open for writing**: the app gets the same buffer back and the wait stops. Closing it again starts the wait again.
-- **Delete**: we drop the buffer and nothing is uploaded.
+- **Delete**: we drop the buffer and nothing is uploaded. That holds for a new file that's still open too, and if its upload already started, whatever it created goes to the trash.
 - **Listing, stat, read**: you see the file and its content normally, even though Proton doesn't have it yet.
 - **Unmount**: we upload everything that's still waiting before the mount goes away.
 - **Failed upload**: we keep the buffer and try again after 30 seconds, then wait twice as long after each failure, up to 30 minutes. The log tells you where the temp file is, so you never lose a save because the network failed.
