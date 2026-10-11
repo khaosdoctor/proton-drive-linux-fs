@@ -2,6 +2,9 @@ package fusefs
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"net/http"
 	"os"
 	"syscall"
 	"testing"
@@ -9,6 +12,7 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+	proton "github.com/henrybear327/go-proton-api"
 
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/drive"
 )
@@ -152,7 +156,7 @@ func TestKeepForRetryParksWithATimer(t *testing.T) {
 	st := &mountState{}
 	fn, h := newDelayedHandle(t, st, "model.FCStd")
 
-	h.keepForRetry(h.sharedTmp(), "model.FCStd")
+	h.keepForRetry(h.sharedTmp(), "model.FCStd", errors.New("connection reset"))
 	defer h.unpark(false)
 
 	if fn.parkedHandle() != h || h.timer == nil || len(st.delayed) != 1 {
@@ -160,6 +164,39 @@ func TestKeepForRetryParksWithATimer(t *testing.T) {
 	}
 	if _, err := os.Stat(h.sharedTmp().Name()); err != nil {
 		t.Errorf("buffer of a failed upload removed: %v", err)
+	}
+}
+
+func TestKeepForRetryBacksOffAndStopsOnPermanentErrors(t *testing.T) {
+	st := &mountState{}
+	fn, h := newDelayedHandle(t, st, "model.FCStd")
+	transient := &proton.APIError{Status: http.StatusServiceUnavailable}
+
+	// Each failure doubles the wait, up to the cap.
+	for _, want := range []time.Duration{uploadRetryDelay, 2 * uploadRetryDelay, 4 * uploadRetryDelay} {
+		h.keepForRetry(h.sharedTmp(), "model.FCStd", transient)
+		if h.retryIn != want {
+			t.Fatalf("retry in %v, want %v", h.retryIn, want)
+		}
+		h.unpark(false)
+	}
+	h.retryIn = uploadRetryMax
+	h.keepForRetry(h.sharedTmp(), "model.FCStd", transient)
+	h.unpark(false)
+	if h.retryIn != uploadRetryMax {
+		t.Errorf("retry in %v, want the cap %v", h.retryIn, uploadRetryMax)
+	}
+
+	// The name is taken: retrying cannot help, so the buffer stays parked with no timer.
+	taken := fmt.Errorf("upload: %w", proton.APIError{Status: http.StatusUnprocessableEntity, Code: proton.AFileOrFolderNameExist})
+	h.keepForRetry(h.sharedTmp(), "model.FCStd", taken)
+	defer h.unpark(false)
+
+	if fn.parkedHandle() != h || h.timer != nil || len(st.delayed) != 0 {
+		t.Fatal("permanently failed upload still scheduled for a retry")
+	}
+	if _, err := os.Stat(h.sharedTmp().Name()); err != nil {
+		t.Errorf("buffer of a permanently failed upload removed: %v", err)
 	}
 }
 

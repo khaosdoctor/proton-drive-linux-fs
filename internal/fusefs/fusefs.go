@@ -6,6 +6,7 @@ import (
 	"hash/fnv"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"path"
@@ -2124,6 +2125,10 @@ type fileHandle struct {
 	timer  *time.Timer // set while parked for an upload delay; nil while parked under an excluded name
 	due    bool        // the upload delay ran out, so the next Release uploads instead of parking again
 
+	// retryIn is the wait before the next retry of a failed upload, doubled per failure
+	// (keepForRetry) and reset when something takes the buffer back to upload it again.
+	retryIn time.Duration
+
 	// gone is set when a rename puts another file over this buffer's file before the buffer
 	// reached the drive: Release drops it instead of uploading it, and trashes a new file an
 	// upload already in flight created. It lives on the handle, not the node, because go-fuse can
@@ -2210,22 +2215,65 @@ func (h *fileHandle) park(tmp *os.File, delay time.Duration) {
 	})
 }
 
-// uploadRetryDelay is how long a buffer whose upload failed waits before the next try.
-const uploadRetryDelay = 30 * time.Second
+// uploadRetryDelay is how long a buffer whose upload failed waits before its first retry. Each
+// further failure doubles the wait, up to uploadRetryMax, so a file that keeps failing costs one
+// attempt and its few log lines every half hour instead of every 30 seconds.
+const (
+	uploadRetryDelay = 30 * time.Second
+	uploadRetryMax   = 30 * time.Minute
+)
 
-// keepForRetry parks a buffer whose upload failed, so the only copy of a save is never deleted:
-// its close already returned success, and nothing else would try again. The log names the temp
-// file, which survives a daemon exit for manual recovery.
-// ponytail: retries every uploadRetryDelay with no cap; a permanent failure (quota, a trashed
-// parent) keeps retrying until unmount
-func (h *fileHandle) keepForRetry(tmp *os.File, name string) {
+// keepForRetry parks a buffer whose upload failed with err, so the only copy of a save is never
+// deleted: its close already returned success, and nothing else would try again. The log names
+// the temp file, which survives a daemon exit for manual recovery. A permanent failure (see
+// permanentUploadError) parks it with no timer instead, since retrying cannot help: it stays
+// readable on the mount until a rename, a save or a delete takes it back.
+func (h *fileHandle) keepForRetry(tmp *os.File, name string, err error) {
 	// Replaced while it tried: there is no save left to keep.
 	if h.gone.Load() {
 		h.drop(tmp)
 		return
 	}
-	slog.Warn("keeping the buffer to retry the upload", "path", name, "buffer", tmp.Name(), "retry_in", uploadRetryDelay)
-	h.park(tmp, uploadRetryDelay)
+
+	if permanentUploadError(err) {
+		slog.Error("upload failed for good, keeping the buffer; rename, save or delete the file to try again", "path", name, "buffer", tmp.Name(), "err", err)
+		h.park(tmp, 0)
+		return
+	}
+
+	h.mu.Lock()
+	h.retryIn = min(max(2*h.retryIn, uploadRetryDelay), uploadRetryMax)
+	delay := h.retryIn
+	h.mu.Unlock()
+
+	slog.Warn("keeping the buffer to retry the upload", "path", name, "buffer", tmp.Name(), "retry_in", delay)
+	h.park(tmp, delay)
+}
+
+// permanentUploadError reports whether retrying an upload that failed with err cannot help:
+// Proton refused the request itself (the name is taken, the parent folder is gone, the account is
+// out of space), as opposed to a timeout, a rate limit, a server error or an expired session.
+func permanentUploadError(err error) bool {
+	if err == nil || drive.IsUnrecoverableAuth(err) {
+		return false
+	}
+
+	// go-proton-api wraps a pointer, drive's hand-rolled requests a value (see drive.asAPIError).
+	var apiErr proton.APIError
+	var p *proton.APIError
+	switch {
+	case errors.As(err, &p):
+		apiErr = *p
+	case errors.As(err, &apiErr):
+	default:
+		return false
+	}
+
+	switch apiErr.Status {
+	case http.StatusUnauthorized, http.StatusRequestTimeout, http.StatusTooManyRequests:
+		return false
+	}
+	return apiErr.Status >= 400 && apiErr.Status < 500
 }
 
 // drop lets go of a buffer that was uploaded or never written to: the node stops pointing at this
@@ -2271,6 +2319,9 @@ func (h *fileHandle) unpark(dirty bool) bool {
 	}
 	h.parked = false
 	h.dirty = dirty
+	if dirty {
+		h.retryIn = 0 // taken back to upload again: a fresh start, not the next step of a backoff
+	}
 	timer := h.timer
 	h.timer = nil
 	h.mu.Unlock()
@@ -2494,13 +2545,13 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 	info, err := tmp.Stat()
 	if err != nil {
 		slog.Error("stat temp file failed", "path", name, "err", err)
-		h.keepForRetry(tmp, name)
+		h.keepForRetry(tmp, name, err)
 		return syscall.EIO
 	}
 
 	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
 		slog.Error("seek temp file failed", "path", name, "err", err)
-		h.keepForRetry(tmp, name)
+		h.keepForRetry(tmp, name, err)
 		return syscall.EIO
 	}
 
@@ -2526,7 +2577,7 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 	if !acquired {
 		st.uploadsFailed.Add(1)
 		slog.Warn("upload cancelled while queued", "path", name)
-		h.keepForRetry(tmp, name)
+		h.keepForRetry(tmp, name, ctx.Err())
 		return syscall.EINTR
 	}
 	defer st.uploads.release()
@@ -2542,14 +2593,19 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 	uploaded, err := fn.client.Upload(opCtx, parent.node, name, existing, tmp, info.Size(), time.Now())
 	if err != nil {
 		st.uploadsFailed.Add(1)
-		st.recordFinished(recentTransfer{Path: displayPath, Action: "upload", Status: "failed", Bytes: info.Size(), Finished: time.Now(), Err: err.Error()})
+		// The tray's Recent menu is where a user notices a save that will not retry on its own.
+		msg := err.Error()
+		if permanentUploadError(err) {
+			msg = "gave up, buffer kept at " + tmp.Name() + ": " + msg
+		}
+		st.recordFinished(recentTransfer{Path: displayPath, Action: "upload", Status: "failed", Bytes: info.Size(), Finished: time.Now(), Err: msg})
 		if timedOut(opCtx) {
 			slog.Error("uploading file timed out", "path", name, "timeout", timeout)
-			h.keepForRetry(tmp, name)
+			h.keepForRetry(tmp, name, err)
 			return syscall.ETIMEDOUT
 		}
 		slog.Error("uploading file failed", "path", name, "err", err)
-		h.keepForRetry(tmp, name)
+		h.keepForRetry(tmp, name, err)
 		return syscall.EIO
 	}
 
