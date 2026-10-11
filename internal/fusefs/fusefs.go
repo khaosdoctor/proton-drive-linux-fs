@@ -2657,9 +2657,10 @@ const (
 // keepForRetry parks a buffer whose upload failed with err, so the only copy of a save is never
 // deleted: its close already returned success, and nothing else would try again. The log names
 // the temp file, and an unmount before the upload works moves it out of $TMPDIR for recovery
-// (keepUnsaved). A permanent failure (see
-// permanentUploadError) parks it with no timer instead, since retrying cannot help: it stays
-// readable on the mount until a rename or a save takes it back to try again (a delete drops it).
+// (keepUnsaved). A permanent failure (see permanentUploadError) parks it with no timer instead,
+// since retrying cannot help: it stays readable on the mount until a rename or a save takes it
+// back to try again. Deleting the file drops it (Unlink); a rename over the file keeps it
+// (discard).
 func (h *fileHandle) keepForRetry(tmp *os.File, name string, err error) {
 	// Replaced or unlinked while it tried: there is no save left to keep.
 	if h.gone.Load() {
@@ -2720,9 +2721,11 @@ func permanentUploadError(err error) bool {
 	return false
 }
 
-// discard lets go of a buffer a rename over its file, or an unlink, made obsolete. One whose
-// upload failed for good is kept anyway (keepUnsaved): the log and the tray told the user it
-// was, and it may be the only copy of that save.
+// discard lets go of a buffer marked gone: a rename put another file over its file, or an unlink
+// removed it while it was still open or uploading. One whose upload failed for good is kept
+// anyway (keepUnsaved): the log and the tray told the user it was, and a rename over it may come
+// from an app's own save, not from the user. An explicit unlink of a parked buffer, failed or
+// not, never comes here: Unlink drops it, since the user deleted the file.
 func (h *fileHandle) discard(tmp *os.File) {
 	h.mu.Lock()
 	failed := h.failed
