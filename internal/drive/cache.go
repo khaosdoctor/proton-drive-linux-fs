@@ -168,14 +168,21 @@ func (c *BlockCache) Put(linkID, revID string, index int, data []byte) {
 		return
 	}
 
+	// Two Files on the same revision can miss the same block at once, and each Put's rename then
+	// replaces the other's file. Only the size delta counts, and the stat, rename and count stay
+	// under c.mu together so two concurrent Puts can't both see the block as new.
 	path := filepath.Join(dir, strconv.Itoa(index))
+	c.mu.Lock()
+	oldSize := int64(0)
+	if info, err := os.Stat(path); err == nil {
+		oldSize = info.Size()
+	}
 	if err := os.Rename(tmpPath, path); err != nil {
+		c.mu.Unlock()
 		_ = os.Remove(tmpPath)
 		return
 	}
-
-	c.mu.Lock()
-	c.size += int64(len(data))
+	c.size += int64(len(data)) - oldSize
 	c.mu.Unlock()
 
 	c.evict()

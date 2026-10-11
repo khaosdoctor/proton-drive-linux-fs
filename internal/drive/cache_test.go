@@ -53,6 +53,22 @@ func TestBlockCacheEvictsOldest(t *testing.T) {
 	}
 }
 
+// TestBlockCachePutSameBlockCountsOnce checks that a Put replacing an already cached block (two
+// Files missing the same block) adds only the size delta, not the whole block again.
+func TestBlockCachePutSameBlockCountsOnce(t *testing.T) {
+	bc, err := OpenBlockCache(t.TempDir(), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bc.Put("link1", "rev1", 1, make([]byte, 10))
+	bc.Put("link1", "rev1", 1, make([]byte, 10))
+
+	if bc.size != 10 {
+		t.Fatalf("size = %d, want 10", bc.size)
+	}
+}
+
 func TestBlockCacheDisabled(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "unused")
 	bc, err := OpenBlockCache(dir, 0)
