@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/zalando/go-keyring"
 )
 
 func TestSessionJSONRoundTripKeyringCase(t *testing.T) {
@@ -72,16 +70,25 @@ func TestSessionJSONRoundTripFallbackCase(t *testing.T) {
 	}
 }
 
-// TestSavedDoesNotReadKeyring covers the tray's periodic logged-in check: with the key password in
-// the keyring (no KeyPassFile), Saved must answer from the session file alone. A keyring that fails
-// every call stands in for a locked one that would prompt.
-func TestSavedDoesNotReadKeyring(t *testing.T) {
+// TestLoggedInCheckCachesKeyringRead covers the tray's periodic logged-in check: a session file
+// whose key password can't be loaded is logged out, like a full Load says, and the keyring is read
+// once, not again on every call while the file is unchanged.
+func TestLoggedInCheckCachesKeyringRead(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	keyring.MockInitWithError(errors.New("keyring touched"))
-	t.Cleanup(keyring.MockInit)
+	reads := 0
+	orig := keyringGet
+	t.Cleanup(func() { keyringGet = orig })
+	keyringGet = func(string, string) (string, error) {
+		reads++
+		return "", errors.New("no such entry")
+	}
 
-	if Saved() {
-		t.Fatal("Saved() = true with no session file")
+	check := LoggedInCheck()
+	if check() {
+		t.Fatal("logged in with no session file")
+	}
+	if reads != 0 {
+		t.Fatalf("keyring read %d times with no session file, want 0", reads)
 	}
 
 	dir, err := sessionDir()
@@ -95,7 +102,12 @@ func TestSavedDoesNotReadKeyring(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !Saved() {
-		t.Fatal("Saved() = false with a session file whose key password lives in the keyring")
+	for range 2 {
+		if check() {
+			t.Fatal("logged in with a session file whose key password can't be loaded")
+		}
+	}
+	if reads != 1 {
+		t.Fatalf("keyring read %d times over two checks of an unchanged file, want 1", reads)
 	}
 }
