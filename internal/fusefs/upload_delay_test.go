@@ -50,14 +50,20 @@ func newDelayedHandle(t *testing.T, st *mountState, name string) (*fileNode, *fi
 // newTreeDir makes d the root of an in-memory go-fuse inode tree (no kernel mount) with an empty,
 // fresh listing, so handlers that find children by name run without a drive.
 func newTreeDir(st *mountState) *dirNode {
+	d, _ := newRawTree(st)
+	return d
+}
+
+// newRawTree is newTreeDir plus go-fuse's raw filesystem for it, so a test can make the calls the
+// kernel would (Create, Release, Forget, Lookup) against node id 1, the root.
+func newRawTree(st *mountState) (*dirNode, fuse.RawFileSystem) {
 	d := &dirNode{
 		st:       st,
 		node:     &drive.Node{},
 		children: []*drive.Node{},
 		expires:  time.Now().Add(time.Hour),
 	}
-	fs.NewNodeFS(d, nil)
-	return d
+	return d, fs.NewNodeFS(d, nil)
 }
 
 // addPending mounts a pending file with a dirty, still open write buffer under name in d.

@@ -6,34 +6,55 @@ import (
 	"os"
 	"testing"
 
+	"github.com/hanwen/go-fuse/v2/fuse"
 	proton "github.com/henrybear327/go-proton-api"
 )
 
-func TestUnmountAndForgetLetGoOfKeptBuffers(t *testing.T) {
+func exists(name string) bool {
+	_, err := os.Stat(name)
+	return err == nil
+}
+
+func TestForgottenPendingFileKeepsItsBuffer(t *testing.T) {
 	st := &mountState{excludes: parseExcludes([]string{"*.tmp"})}
-	exists := func(name string) bool {
-		_, err := os.Stat(name)
-		return err == nil
+	d, raw := newRawTree(st)
+
+	// Orca writes "x.3mf.tmp" (excluded, so parked with no timer), and the kernel forgets the
+	// inode before Orca renames it.
+	var created fuse.CreateOut
+	in := &fuse.CreateIn{InHeader: fuse.InHeader{NodeId: 1}, Flags: uint32(os.O_WRONLY), Mode: 0o644}
+	if status := raw.Create(nil, in, "x.3mf.tmp", &created); !status.Ok() {
+		t.Fatalf("Create = %v", status)
 	}
-	parkExcluded := func(name string) (*fileNode, string) {
-		fn, h := newDelayedHandle(t, st, name)
-		buf := h.tmp.Name()
-		if errno := h.Release(context.Background()); errno != 0 {
-			t.Fatalf("Release = %v, want 0", errno)
-		}
-		return fn, buf
+	fn := d.fileChild("x.3mf.tmp")
+	buf := fn.handle.tmp.Name()
+	raw.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: created.NodeId}, Fh: created.Fh})
+	raw.Forget(created.NodeId, 1)
+
+	var entry fuse.EntryOut
+	if status := raw.Lookup(nil, &fuse.InHeader{NodeId: 1}, "x.3mf.tmp", &entry); !status.Ok() {
+		t.Fatalf("Lookup after forget = %v, want the pending file still there", status)
+	}
+	if d.pendingChild("x.3mf.tmp") != fn || !exists(buf) {
+		t.Fatal("forgotten pending file lost its buffer")
 	}
 
-	forgotten, forgottenBuf := parkExcluded("a.3mf.tmp")
-	_, unmountedBuf := parkExcluded("b.3mf.tmp")
+	st.flushDelayed()
+	if exists(buf) {
+		t.Error("excluded buffer still in $TMPDIR after unmount")
+	}
+}
+
+func TestUnmountLetsGoOfKeptBuffers(t *testing.T) {
+	st := &mountState{excludes: parseExcludes([]string{"*.tmp"})}
+	_, h := newDelayedHandle(t, st, "b.3mf.tmp")
+	unmountedBuf := h.tmp.Name()
+	if errno := h.Release(context.Background()); errno != 0 {
+		t.Fatalf("Release = %v, want 0", errno)
+	}
 	_, failed := newDelayedHandle(t, st, "c.3mf")
 	failedBuf := failed.tmp.Name()
 	failed.keepForRetry(failed.sharedTmp(), "c.3mf", proton.APIError{Status: http.StatusNotFound})
-
-	forgotten.OnForget()
-	if exists(forgottenBuf) {
-		t.Error("excluded buffer of a forgotten file still in $TMPDIR")
-	}
 
 	st.flushDelayed()
 	if exists(unmountedBuf) {

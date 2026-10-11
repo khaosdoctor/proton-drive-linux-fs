@@ -1747,13 +1747,17 @@ func (d *dirNode) Create(ctx context.Context, name string, flags uint32, mode ui
 		return nil, nil, 0, syscall.EIO
 	}
 
-	fn := &fileNode{client: d.client, parent: d, name: name}
+	fn := &fileNode{client: d.client, parent: d, name: name, pinned: true}
 	handle := &fileHandle{node: fn, tmp: tmp, dirty: true, owns: true}
 	fn.handle = handle
 
+	// Persistent while pending: the tree is the only place a file not on the drive can be found
+	// by name, and a plain inode leaves it once the kernel forgets it, stranding a parked buffer
+	// (an excluded "x.3mf.tmp" waiting for its rename) where no Lookup or Rename reaches it.
+	// detach unpins it once the buffer is uploaded or dropped.
 	// ponytail: inode number derived from parent+name until the real LinkID exists after upload
 	attr := fs.StableAttr{Mode: fuse.S_IFREG, Ino: inodeNum(d.node.Link.LinkID + "/" + name)}
-	inode := d.NewInode(ctx, fn, attr)
+	inode := d.NewPersistentInode(ctx, fn, attr)
 
 	out.Ino = attr.Ino
 	out.Mode = fuse.S_IFREG | 0o644
@@ -2093,6 +2097,7 @@ type fileNode struct {
 	parent *dirNode    // current parent, kept in sync by Rename
 	name   string      // current name, kept in sync by Rename
 	handle *fileHandle // most recently opened write handle with a temp buffer, if any
+	pinned bool        // a persistent inode Create made, until its buffer is uploaded or dropped (unpin)
 
 	// replaces is the file this one was renamed over (see dirNode.replace). Release waits out an
 	// upload of it, or of the files it replaced in turn, before uploading this one, so the two
@@ -2107,14 +2112,18 @@ type fileNode struct {
 var _ = (fs.NodeGetattrer)((*fileNode)(nil))
 var _ = (fs.NodeSetattrer)((*fileNode)(nil))
 var _ = (fs.NodeOpener)((*fileNode)(nil))
-var _ = (fs.NodeOnForgetter)((*fileNode)(nil))
 
-// OnForget runs once the kernel forgets the file, which nothing can rename, reopen or unlink
-// after that. A buffer parked with no timer would stay in $TMPDIR until the daemon exits, so it is
-// let go of now (abandon). A buffer waiting out a delay keeps its timer, which uploads it.
-func (f *fileNode) OnForget() {
-	if h := f.parkedHandle(); h != nil {
-		h.abandon()
+// unpin drops the persistence Create gave the inode, once its buffer is uploaded or dropped: from
+// then on the kernel's lookups alone keep it, like any other file's.
+func (f *fileNode) unpin() {
+	f.mu.Lock()
+	pinned := f.pinned
+	f.pinned = false
+	f.mu.Unlock()
+
+	// ForgetPersistent takes go-fuse's inode locks, so it runs with f.mu released.
+	if pinned {
+		f.ForgetPersistent()
 	}
 }
 
@@ -2591,7 +2600,8 @@ func (h *fileHandle) drop(tmp *os.File) {
 	_ = os.Remove(tmp.Name())
 }
 
-// detach unhooks the buffer from this handle and the handle from its node.
+// detach unhooks the buffer from this handle and the handle from its node, which then has nothing
+// left to upload and needs no pinning (unpin).
 func (h *fileHandle) detach() {
 	h.mu.Lock()
 	h.tmp = nil
@@ -2599,10 +2609,15 @@ func (h *fileHandle) detach() {
 
 	fn := h.node
 	fn.mu.Lock()
-	if fn.handle == h {
+	mine := fn.handle == h
+	if mine {
 		fn.handle = nil
 	}
 	fn.mu.Unlock()
+
+	if mine {
+		fn.unpin()
+	}
 }
 
 // settle uploads a buffer whose upload delay ran out, unless something took it back first.
@@ -2647,9 +2662,9 @@ func (h *fileHandle) unpark(dirty bool) bool {
 	return true
 }
 
-// abandon lets go of a buffer parked with no timer once nothing can take it back any more: on
-// unmount, or when the kernel forgets the file. An excluded name was never going to upload, so its
-// temp file is removed. A buffer whose upload failed for good is the only copy of a save, so only
+// abandon lets go of a buffer parked with no timer at unmount, once nothing can take it back any
+// more. (A kernel forget is no such point: a pending file stays pinned in the tree, see Create.)
+// An excluded name was never going to upload, so its temp file is removed. A buffer whose upload failed for good is the only copy of a save, so only
 // its descriptor is closed, and the temp file stays where the log says for manual recovery.
 func (h *fileHandle) abandon() {
 	h.mu.Lock()
@@ -2858,8 +2873,8 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 
 	// An excluded name (Orca saves "x.3mf.tmp", then renames it) is never uploaded. The buffer
 	// stays parked on the node so renamePending uploads it under the real name, or Unlink drops it.
-	// Unmount, or the kernel forgetting the file, removes it (abandon).
-	// ponytail: a parked buffer never renamed or unlinked stays in $TMPDIR until one of those
+	// Unmount removes it (abandon).
+	// ponytail: a parked buffer never renamed or unlinked stays in $TMPDIR until unmount
 	if dirty && parent.st.excluded(name) {
 		h.park(tmp, 0)
 		return 0
