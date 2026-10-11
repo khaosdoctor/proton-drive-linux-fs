@@ -255,6 +255,37 @@ func TestFailedMoveKeepsTheTrashedDestinationsEdit(t *testing.T) {
 	}
 }
 
+func TestRenameOverARefusedSaveKeepsIt(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	st := &mountState{uploadDelay: time.Hour}
+	d := newTreeDir(st)
+	ctx := context.Background()
+
+	// Proton refused "x" for good; the tray says its buffer is kept. Then "y" is renamed over it.
+	_, hx := addPending(t, d, "x")
+	if _, err := hx.tmp.WriteString("refused"); err != nil {
+		t.Fatal(err)
+	}
+	buf := hx.tmp.Name()
+	hx.keepForRetry(hx.sharedTmp(), "x", proton.APIError{Status: http.StatusUnprocessableEntity, Code: proton.AFileOrFolderNameExist})
+	_, hy := addPending(t, d, "y")
+	_ = hy.Release(ctx)
+	defer hy.unpark(false)
+
+	if errno := d.Rename(ctx, "y", d, "x", 0); errno != 0 {
+		t.Fatalf("Rename = %v, want 0", errno)
+	}
+
+	saved, _ := filepath.Glob(filepath.Join(stateHome, "proton-drive-fs", "unsaved", "*-x"))
+	if exists(buf) || len(saved) != 1 {
+		t.Fatalf("refused save renamed over was not kept (unsaved dir: %v)", saved)
+	}
+	if got, _ := os.ReadFile(saved[0]); string(got) != "refused" {
+		t.Errorf("kept buffer holds %q, want %q", got, "refused")
+	}
+}
+
 func TestUnlinkPendingWithOpenWriterDropsItOnClose(t *testing.T) {
 	st := &mountState{uploadDelay: time.Hour}
 	d := newTreeDir(st)

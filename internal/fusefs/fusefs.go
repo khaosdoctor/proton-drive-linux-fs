@@ -2607,16 +2607,16 @@ const (
 // the temp file, and an unmount before the upload works moves it out of $TMPDIR for recovery
 // (keepUnsaved). A permanent failure (see
 // permanentUploadError) parks it with no timer instead, since retrying cannot help: it stays
-// readable on the mount until a rename, a save or a delete takes it back.
+// readable on the mount until a rename or a save takes it back to try again (a delete drops it).
 func (h *fileHandle) keepForRetry(tmp *os.File, name string, err error) {
 	// Replaced or unlinked while it tried: there is no save left to keep.
 	if h.gone.Load() {
-		h.drop(tmp)
+		h.discard(tmp)
 		return
 	}
 
 	if permanentUploadError(err) {
-		slog.Error("upload failed for good, keeping the buffer; rename, save or delete the file to try again", "path", name, "buffer", tmp.Name(), "err", err)
+		slog.Error("upload failed for good, keeping the buffer; rename or save the file to try again", "path", name, "buffer", tmp.Name(), "err", err)
 		h.mu.Lock()
 		h.failed = true
 		h.mu.Unlock()
@@ -2657,6 +2657,21 @@ func permanentUploadError(err error) bool {
 		return false
 	}
 	return apiErr.Status >= 400 && apiErr.Status < 500
+}
+
+// discard lets go of a buffer a rename over its file, or an unlink, made obsolete. One whose
+// upload failed for good is kept anyway (keepUnsaved): the log and the tray told the user it
+// was, and it may be the only copy of that save.
+func (h *fileHandle) discard(tmp *os.File) {
+	h.mu.Lock()
+	failed := h.failed
+	h.mu.Unlock()
+
+	if failed {
+		h.keepUnsaved(tmp)
+		return
+	}
+	h.drop(tmp)
 }
 
 // drop lets go of a buffer that was uploaded or never written to: the node stops pointing at this
@@ -2994,7 +3009,7 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 
 	// Renamed over (see dirNode.replace) or unlinked before it reached the drive: nothing to upload.
 	if h.gone.Load() {
-		h.drop(tmp)
+		h.discard(tmp)
 		return 0
 	}
 
@@ -3044,7 +3059,7 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 	fn.uploadMu.Lock()
 	defer fn.uploadMu.Unlock()
 	if h.gone.Load() {
-		h.drop(tmp)
+		h.discard(tmp)
 		return 0
 	}
 
