@@ -27,6 +27,10 @@ const externalThumbQueueSize = 256
 // externalThumbTimeout bounds the download + thumbnailer execution for one file.
 const externalThumbTimeout = 2 * time.Minute
 
+// thumbFetchTimeout bounds one Proton thumbnail fetch: two small requests (the URL, then the
+// encrypted preview of a few KB).
+const thumbFetchTimeout = time.Minute
+
 // thumbJob is one file whose Proton thumbnail should be fetched and cached.
 type thumbJob struct {
 	node    *drive.Node
@@ -62,7 +66,12 @@ func (st *mountState) runThumbWorker(ctx context.Context) {
 }
 
 func (st *mountState) fetchThumb(ctx context.Context, job thumbJob) {
-	img, err := st.client.Thumbnail(ctx, job.node)
+	// The worker is the only one, and the HTTP client has no deadline of its own: one stalled GET
+	// would wedge it for good while the queue fills and drops every later preview.
+	opCtx, cancel := context.WithTimeout(ctx, thumbFetchTimeout)
+	defer cancel()
+
+	img, err := st.client.Thumbnail(opCtx, job.node)
 	if err != nil {
 		st.thumbFailed(job, err)
 		return
