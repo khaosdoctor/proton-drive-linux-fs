@@ -185,10 +185,43 @@ func TestGetRawStatus(t *testing.T) {
 	}
 }
 
+// TestGetRawRetriesTransportError checks that a connection dropped halfway through the body is
+// retried instead of failing the read.
+func TestGetRawRetriesTransportError(t *testing.T) {
+	fastRetries(t)
+
+	var hits atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hits.Add(1) > 1 {
+			_, _ = w.Write([]byte("whole block"))
+			return
+		}
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("partial"))
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		_ = conn.Close()
+	}))
+	defer server.Close()
+
+	c := &Client{tokenSource: func() (string, string) { return "uid", "access" }}
+	body, err := c.getRaw(context.Background(), server.URL+"/block", "tok")
+	if err != nil || string(body) != "whole block" {
+		t.Fatalf("body %q err %v, want the body from the retry", body, err)
+	}
+}
+
 // fastRetries shrinks getRawRetrying's waits to a millisecond for the rest of the test.
 func fastRetries(t *testing.T) {
-	origWait, origJitter := rateLimitDefaultWait, rateLimitJitter
+	origWait, origJitter, origTransport := rateLimitDefaultWait, rateLimitJitter, transportRetryBase
 	rateLimitDefaultWait = time.Millisecond
 	rateLimitJitter = func() time.Duration { return 0 }
-	t.Cleanup(func() { rateLimitDefaultWait, rateLimitJitter = origWait, origJitter })
+	transportRetryBase = time.Millisecond
+	t.Cleanup(func() {
+		rateLimitDefaultWait, rateLimitJitter, transportRetryBase = origWait, origJitter, origTransport
+	})
 }

@@ -147,28 +147,48 @@ var rateLimitJitter = func() time.Duration {
 	return time.Duration(rand.Int64N(int64(rateLimitJitterRange)))
 }
 
-// getRawRetrying is getRawOnce with up to getRawAttempts tries on 429/503, waiting out the
-// server's Retry-After or rateLimitDefaultWait, plus jitter, between them. Only when the last
-// attempt still fails does it open the shared backoff window and return ErrRateLimited, so a
-// burst the retries absorb never blocks the other call sites.
+// transportRetryBase is the first wait after a transport error, doubling per attempt: resty's
+// jitterBackoff from its 100ms RetryWaitTime default, without the jitter. A var so tests can
+// shrink it.
+var transportRetryBase = 100 * time.Millisecond
+
+// getRawRetrying is getRawOnce with up to getRawAttempts tries on 429/503 and on transport
+// errors, which go-proton-api also retried (catchDialError, catchDropError). A 429/503 waits out
+// the server's Retry-After or rateLimitDefaultWait, plus jitter; a transport error waits
+// transportRetryBase, doubling. getRawOnce reads the whole body, so a connection reset halfway
+// through a 4 MiB block is retried too. Only when the last attempt still answers 429/503 does it
+// open the shared backoff window and return ErrRateLimited, so a burst the retries absorb never
+// blocks the other call sites.
 func (c *Client) getRawRetrying(ctx context.Context, url, token string) ([]byte, int, error) {
 	for attempt := 1; ; attempt++ {
 		body, status, retryAfter, err := c.getRawOnce(ctx, url, token)
-		if status != http.StatusTooManyRequests && status != http.StatusServiceUnavailable {
+		if err != nil && ctx.Err() != nil {
+			return nil, status, err
+		}
+
+		apiErr, isAPIErr := asAPIError(err)
+		transportErr := err != nil && !isAPIErr
+		rateLimited := status == http.StatusTooManyRequests || status == http.StatusServiceUnavailable
+		if !transportErr && !rateLimited {
 			return body, status, err
 		}
 
-		apiErr, _ := asAPIError(err)
 		if attempt == getRawAttempts {
+			if transportErr {
+				return nil, status, err
+			}
 			c.noteRateLimitStatus(status, apiErr)
 			return nil, status, fmt.Errorf("%w: %w", ErrRateLimited, *apiErr)
 		}
 
-		wait := rateLimitDefaultWait
-		if retryAfter > 0 {
-			wait = retryAfter
+		wait := transportRetryBase << (attempt - 1)
+		if rateLimited {
+			wait = rateLimitDefaultWait
+			if retryAfter > 0 {
+				wait = retryAfter
+			}
+			wait = min(wait+rateLimitJitter(), maxRateLimitWait)
 		}
-		wait = min(wait+rateLimitJitter(), maxRateLimitWait)
 
 		select {
 		case <-ctx.Done():
