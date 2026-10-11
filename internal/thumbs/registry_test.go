@@ -97,10 +97,19 @@ func TestGenerateTimeoutKillsForkedChildren(t *testing.T) {
 
 	r := &Registry{byMIME: map[string]string{"image/png": "/bin/sh " + script + " %i %o"}}
 
+	// The output temp file goes to TMPDIR; a cancelled run (timeout, or unmount on Ctrl-C) must
+	// not leave it behind.
+	tmpDir := t.TempDir()
+	t.Setenv("TMPDIR", tmpDir)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	if _, err := r.Generate(ctx, ".png", filepath.Join(dir, "in.png"), 256); err == nil {
 		t.Fatal("Generate succeeded; want the timeout to kill the thumbnailer")
+	}
+
+	if left, _ := filepath.Glob(filepath.Join(tmpDir, "proton-thumb-out-*")); len(left) > 0 {
+		t.Fatalf("output temp files left after a cancelled run: %v", left)
 	}
 
 	data, err := os.ReadFile(pidFile)

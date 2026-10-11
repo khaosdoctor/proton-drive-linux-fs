@@ -190,7 +190,7 @@ func Mount(ctx context.Context, mountpoint string, c *drive.Client, root *drive.
 		go st.runThumbWorker(ctx)
 	}
 	if st.externalThumbJobs != nil {
-		go st.runExternalThumbWorker(ctx)
+		st.startExternalThumbWorker(ctx)
 	}
 
 	// A plain Unmount() fails while the mountpoint is busy (e.g. a shell still cd'd into it),

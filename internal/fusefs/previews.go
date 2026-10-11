@@ -170,6 +170,18 @@ func (st *mountState) retryThumbLater(n *drive.Node) {
 	time.AfterFunc(thumbRetryAfter, func() { st.releaseThumb(n) })
 }
 
+// startExternalThumbWorker starts runExternalThumbWorker counted in st.settling, which unmount
+// waits on (flushDelayed) once ctx is done. Without that wait the process could exit before the
+// cancelled job finished: the thumbnailer's process group, which no longer gets the terminal's
+// Ctrl-C, would never be killed, and the temp source and output files would stay behind.
+func (st *mountState) startExternalThumbWorker(ctx context.Context) {
+	st.settling.Add(1)
+	go func() {
+		defer st.settling.Done()
+		st.runExternalThumbWorker(ctx)
+	}()
+}
+
 // runExternalThumbWorker downloads files and runs external thumbnailers on them. One goroutine
 // per mount; these are heavier than Proton thumbnail fetches (full file download + exec).
 func (st *mountState) runExternalThumbWorker(ctx context.Context) {
