@@ -25,7 +25,7 @@ While there are uploads in the queue, the status line counts them, like `Mounted
 
 ## Menu
 
-If you right-click the icon a menu is shown. This menu has a status line (`Mounted at <path>`, `Not mounted`, `Not logged in`, or `No mountpoint configured`), then only the items that apply right now. The menu items are pretty self explanatory.
+If you right-click the icon a menu is shown. This menu has a status line (`Mounted at <path>`, `Not mounted`, `Not logged in`, or `No mountpoint configured`), then only the items that apply right now. The menu items are pretty self explanatory. `Changelog` opens the latest GitHub release in your browser, so you can see what changed.
 
 ## No mountpoint configured
 

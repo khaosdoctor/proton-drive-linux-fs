@@ -38,6 +38,10 @@ const maxRecentItems = 10
 // before falling back to the status.json file or the pause file directly.
 const apiDialTimeout = 500 * time.Millisecond
 
+// changelogURL is what the Changelog item opens. GitHub redirects /releases/latest to the newest
+// release, whose notes goreleaser fills in (`changelog.use: github-native`).
+const changelogURL = "https://github.com/khaosdoctor/proton-drive-linux-fs/releases/latest"
+
 // readStatus prefers the local API, which answers with a live snapshot straight from the running
 // daemon, and falls back to the status.json file (stale after state.StaleAfter) when no daemon is
 // listening on the socket, e.g. an older build without the API.
@@ -424,6 +428,9 @@ func (a *app) onReady() {
 	systray.AddSeparator()
 
 	a.about = systray.AddMenuItem("About proton-drive-fs", "Version, links and third-party licenses")
+	// start reaps xdg-open with cmd.Wait, so repeated clicks leave no zombies in the daemon.
+	changelog := systray.AddMenuItem("Changelog", "Open the latest release notes on GitHub")
+	onClick(changelog, func() { start([]string{"xdg-open", changelogURL}) })
 	if _, err := exec.LookPath("proton-drive-fs-gui"); err == nil {
 		a.openDashboard = systray.AddMenuItem("Open dashboard", "Open the proton-drive-fs-gui dashboard")
 		onClick(a.openDashboard, func() { start([]string{"proton-drive-fs-gui"}) })
