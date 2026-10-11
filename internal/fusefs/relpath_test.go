@@ -47,13 +47,23 @@ func TestDetachedDirIsNotInTree(t *testing.T) {
 
 	a := &dirNode{node: node("a", "a")}
 	root.AddChild("a", root.NewPersistentInode(ctx, a, fs.StableAttr{Mode: fuse.S_IFDIR, Ino: 2}), true)
-	if !root.inTree() || !a.inTree() {
-		t.Fatal("root and a should both be in the tree")
+	b := &dirNode{node: node("b", "b")}
+	a.AddChild("b", a.NewPersistentInode(ctx, b, fs.StableAttr{Mode: fuse.S_IFDIR, Ino: 3}), true)
+	if !root.inTree() || !a.inTree() || !b.inTree() {
+		t.Fatal("root, a and a/b should all be in the tree")
 	}
 
 	// What go-fuse does to the tree once an Rmdir handler returns success.
 	root.RmChild("a")
 	if a.inTree() {
 		t.Fatalf("a.inTree() = true after removal (relPath %q), want false", a.relPath())
+	}
+	// b still points at a, but a is detached, so b is too (its relPath now stops short at "b").
+	if b.inTree() {
+		t.Fatalf("b.inTree() = true under a removed parent (relPath %q), want false", b.relPath())
+	}
+
+	if (&dirNode{}).inTree() {
+		t.Fatal("a dirNode never attached to an inode reports inTree() = true")
 	}
 }

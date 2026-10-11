@@ -1067,10 +1067,16 @@ func (d *dirNode) inTree() bool {
 	if d.StableAttr().Mode == 0 {
 		return false
 	}
-	if _, parent := d.Parent(); parent != nil {
-		return true
+	// Walk all the way up: a removed ancestor detaches the whole subtree, while each child still
+	// points at its (now detached) parent, and relPath then stops short at that ancestor.
+	n := &d.Inode
+	for !n.IsRoot() {
+		_, n = n.Parent()
+		if n == nil {
+			return false
+		}
 	}
-	return d.IsRoot()
+	return true
 }
 
 // listing returns the in-memory listing as it is right now, nil when none was loaded.
