@@ -5,6 +5,10 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+
+	"fyne.io/systray"
+
+	"github.com/khaosdoctor/proton-drive-linux-fs/internal/state"
 )
 
 func TestVisibilityFor(t *testing.T) {
@@ -258,6 +262,48 @@ func TestIconsEmbedded(t *testing.T) {
 		if len(icon(s)) == 0 {
 			t.Errorf("state %v has no icon", s)
 		}
+	}
+}
+
+// TestApplySendsOnlyChanges counts the systray calls apply makes: a repeat of the same snapshot
+// must send nothing, since every call costs D-Bus traffic and a panel menu re-fetch.
+func TestApplySendsOnlyChanges(t *testing.T) {
+	calls := 0
+	origTitle, origShow, origHide, origTip := itemSetTitle, itemShow, itemHide, trayToolTip
+	t.Cleanup(func() { itemSetTitle, itemShow, itemHide, trayToolTip = origTitle, origShow, origHide, origTip })
+	itemSetTitle = func(*systray.MenuItem, string) { calls++ }
+	itemShow = func(*systray.MenuItem) { calls++ }
+	itemHide = func(*systray.MenuItem) { calls++ }
+	trayToolTip = func(string) { calls++ }
+
+	a := &app{opts: Options{Mountpoint: "/m"}, shown: StateOnline}
+	for _, p := range []**systray.MenuItem{&a.status, &a.recentSub, &a.mount, &a.unmount, &a.restart, &a.pause, &a.resume, &a.openFolder, &a.login, &a.logout} {
+		*p = &systray.MenuItem{}
+	}
+	for i := range a.current {
+		a.current[i] = &systray.MenuItem{}
+	}
+	for i := range a.recentItems {
+		a.recentItems[i] = &systray.MenuItem{}
+	}
+
+	sn := snapshot{loggedIn: true, mounted: true, fresh: true, recent: []state.RecentTransfer{{Path: "a.txt", Bytes: 1}}}
+	a.apply(sn)
+	if calls == 0 {
+		t.Fatal("first apply sent nothing")
+	}
+
+	calls = 0
+	a.apply(sn)
+	if calls != 0 {
+		t.Errorf("unchanged snapshot sent %d systray calls, want 0", calls)
+	}
+
+	sn.paused = true
+	a.apply(sn)
+	// Status title, tooltip, Pause hidden, Resume shown.
+	if calls != 4 {
+		t.Errorf("pausing sent %d systray calls, want 4", calls)
 	}
 }
 

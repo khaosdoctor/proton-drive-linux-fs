@@ -261,6 +261,80 @@ type app struct {
 	// was built.
 	recentMu    sync.Mutex
 	recentPaths [maxRecentItems]string
+
+	// sentMu guards sent and tooltip: what each menu item and the icon were last told. apply runs
+	// every tick, and fyne's SetTitle, Show, Hide and SetTooltip each send D-Bus messages (the
+	// menu ones a LayoutUpdated that makes the panel re-fetch the whole menu) even when nothing
+	// changed, so only differences go out. hint writes the status title from a click goroutine,
+	// hence the lock.
+	sentMu  sync.Mutex
+	sent    map[*systray.MenuItem]sentItem
+	tooltip string
+}
+
+// sentItem is the last title and visibility sent for one menu item; titled and placed say whether
+// either was sent at all, so the first apply always goes out.
+type sentItem struct {
+	title          string
+	visible        bool
+	titled, placed bool
+}
+
+// The systray calls behind setTitle, showIf and setTooltip, swapped in tests to count them.
+var (
+	itemSetTitle = (*systray.MenuItem).SetTitle
+	itemShow     = (*systray.MenuItem).Show
+	itemHide     = (*systray.MenuItem).Hide
+	trayToolTip  = systray.SetTooltip
+)
+
+// setTitle sends title to item unless it is what item already shows.
+func (a *app) setTitle(item *systray.MenuItem, title string) {
+	a.sentMu.Lock()
+	defer a.sentMu.Unlock()
+	if a.sent == nil {
+		a.sent = map[*systray.MenuItem]sentItem{}
+	}
+
+	s := a.sent[item]
+	if s.titled && s.title == title {
+		return
+	}
+	itemSetTitle(item, title)
+	s.title, s.titled = title, true
+	a.sent[item] = s
+}
+
+// showIf shows or hides item unless it is already in that state.
+func (a *app) showIf(item *systray.MenuItem, show bool) {
+	a.sentMu.Lock()
+	defer a.sentMu.Unlock()
+	if a.sent == nil {
+		a.sent = map[*systray.MenuItem]sentItem{}
+	}
+
+	s := a.sent[item]
+	if s.placed && s.visible == show {
+		return
+	}
+	s.visible, s.placed = show, true
+	a.sent[item] = s
+	if show {
+		itemShow(item)
+		return
+	}
+	itemHide(item)
+}
+
+// setTooltip sends the icon's tooltip unless it is unchanged.
+func (a *app) setTooltip(text string) {
+	a.sentMu.Lock()
+	defer a.sentMu.Unlock()
+	if text == a.tooltip {
+		return
+	}
+	trayToolTip(text)
+	a.tooltip = text
 }
 
 // Run shows the icon and blocks until Quit is chosen.
@@ -470,19 +544,19 @@ func (a *app) apply(sn snapshot) {
 	}
 
 	if time.Now().UnixNano() >= a.hintUntil.Load() {
-		a.status.SetTitle(sn.statusLine(a.opts.Mountpoint))
+		a.setTitle(a.status, sn.statusLine(a.opts.Mountpoint))
 	}
-	systray.SetTooltip(tooltipFor(sn, a.opts.Mountpoint))
+	a.setTooltip(tooltipFor(sn, a.opts.Mountpoint))
 
 	v := visibilityFor(sn.loggedIn, sn.mounted, a.opts.Mountpoint != "")
-	showIf(a.mount, v.Mount)
-	showIf(a.unmount, v.Unmount)
-	showIf(a.restart, v.Restart)
-	showIf(a.pause, v.Pause && !sn.paused)
-	showIf(a.resume, v.Pause && sn.paused)
-	showIf(a.openFolder, v.OpenFolder)
-	showIf(a.login, v.Login)
-	showIf(a.logout, v.Logout)
+	a.showIf(a.mount, v.Mount)
+	a.showIf(a.unmount, v.Unmount)
+	a.showIf(a.restart, v.Restart)
+	a.showIf(a.pause, v.Pause && !sn.paused)
+	a.showIf(a.resume, v.Pause && sn.paused)
+	a.showIf(a.openFolder, v.OpenFolder)
+	a.showIf(a.login, v.Login)
+	a.showIf(a.logout, v.Logout)
 
 	a.applyCurrent(sn.current)
 	a.applyRecent(sn.recent)
@@ -493,11 +567,11 @@ func (a *app) apply(sn snapshot) {
 func (a *app) applyCurrent(current []state.CurrentTransfer) {
 	for i, item := range a.current {
 		if i >= len(current) {
-			item.Hide()
+			a.showIf(item, false)
 			continue
 		}
-		item.SetTitle(transferLine(current[i]))
-		item.Show()
+		a.setTitle(item, transferLine(current[i]))
+		a.showIf(item, true)
 	}
 }
 
@@ -505,22 +579,22 @@ func (a *app) applyCurrent(current []state.CurrentTransfer) {
 // there is nothing finished yet.
 func (a *app) applyRecent(recent []state.RecentTransfer) {
 	if len(recent) == 0 {
-		a.recentSub.Hide()
+		a.showIf(a.recentSub, false)
 		return
 	}
-	a.recentSub.Show()
+	a.showIf(a.recentSub, true)
 
 	a.recentMu.Lock()
 	defer a.recentMu.Unlock()
 
 	for i, item := range a.recentItems {
 		if i >= len(recent) {
-			item.Hide()
+			a.showIf(item, false)
 			a.recentPaths[i] = ""
 			continue
 		}
-		item.SetTitle(recentLine(recent[i]))
-		item.Show()
+		a.setTitle(item, recentLine(recent[i]))
+		a.showIf(item, true)
 		a.recentPaths[i] = recent[i].Path
 	}
 }
@@ -547,14 +621,6 @@ func visibilityFor(loggedIn, mounted, configured bool) menuVisibility {
 	}
 }
 
-func showIf(item *systray.MenuItem, show bool) {
-	if show {
-		item.Show()
-		return
-	}
-	item.Hide()
-}
-
 // signal asks poll for an immediate refresh.
 func (a *app) signal() {
 	select {
@@ -567,7 +633,7 @@ func (a *app) signal() {
 // launch and the user has to run a command themselves.
 func (a *app) hint(text string) {
 	a.hintUntil.Store(time.Now().Add(10 * time.Second).UnixNano())
-	a.status.SetTitle(text)
+	a.setTitle(a.status, text)
 }
 
 // runSelf runs this binary again with args and waits for it. "mount" detaches on its own,
