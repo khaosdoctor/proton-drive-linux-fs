@@ -489,8 +489,8 @@ func onClick(item *systray.MenuItem, fn func()) {
 }
 
 // poll refreshes the icon and menu every two seconds, or every one while a transfer is active
-// (see refreshInterval), and re-checks the session (which can reach the OS keyring) at most
-// every five.
+// (see refreshInterval), and re-checks the session at most every five. The command layer's
+// LoggedIn (auth.Saved) only reads the session file, never the OS keyring.
 func (a *app) poll() {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()

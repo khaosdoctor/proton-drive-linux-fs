@@ -222,6 +222,27 @@ func Load() (*Session, error) {
 	return &s, nil
 }
 
+// Saved reports whether a session file exists and parses, without reading the key password. It is
+// for the tray's periodic logged-in check: Load reaches the OS keyring, and go-keyring calls Unlock
+// on every Get, so polling it would pop an unlock prompt every few seconds while the keyring is
+// locked, block the poller until it is answered, and leave a D-Bus signal channel behind per prompt.
+// ponytail: a session file whose key password is missing from the keyring still counts as logged
+// in here; mounting with it fails and says to log in again.
+func Saved() bool {
+	path, err := sessionPath()
+	if err != nil {
+		return false
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+
+	var s Session
+	return json.Unmarshal(data, &s) == nil
+}
+
 // Tokens returns the current UID and access token, safe to call concurrently with the
 // AuthHandler that Client installs to store tokens go-proton-api refreshes.
 func (s *Session) Tokens() (uid, access string) {

@@ -439,7 +439,7 @@ func runMount(args []string) int {
 			Version:    version,
 			Commit:     commit,
 			Mounted:    func() bool { return isMounted(mountpoint) },
-			LoggedIn:   func() bool { _, err := auth.Load(); return err == nil },
+			LoggedIn:   auth.Saved,
 			OnQuit:     stop,
 		})
 	}
