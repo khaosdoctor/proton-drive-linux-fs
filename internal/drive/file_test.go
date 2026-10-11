@@ -110,6 +110,48 @@ func TestGetBlockAfterCloseRegistersNoTransfer(t *testing.T) {
 	}
 }
 
+// TestGetBlockRefreshesRejectedStorageToken checks that a block whose storage token the host
+// rejects is retried once with a token from a refetched block list.
+func TestGetBlockRefreshesRejectedStorageToken(t *testing.T) {
+	sk, err := crypto.GenerateSessionKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := []byte("fresh")
+	ciphertext, err := sk.Encrypt(crypto.NewPlainMessage(plain))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f := &File{
+		client:     &Client{},
+		sessionKey: sk,
+		blocks:     map[int]proton.Block{1: {Index: 1, Token: "expired"}},
+		size:       int64(len(plain)),
+		cache:      make(map[int][]byte),
+	}
+
+	origFetch, origBlocks := fetchBlock, revisionBlocks
+	fetchBlock = func(_ context.Context, _ *Client, _, token string) ([]byte, error) {
+		if token != "new" {
+			return nil, &proton.APIError{Status: http.StatusForbidden}
+		}
+		return ciphertext, nil
+	}
+	revisionBlocks = func(context.Context, *Client, string, string) (map[int]proton.Block, error) {
+		return map[int]proton.Block{1: {Index: 1, Token: "new"}}, nil
+	}
+	t.Cleanup(func() { fetchBlock, revisionBlocks = origFetch, origBlocks })
+
+	got, err := f.getBlock(context.Background(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(plain) {
+		t.Fatalf("got %q, want %q", got, plain)
+	}
+}
+
 func TestIsNotFound(t *testing.T) {
 	notFound := errors.Join(errors.New("404 GET /x"), &proton.APIError{Status: http.StatusNotFound, Message: "not found"})
 	if !IsNotFound(notFound) {

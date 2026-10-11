@@ -37,6 +37,7 @@ type File struct {
 	// reported under (see ensureTransfer).
 	path string
 
+	// mu guards the cache and blocks, which refreshBlock replaces when storage tokens expire.
 	mu       sync.Mutex
 	cache    map[int][]byte
 	cacheLRU []int
@@ -90,14 +91,9 @@ func (c *Client) OpenFile(ctx context.Context, n *Node, path string) (*File, err
 
 	revID := n.Link.FileProperties.ActiveRevision.ID
 
-	rev, err := c.api.GetRevisionAllBlocks(ctx, c.shareID, n.Link.LinkID, revID)
+	blocks, err := revisionBlocks(ctx, c, n.Link.LinkID, revID)
 	if err != nil {
 		return nil, err
-	}
-
-	blocks := make(map[int]proton.Block, len(rev.Blocks))
-	for _, b := range rev.Blocks {
-		blocks[b.Index] = b
 	}
 
 	f := &File{
@@ -126,6 +122,65 @@ func (c *Client) OpenFile(ctx context.Context, n *Node, path string) (*File, err
 	}
 
 	return f, nil
+}
+
+// revisionBlocks fetches a revision's block list keyed by block index, each with the storage URL
+// and token to download it; overridden in tests to hand out fresh tokens without a real API.
+var revisionBlocks = func(ctx context.Context, c *Client, linkID, revID string) (map[int]proton.Block, error) {
+	rev, err := c.api.GetRevisionAllBlocks(ctx, c.shareID, linkID, revID)
+	if err != nil {
+		return nil, err
+	}
+
+	blocks := make(map[int]proton.Block, len(rev.Blocks))
+	for _, b := range rev.Blocks {
+		blocks[b.Index] = b
+	}
+	return blocks, nil
+}
+
+// storageTokenRejected reports whether a block GET failed in a way a fresh storage token may fix:
+// 401 (still there after getRaw's own session refresh), 403 or 422 from the storage host.
+// ponytail: these statuses are a guess; Proton does not document what an expired storage token
+// returns. A different status still fails the read, as it did before this retry existed.
+func storageTokenRejected(err error) bool {
+	apiErr, ok := asAPIError(err)
+	if !ok {
+		return false
+	}
+	switch apiErr.Status {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusUnprocessableEntity:
+		return true
+	}
+	return false
+}
+
+// block returns block idx's storage URL and token.
+func (f *File) block(idx int) (proton.Block, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	blk, ok := f.blocks[idx]
+	return blk, ok
+}
+
+// refreshBlock refetches the revision's block list, whose storage tokens OpenFile fetched and
+// which expire while a handle stays open for hours (a long video), and returns block idx's
+// fresh entry.
+func (f *File) refreshBlock(ctx context.Context, idx int) (proton.Block, error) {
+	blocks, err := revisionBlocks(ctx, f.client, f.linkID, f.revID)
+	if err != nil {
+		return proton.Block{}, err
+	}
+
+	f.mu.Lock()
+	f.blocks = blocks
+	f.mu.Unlock()
+
+	blk, ok := blocks[idx]
+	if !ok {
+		return proton.Block{}, errors.New("block not found")
+	}
+	return blk, nil
 }
 
 // ensureTransfer lazily starts this file's tracked download transfer on its first real network
@@ -230,7 +285,8 @@ func (f *File) ReadAt(ctx context.Context, p []byte, off int64) (int, error) {
 
 // correctSizeFromBlocks computes the plaintext file size by downloading and measuring the last
 // block. Used when XAttr resolution failed and the only known size is the encrypted one. The
-// downloaded block is cached, so the caller's first real read of it is a memory hit.
+// downloaded block is cached, so the caller's first real read of it is a memory hit. Only
+// OpenFile calls it, before f is shared, so it reads f.blocks without f.mu.
 func (f *File) correctSizeFromBlocks(ctx context.Context) (int64, error) {
 	if len(f.blocks) == 0 {
 		return 0, nil
@@ -333,7 +389,7 @@ func (f *File) fetchAndCacheBlock(ctx context.Context, idx int, debug bool) ([]b
 		}
 	}
 
-	blk, ok := f.blocks[idx]
+	blk, ok := f.block(idx)
 	if !ok {
 		return nil, errors.New("block not found")
 	}
@@ -348,6 +404,12 @@ func (f *File) fetchAndCacheBlock(ctx context.Context, idx int, debug bool) ([]b
 	dlStart := time.Now()
 	slog.Debug("downloading block", "link", f.linkID, "block", idx, "url", blk.BareURL)
 	ciphertext, err := fetchBlock(ctx, f.client, blk.BareURL, blk.Token)
+	if storageTokenRejected(err) {
+		slog.Debug("storage token rejected, refreshing block list", "link", f.linkID, "block", idx, "err", err)
+		if blk, err = f.refreshBlock(ctx, idx); err == nil {
+			ciphertext, err = fetchBlock(ctx, f.client, blk.BareURL, blk.Token)
+		}
+	}
 	releaseSlot()
 	if err != nil {
 		f.failed.Store(true)
