@@ -439,23 +439,24 @@ func (f *File) fetchAndCacheBlock(ctx context.Context, idx int, debug bool) ([]b
 	return data, nil
 }
 
-// downloadBlock fetches blk's ciphertext while holding one download slot, starting this file's
-// tracked transfer once the slot is granted.
+// downloadBlock fetches blk's ciphertext, holding a download slot only during each attempt (see
+// getRawSlotted), and starts this file's tracked transfer once a slot is granted.
 func (f *File) downloadBlock(ctx context.Context, blk proton.Block) ([]byte, error) {
-	releaseSlot, err := f.client.acquireDownload(ctx)
-	if err != nil {
-		return nil, err
+	slot := func(ctx context.Context) (func(), error) {
+		release, err := f.client.acquireDownload(ctx)
+		if err != nil {
+			return nil, err
+		}
+		f.ensureTransfer()
+		return release, nil
 	}
-	defer releaseSlot()
-
-	f.ensureTransfer()
-	return fetchBlock(ctx, f.client, blk.BareURL, blk.Token)
+	return fetchBlock(ctx, f.client, blk.BareURL, blk.Token, slot)
 }
 
-// fetchBlock downloads one encrypted block; overridden in tests to fake or count downloads
-// without a real Proton API client.
-var fetchBlock = func(ctx context.Context, c *Client, bareURL, token string) ([]byte, error) {
-	return c.getRaw(ctx, bareURL, token)
+// fetchBlock downloads one encrypted block, taking a slot from acquire for each attempt;
+// overridden in tests to fake or count downloads without a real Proton API client.
+var fetchBlock = func(ctx context.Context, c *Client, bareURL, token string, acquire acquireFunc) ([]byte, error) {
+	return c.getRawSlotted(ctx, bareURL, token, acquire)
 }
 
 // cachePut stores a decrypted block, evicting the oldest entry once the cache is full.

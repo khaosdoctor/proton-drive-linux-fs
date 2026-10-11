@@ -261,6 +261,50 @@ func TestGetRawCancelDuringWait(t *testing.T) {
 	}
 }
 
+// TestGetRawSlottedReleasesSlotDuringWait checks that a fetch waiting out a 429 does not hold its
+// download slot: with one slot, a second fetch takes it and completes meanwhile.
+func TestGetRawSlottedReleasesSlotDuringWait(t *testing.T) {
+	origWait, origJitter := rateLimitDefaultWait, rateLimitJitter
+	rateLimitDefaultWait = time.Minute
+	rateLimitJitter = func() time.Duration { return 0 }
+	t.Cleanup(func() { rateLimitDefaultWait, rateLimitJitter = origWait, origJitter })
+
+	busyHit := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/busy" {
+			w.WriteHeader(http.StatusTooManyRequests)
+			busyHit <- struct{}{}
+			return
+		}
+		_, _ = w.Write([]byte("other block"))
+	}))
+	defer server.Close()
+
+	c := &Client{tokenSource: func() (string, string) { return "uid", "access" }}
+	c.SetMaxDownloads(1)
+
+	waitingCtx, cancelWaiting := context.WithCancel(context.Background())
+	waitingDone := make(chan struct{})
+	go func() {
+		defer close(waitingDone)
+		_, _ = c.getRawSlotted(waitingCtx, server.URL+"/busy", "tok", c.acquireDownload)
+	}()
+	<-busyHit
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	body, err := c.getRawSlotted(ctx, server.URL+"/other", "tok", c.acquireDownload)
+	cancelWaiting()
+	<-waitingDone
+
+	if err != nil || string(body) != "other block" {
+		t.Fatalf("body %q err %v, want the second fetch to get the slot while the first waits", body, err)
+	}
+	if len(c.downloads) != 0 {
+		t.Errorf("%d download slots still held after both fetches returned", len(c.downloads))
+	}
+}
+
 // fastRetries shrinks getRawRetrying's waits to a millisecond for the rest of the test.
 func fastRetries(t *testing.T) {
 	origWait, origJitter, origTransport := rateLimitDefaultWait, rateLimitJitter, transportRetryBase
