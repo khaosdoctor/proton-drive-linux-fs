@@ -55,21 +55,32 @@ func OpenBlockCache(dir string, limit int64) (*BlockCache, error) {
 
 	var size int64
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		// Another daemon sharing this cache dir can evict an entry out from under the walk; a
+		// vanished entry is no reason to fail the mount.
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
 			return nil
 		}
-		// A temp file at open is a write a crash cut short (nothing else writes yet), and evict
-		// never touches temp files, so counting it would inflate the size for good.
-		if isTempFile(d.Name()) {
-			_ = os.Remove(path)
+		info, err := d.Info()
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
-		info, err := d.Info()
 		if err != nil {
 			return err
+		}
+		// A temp file is never counted before its rename. One older than staleTempAge is a write
+		// a crash cut short, which evict (it skips temp files) would never remove; a fresh one may
+		// be another daemon's write in progress.
+		if isTempFile(d.Name()) {
+			if time.Since(info.ModTime()) > staleTempAge {
+				_ = os.Remove(path)
+			}
+			return nil
 		}
 		size += info.Size()
 		return nil
@@ -139,6 +150,10 @@ func (c *BlockCache) Get(linkID, revID string, index int) ([]byte, bool) {
 
 	return data, true
 }
+
+// staleTempAge is how old a temp file must be before OpenBlockCache treats it as abandoned; a
+// single block or listing write takes seconds at most.
+const staleTempAge = time.Hour
 
 // isTempFile reports whether name is one of writeTemp's in-progress files (block-*.tmp,
 // listing-*.tmp), which are not counted in the size until their rename.

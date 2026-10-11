@@ -120,6 +120,43 @@ func TestBlockCacheEvictRemovesEmptyDirs(t *testing.T) {
 	}
 }
 
+// TestOpenBlockCacheRemovesOnlyStaleTempFiles checks that opening the cache deletes a temp file a
+// crash left behind long ago, keeps a fresh one (another daemon's write in progress), and counts
+// neither.
+func TestOpenBlockCacheRemovesOnlyStaleTempFiles(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, blocksSubdir, "link1", "rev1")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(dir, "block-old.tmp")
+	fresh := filepath.Join(dir, "block-new.tmp")
+	for _, p := range []string{stale, fresh} {
+		if err := os.WriteFile(p, make([]byte, 100), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-2 * staleTempAge)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	bc, err := OpenBlockCache(root, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("stale temp file still present (err %v)", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("fresh temp file removed: %v", err)
+	}
+	if bc.size != 0 {
+		t.Errorf("size = %d, want 0", bc.size)
+	}
+}
+
 func TestBlockCacheDisabled(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "unused")
 	bc, err := OpenBlockCache(dir, 0)
