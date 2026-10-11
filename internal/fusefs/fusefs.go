@@ -666,8 +666,23 @@ func (st *mountState) register(d *dirNode) {
 // so a remote change made while the directory was forgotten can show stale for that one call.
 func (st *mountState) unregister(d *dirNode) {
 	id := d.linkID()
-	children := d.listing()
 
+	st.mu.Lock()
+	current := st.dirs[id] == d
+	st.mu.Unlock()
+
+	// A coalesced listing write still waiting must not fire after a fresh dirNode for this folder
+	// has persisted its own, newer listing: gens are per dirNode, so nothing would stop the older
+	// view from overwriting it. While d is the registered one no such dirNode exists yet, so its
+	// write goes out now; when a newer one already took over, d's view is the stale one and is
+	// dropped.
+	if !current {
+		d.discardListing()
+		return
+	}
+	d.flushListing()
+
+	children := d.listing()
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	if st.dirs[id] != d {
@@ -1446,6 +1461,18 @@ func (d *dirNode) flushListing() {
 	d.mu.Unlock()
 
 	d.persistListing(node, children, gen)
+}
+
+// discardListing cancels a coalesced listing write still waiting, without writing it.
+func (d *dirNode) discardListing() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.persistTimer == nil {
+		return
+	}
+	d.persistTimer.Stop()
+	d.persistTimer = nil
+	d.st.trackListing(d, false)
 }
 
 // trackListing adds d to, or removes it from, the directories with a listing write waiting.

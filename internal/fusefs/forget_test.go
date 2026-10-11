@@ -44,6 +44,43 @@ func TestForgottenDirsLeaveTheRegistry(t *testing.T) {
 	}
 }
 
+// TestForgetSettlesThePendingListingWrite checks a forgotten dirNode's coalesced listing write goes
+// out at forget time when it is still the registered one, and is dropped when a newer dirNode for
+// the same folder took over, so its timer can never overwrite a newer listing later.
+func TestForgetSettlesThePendingListingWrite(t *testing.T) {
+	var written [][]*drive.Node
+	orig := cacheListing
+	cacheListing = func(c *drive.Client, n *drive.Node, children []*drive.Node) {
+		written = append(written, children)
+	}
+	defer func() { cacheListing = orig }()
+
+	st := &mountState{dirs: make(map[string]*dirNode), parentOf: make(map[string]string)}
+
+	d1 := &dirNode{st: st, node: node("a", "a")}
+	st.register(d1)
+	d1.upsertChild(node("x", "x"))
+	d1.OnForget()
+	if len(written) != 1 || len(written[0]) != 1 {
+		t.Fatalf("written = %v, want d1's listing written once at forget", written)
+	}
+	if d1.persistTimer != nil || len(st.dirtyListings) != 0 {
+		t.Fatal("d1 still has a listing write waiting after its forget")
+	}
+
+	stale := &dirNode{st: st, node: node("b", "b")}
+	st.register(stale)
+	stale.upsertChild(node("y", "y"))
+	st.register(&dirNode{st: st, node: node("b", "b")}) // a fresh lookup took over
+	stale.OnForget()
+	if len(written) != 1 {
+		t.Fatalf("written = %v, want the stale dirNode's older view dropped", written)
+	}
+	if stale.persistTimer != nil || len(st.dirtyListings) != 0 {
+		t.Fatal("the stale dirNode still has a listing write waiting after its forget")
+	}
+}
+
 // TestDroppedDirsForgetTheirChildrenParents checks a forgotten or deleted directory takes its
 // children's parentOf entries with it, except a child since listed under another parent.
 func TestDroppedDirsForgetTheirChildrenParents(t *testing.T) {
