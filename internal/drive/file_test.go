@@ -40,7 +40,7 @@ func TestGetBlockSingleflight(t *testing.T) {
 
 	var calls atomic.Int64
 	orig := fetchBlock
-	fetchBlock = func(_ context.Context, _ *Client, _, _ string) ([]byte, error) {
+	fetchBlock = func(_ context.Context, _ *Client, _, _ string, _ acquireFunc) ([]byte, error) {
 		calls.Add(1)
 		time.Sleep(20 * time.Millisecond) // give the other goroutine a chance to race in
 		return ciphertext, nil
@@ -97,7 +97,7 @@ func TestGetBlockAfterCloseRegistersNoTransfer(t *testing.T) {
 	}
 
 	orig := fetchBlock
-	fetchBlock = func(_ context.Context, _ *Client, _, _ string) ([]byte, error) { return ciphertext, nil }
+	fetchBlock = func(_ context.Context, _ *Client, _, _ string, _ acquireFunc) ([]byte, error) { return ciphertext, nil }
 	t.Cleanup(func() { fetchBlock = orig })
 
 	_ = f.Close()
@@ -135,7 +135,12 @@ func TestGetBlockRefreshesRejectedStorageToken(t *testing.T) {
 	}
 
 	origFetch, origBlocks := fetchBlock, revisionBlocks
-	fetchBlock = func(_ context.Context, _ *Client, _, token string) ([]byte, error) {
+	fetchBlock = func(ctx context.Context, _ *Client, _, token string, acquire acquireFunc) ([]byte, error) {
+		release, err := acquire(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
 		if token != "new" {
 			return nil, &proton.APIError{Status: http.StatusForbidden}
 		}
@@ -158,6 +163,30 @@ func TestGetBlockRefreshesRejectedStorageToken(t *testing.T) {
 	}
 	if string(got) != string(plain) {
 		t.Fatalf("got %q, want %q", got, plain)
+	}
+}
+
+// TestGetBlockQueuedTimeoutIsNotAFailure checks that a read whose ctx ends while it is still
+// queued for a download slot does not mark the file's download as failed.
+func TestGetBlockQueuedTimeoutIsNotAFailure(t *testing.T) {
+	c := &Client{}
+	c.SetMaxDownloads(1)
+	c.downloads <- struct{}{} // another file holds the only slot
+
+	f := &File{
+		client: c,
+		blocks: map[int]proton.Block{1: {Index: 1}},
+		size:   4,
+		cache:  make(map[int][]byte),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := f.getBlock(ctx, 1); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err %v, want context.DeadlineExceeded", err)
+	}
+	if f.failed.Load() {
+		t.Error("a read that never got a download slot marked the download as failed")
 	}
 }
 
@@ -318,7 +347,7 @@ func newTestFile(t *testing.T, plain []byte, reportedSize int64) *File {
 	}
 
 	orig := fetchBlock
-	fetchBlock = func(_ context.Context, _ *Client, _, _ string) ([]byte, error) {
+	fetchBlock = func(_ context.Context, _ *Client, _, _ string, _ acquireFunc) ([]byte, error) {
 		return ciphertext, nil
 	}
 	t.Cleanup(func() { fetchBlock = orig })
@@ -354,7 +383,7 @@ func newTestFileMultiBlock(t *testing.T, block1, block2 []byte, reportedSize int
 	ciphertexts := map[int][]byte{1: ct1, 2: ct2}
 
 	orig := fetchBlock
-	fetchBlock = func(_ context.Context, _ *Client, url, _ string) ([]byte, error) {
+	fetchBlock = func(_ context.Context, _ *Client, url, _ string, _ acquireFunc) ([]byte, error) {
 		switch url {
 		case "http://block1":
 			return ciphertexts[1], nil

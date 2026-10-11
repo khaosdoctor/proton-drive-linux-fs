@@ -115,7 +115,18 @@ func (c *Client) putJSONOnce(ctx context.Context, path string, body any) (int, e
 // body came back with a nil error and was decrypted as ciphertext. The headers are the ones
 // GetBlock sends (exec, plus manager_builder.go's OnBeforeRequest).
 func (c *Client) getRaw(ctx context.Context, url, token string) ([]byte, error) {
-	body, status, err := c.getRawRetrying(ctx, url, token)
+	return c.getRawSlotted(ctx, url, token, nil)
+}
+
+// acquireFunc takes a slot (a download slot, see Client.acquireDownload) and returns the func
+// that gives it back.
+type acquireFunc func(context.Context) (release func(), err error)
+
+// getRawSlotted is getRaw holding a slot from acquire (nil: none) around each attempt only, never
+// across the waits between them, so a 429 storm can't pin every download slot while other files'
+// blocks queue behind it.
+func (c *Client) getRawSlotted(ctx context.Context, url, token string, acquire acquireFunc) ([]byte, error) {
+	body, status, err := c.getRawRetrying(ctx, url, token, acquire)
 	if status != http.StatusUnauthorized {
 		return body, err
 	}
@@ -124,7 +135,7 @@ func (c *Client) getRaw(ctx context.Context, url, token string) ([]byte, error) 
 		return nil, err
 	}
 
-	body, _, err = c.getRawRetrying(ctx, url, token)
+	body, _, err = c.getRawRetrying(ctx, url, token, acquire)
 	return body, err
 }
 
@@ -159,9 +170,18 @@ var transportRetryBase = 100 * time.Millisecond
 // through a 4 MiB block is retried too. Only when the last attempt still answers 429/503 does it
 // open the shared backoff window and return ErrRateLimited, so a burst the retries absorb never
 // blocks the other call sites.
-func (c *Client) getRawRetrying(ctx context.Context, url, token string) ([]byte, int, error) {
+func (c *Client) getRawRetrying(ctx context.Context, url, token string, acquire acquireFunc) ([]byte, int, error) {
 	for attempt := 1; ; attempt++ {
+		release := func() {}
+		if acquire != nil {
+			r, err := acquire(ctx)
+			if err != nil {
+				return nil, 0, err
+			}
+			release = r
+		}
 		body, status, retryAfter, err := c.getRawOnce(ctx, url, token)
+		release()
 		if err != nil && ctx.Err() != nil {
 			return nil, status, err
 		}
@@ -190,11 +210,15 @@ func (c *Client) getRawRetrying(ctx context.Context, url, token string) ([]byte,
 			wait = min(wait+rateLimitJitter(), maxRateLimitWait)
 		}
 
-		// A caller giving up mid-wait (Thumbnail's deadline, an interrupted FUSE read) says nothing
-		// about the server, so it leaves the shared window alone: opening it would fail every
-		// listing for 30s over one impatient caller.
+		// A caller giving up mid-wait (Thumbnail's deadline, an interrupted FUSE read) still leaves
+		// the server's 429/503 standing, and a Retry-After longer than the caller's deadline would
+		// otherwise never reach the shared window, so listings would keep hitting it. A transport
+		// error says nothing about rate limits, so that wait leaves the window alone.
 		select {
 		case <-ctx.Done():
+			if rateLimited {
+				c.noteRateLimitStatus(status, apiErr, retryAfter)
+			}
 			return nil, status, ctx.Err()
 		case <-time.After(wait):
 		}
