@@ -394,27 +394,22 @@ func (f *File) fetchAndCacheBlock(ctx context.Context, idx int, debug bool) ([]b
 		return nil, errors.New("block not found")
 	}
 
-	releaseSlot, err := f.client.acquireDownload(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	transfer := f.ensureTransfer()
-
 	dlStart := time.Now()
 	slog.Debug("downloading block", "link", f.linkID, "block", idx, "url", blk.BareURL)
-	ciphertext, err := fetchBlock(ctx, f.client, blk.BareURL, blk.Token)
+	ciphertext, err := f.downloadBlock(ctx, blk)
 	if storageTokenRejected(err) {
+		// The refetch is an API call, not a block download, so it runs without a download slot:
+		// holding one under SetMaxDownloads would stall every other block behind it.
 		slog.Debug("storage token rejected, refreshing block list", "link", f.linkID, "block", idx, "err", err)
 		if blk, err = f.refreshBlock(ctx, idx); err == nil {
-			ciphertext, err = fetchBlock(ctx, f.client, blk.BareURL, blk.Token)
+			ciphertext, err = f.downloadBlock(ctx, blk)
 		}
 	}
-	releaseSlot()
 	if err != nil {
 		f.failed.Store(true)
 		return nil, err
 	}
+	transfer := f.ensureTransfer()
 
 	decStart := time.Now()
 	plain, err := f.sessionKey.Decrypt(ciphertext)
@@ -439,6 +434,19 @@ func (f *File) fetchAndCacheBlock(ctx context.Context, idx int, debug bool) ([]b
 	f.mu.Unlock()
 
 	return data, nil
+}
+
+// downloadBlock fetches blk's ciphertext while holding one download slot, starting this file's
+// tracked transfer once the slot is granted.
+func (f *File) downloadBlock(ctx context.Context, blk proton.Block) ([]byte, error) {
+	releaseSlot, err := f.client.acquireDownload(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseSlot()
+
+	f.ensureTransfer()
+	return fetchBlock(ctx, f.client, blk.BareURL, blk.Token)
 }
 
 // fetchBlock downloads one encrypted block; overridden in tests to fake or count downloads

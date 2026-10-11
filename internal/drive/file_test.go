@@ -111,7 +111,8 @@ func TestGetBlockAfterCloseRegistersNoTransfer(t *testing.T) {
 }
 
 // TestGetBlockRefreshesRejectedStorageToken checks that a block whose storage token the host
-// rejects is retried once with a token from a refetched block list.
+// rejects is retried once with a token from a refetched block list, and that the refetch runs
+// without holding a download slot.
 func TestGetBlockRefreshesRejectedStorageToken(t *testing.T) {
 	sk, err := crypto.GenerateSessionKey()
 	if err != nil {
@@ -123,8 +124,10 @@ func TestGetBlockRefreshesRejectedStorageToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	c := &Client{}
+	c.SetMaxDownloads(1)
 	f := &File{
-		client:     &Client{},
+		client:     c,
 		sessionKey: sk,
 		blocks:     map[int]proton.Block{1: {Index: 1, Token: "expired"}},
 		size:       int64(len(plain)),
@@ -138,7 +141,13 @@ func TestGetBlockRefreshesRejectedStorageToken(t *testing.T) {
 		}
 		return ciphertext, nil
 	}
-	revisionBlocks = func(context.Context, *Client, string, string) (map[int]proton.Block, error) {
+	revisionBlocks = func(_ context.Context, c *Client, _, _ string) (map[int]proton.Block, error) {
+		select {
+		case c.downloads <- struct{}{}:
+			<-c.downloads
+		default:
+			return nil, errors.New("download slot held during the block list refetch")
+		}
 		return map[int]proton.Block{1: {Index: 1, Token: "new"}}, nil
 	}
 	t.Cleanup(func() { fetchBlock, revisionBlocks = origFetch, origBlocks })
