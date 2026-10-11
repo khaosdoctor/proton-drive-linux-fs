@@ -79,7 +79,7 @@ func TestTextChunkRoundTrip(t *testing.T) {
 		{"Thumb::URI", "file:///mnt/x.jpg"},
 		{"Thumb::MTime", "1700000000"},
 	} {
-		got, ok := pngText(out, tc.key)
+		got, ok := readPNGText(bytes.NewReader(out), tc.key)
 		if !ok {
 			t.Fatalf("%s missing", tc.key)
 		}
@@ -88,7 +88,7 @@ func TestTextChunkRoundTrip(t *testing.T) {
 		}
 	}
 
-	if _, ok := pngText(out, "Thumb::Size"); ok {
+	if _, ok := readPNGText(bytes.NewReader(out), "Thumb::Size"); ok {
 		t.Fatal("Thumb::Size present but never written")
 	}
 }
@@ -126,10 +126,10 @@ func TestWriteProducesBothSizes(t *testing.T) {
 			t.Fatalf("%s width = %d, want %d (landscape source scaled to the long edge)", path, cfg.Width, max)
 		}
 
-		if got, _ := pngText(data, "Thumb::Size"); got != "4096" {
+		if got, _ := readPNGText(bytes.NewReader(data), "Thumb::Size"); got != "4096" {
 			t.Fatalf("%s Thumb::Size = %q, want 4096", path, got)
 		}
-		if got, _ := pngText(data, "Thumb::URI"); got != s.URI("pics/a b.jpg") {
+		if got, _ := readPNGText(bytes.NewReader(data), "Thumb::URI"); got != s.URI("pics/a b.jpg") {
 			t.Fatalf("%s Thumb::URI = %q, want %q", path, got, s.URI("pics/a b.jpg"))
 		}
 	}
@@ -155,6 +155,41 @@ func TestFresh(t *testing.T) {
 	}
 	if s.Fresh("b.jpg", mtime) {
 		t.Fatal("Fresh true for a file with no thumbnail")
+	}
+}
+
+// countingReader counts the bytes read through it; seeks are free.
+type countingReader struct {
+	*bytes.Reader
+	n int
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.Reader.Read(p)
+	c.n += n
+	return n, err
+}
+
+// The freshness check runs for every child of every listing, so it must not read the image data
+// to reach the tEXt chunks that come after it.
+func TestReadPNGTextSkipsImageData(t *testing.T) {
+	// Noise so the IDAT does not compress away: a large real thumbnail is 50-150 KB.
+	img := image.NewRGBA(image.Rect(0, 0, largeSize, largeSize))
+	for i := range img.Pix {
+		img.Pix[i] = byte(i * 7919 >> 3)
+	}
+	data, err := encodePNG(img, [][2]string{{"Thumb::MTime", "1700000000"}})
+	if err != nil {
+		t.Fatalf("encodePNG: %v", err)
+	}
+
+	r := &countingReader{Reader: bytes.NewReader(data)}
+	got, ok := readPNGText(r, "Thumb::MTime")
+	if !ok || got != "1700000000" {
+		t.Fatalf("Thumb::MTime = %q, %v; want 1700000000", got, ok)
+	}
+	if r.n > 1024 {
+		t.Fatalf("read %d of %d bytes to find one tEXt chunk; want chunk headers only", r.n, len(data))
 	}
 }
 
