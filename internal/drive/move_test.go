@@ -130,9 +130,7 @@ func TestPutJSON(t *testing.T) {
 // not-found error, a short 429 burst is retried away, and 429s on every attempt open the backoff
 // window, never a body to decrypt as ciphertext.
 func TestGetRawStatus(t *testing.T) {
-	origBase := rateLimitRetryBase
-	rateLimitRetryBase = time.Millisecond
-	t.Cleanup(func() { rateLimitRetryBase = origBase })
+	fastRetries(t)
 
 	var burstHits, busyHits atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -142,7 +140,7 @@ func TestGetRawStatus(t *testing.T) {
 		case "/missing":
 			http.Error(w, "<html>not here</html>", http.StatusNotFound)
 		case "/burst":
-			if burstHits.Add(1) <= 2 {
+			if burstHits.Add(1) <= getRawAttempts-1 {
 				w.WriteHeader(http.StatusTooManyRequests)
 				return
 			}
@@ -169,7 +167,7 @@ func TestGetRawStatus(t *testing.T) {
 
 	body, err = c.getRaw(ctx, server.URL+"/burst", "tok")
 	if err != nil || string(body) != "after burst" {
-		t.Fatalf("burst: body %q err %v, want the body after two 429s", body, err)
+		t.Fatalf("burst: body %q err %v, want the body after %d 429s", body, err, getRawAttempts-1)
 	}
 	if _, limited := c.RateLimited(); limited {
 		t.Error("burst: backoff window opened for a burst the retries absorbed")
@@ -179,10 +177,18 @@ func TestGetRawStatus(t *testing.T) {
 	if body != nil || !errors.Is(err, ErrRateLimited) {
 		t.Errorf("busy: body %q err %v, want nil body and ErrRateLimited", body, err)
 	}
-	if got := busyHits.Load(); got != rateLimitAttempts {
-		t.Errorf("busy: %d attempts, want %d", got, rateLimitAttempts)
+	if got := busyHits.Load(); got != getRawAttempts {
+		t.Errorf("busy: %d attempts, want %d", got, getRawAttempts)
 	}
 	if _, limited := c.RateLimited(); !limited {
 		t.Error("busy: backoff window not opened")
 	}
+}
+
+// fastRetries shrinks getRawRetrying's waits to a millisecond for the rest of the test.
+func fastRetries(t *testing.T) {
+	origWait, origJitter := rateLimitDefaultWait, rateLimitJitter
+	rateLimitDefaultWait = time.Millisecond
+	rateLimitJitter = func() time.Duration { return 0 }
+	t.Cleanup(func() { rateLimitDefaultWait, rateLimitJitter = origWait, origJitter })
 }

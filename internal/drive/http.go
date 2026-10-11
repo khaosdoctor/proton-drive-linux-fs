@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand/v2"
 	"net/http"
 	"sort"
 	"strconv"
@@ -127,24 +128,30 @@ func (c *Client) getRaw(ctx context.Context, url, token string) ([]byte, error) 
 	return body, err
 }
 
-// rateLimitAttempts is how many times getRawRetrying tries a GET that keeps answering 429/503,
-// the same count go-proton-api's resty client used, so a short burst never reaches the reader.
-const rateLimitAttempts = 3
+// The retry budget below copies what go-proton-api's resty client gave GetBlock, so a burst main
+// absorbed is absorbed here too: SetRetryCount(3) is 4 attempts (manager_builder.go), and
+// catchRetryAfter (response.go) waits the Retry-After seconds, or 10s without one, plus up to 10s
+// of jitter, capped by SetRetryMaxWaitTime(time.Minute).
+const (
+	getRawAttempts       = 4
+	maxRateLimitWait     = time.Minute
+	rateLimitJitterRange = 10 * time.Second
+)
 
-// maxRetryAfterWait caps one wait between those attempts: a reader is blocked on it, so a long
-// Retry-After is left to the shared backoff window instead.
-const maxRetryAfterWait = 10 * time.Second
+// rateLimitDefaultWait is the wait before the jitter when a 429/503 carries no Retry-After; a var,
+// with rateLimitJitter, so tests can shrink them.
+var rateLimitDefaultWait = 10 * time.Second
 
-// rateLimitRetryBase is the first wait between attempts when the server sends no Retry-After,
-// doubling after each; a var so tests can shrink it.
-var rateLimitRetryBase = 500 * time.Millisecond
+// rateLimitJitter returns the random extra wait added to every 429/503 wait.
+var rateLimitJitter = func() time.Duration {
+	return time.Duration(rand.Int64N(int64(rateLimitJitterRange)))
+}
 
-// getRawRetrying is getRawOnce with up to rateLimitAttempts tries on 429/503, waiting out the
-// server's Retry-After (capped) or a doubling backoff between them. Only when the last attempt
-// still fails does it open the shared backoff window and return ErrRateLimited, so a burst the
-// retries absorb never blocks the other call sites.
+// getRawRetrying is getRawOnce with up to getRawAttempts tries on 429/503, waiting out the
+// server's Retry-After or rateLimitDefaultWait, plus jitter, between them. Only when the last
+// attempt still fails does it open the shared backoff window and return ErrRateLimited, so a
+// burst the retries absorb never blocks the other call sites.
 func (c *Client) getRawRetrying(ctx context.Context, url, token string) ([]byte, int, error) {
-	backoff := rateLimitRetryBase
 	for attempt := 1; ; attempt++ {
 		body, status, retryAfter, err := c.getRawOnce(ctx, url, token)
 		if status != http.StatusTooManyRequests && status != http.StatusServiceUnavailable {
@@ -152,16 +159,16 @@ func (c *Client) getRawRetrying(ctx context.Context, url, token string) ([]byte,
 		}
 
 		apiErr, _ := asAPIError(err)
-		if attempt == rateLimitAttempts {
+		if attempt == getRawAttempts {
 			c.noteRateLimitStatus(status, apiErr)
 			return nil, status, fmt.Errorf("%w: %w", ErrRateLimited, *apiErr)
 		}
 
-		wait := backoff
+		wait := rateLimitDefaultWait
 		if retryAfter > 0 {
-			wait = min(retryAfter, maxRetryAfterWait)
+			wait = retryAfter
 		}
-		backoff *= 2
+		wait = min(wait+rateLimitJitter(), maxRateLimitWait)
 
 		select {
 		case <-ctx.Done():
