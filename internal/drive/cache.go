@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -53,11 +54,17 @@ func OpenBlockCache(dir string, limit int64) (*BlockCache, error) {
 	}
 
 	var size int64
-	err := filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
+			return nil
+		}
+		// A temp file at open is a write a crash cut short (nothing else writes yet), and evict
+		// never touches temp files, so counting it would inflate the size for good.
+		if isTempFile(d.Name()) {
+			_ = os.Remove(path)
 			return nil
 		}
 		info, err := d.Info()
@@ -131,6 +138,12 @@ func (c *BlockCache) Get(linkID, revID string, index int) ([]byte, bool) {
 	_ = os.Chtimes(path, now, now)
 
 	return data, true
+}
+
+// isTempFile reports whether name is one of writeTemp's in-progress files (block-*.tmp,
+// listing-*.tmp), which are not counted in the size until their rename.
+func isTempFile(name string) bool {
+	return strings.HasSuffix(name, ".tmp")
 }
 
 func writeTemp(dir, pattern string, data []byte) (string, error) {
@@ -296,6 +309,11 @@ func (c *BlockCache) evict() {
 	var entries []entry
 	_ = filepath.WalkDir(c.dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
+			return nil
+		}
+		// writeTemp runs outside c.mu, so a temp file here may be mid-write, and it isn't in
+		// c.size yet: deleting it would fail that Put and subtract bytes never added.
+		if isTempFile(d.Name()) {
 			return nil
 		}
 		info, err := d.Info()

@@ -69,6 +69,36 @@ func TestBlockCachePutSameBlockCountsOnce(t *testing.T) {
 	}
 }
 
+// TestBlockCacheEvictSkipsTempFiles checks that eviction leaves an in-progress temp file alone
+// (another Put may be writing it) and does not subtract its never-counted size.
+func TestBlockCacheEvictSkipsTempFiles(t *testing.T) {
+	root := t.TempDir()
+	bc, err := OpenBlockCache(root, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bc.Put("link1", "rev1", 1, make([]byte, 10))
+	tmp := filepath.Join(root, blocksSubdir, "link1", "rev1", "block-123.tmp")
+	if err := os.WriteFile(tmp, make([]byte, 100), 0600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(tmp, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	bc.Put("link1", "rev1", 2, make([]byte, 10))
+	bc.Put("link1", "rev1", 3, make([]byte, 10)) // size 30 > 20: evicts one real block
+
+	if _, err := os.Stat(tmp); err != nil {
+		t.Fatalf("temp file evicted: %v", err)
+	}
+	if bc.size != 20 {
+		t.Fatalf("size = %d, want 20", bc.size)
+	}
+}
+
 func TestBlockCacheDisabled(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "unused")
 	bc, err := OpenBlockCache(dir, 0)
