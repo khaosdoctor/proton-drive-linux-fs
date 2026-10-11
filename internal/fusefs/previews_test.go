@@ -1,9 +1,12 @@
 package fusefs
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"image"
+	"image/jpeg"
 	"net"
 	"os/exec"
 	"testing"
@@ -12,6 +15,7 @@ import (
 	proton "github.com/henrybear327/go-proton-api"
 
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/drive"
+	"github.com/khaosdoctor/proton-drive-linux-fs/internal/thumbs"
 )
 
 // A transient failure (outage, timeout) retries after thumbRetryAfter instead of blocking that
@@ -48,6 +52,52 @@ func TestFailedThumbRetriesOnlyTransient(t *testing.T) {
 
 	if st.claimThumb(permanent) {
 		t.Fatal("permanently failed revision claimable again; it should stay marked for the mount")
+	}
+}
+
+// A fetch still in flight when its file is deleted or renamed must not leave a preview behind for
+// the old path: forgetThumbs already ran, so nothing else would remove it.
+func TestWriteThumbDropsPreviewOfRemovedFile(t *testing.T) {
+	store, err := thumbs.New(t.TempDir(), "/mnt/proton")
+	if err != nil {
+		t.Fatalf("thumbs.New: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 8, 8)), nil); err != nil {
+		t.Fatalf("encoding jpeg: %v", err)
+	}
+
+	st := &mountState{thumbs: store, dirs: make(map[string]*dirNode), parentOf: make(map[string]string)}
+	file := node("l1", "a.jpg")
+	dir := &dirNode{node: node("p", "pics"), st: st, children: []*drive.Node{file}}
+	st.dirs["p"] = dir
+	job := thumbJob{node: file, relPath: "pics/a.jpg", parentID: "p"}
+
+	if err := st.writeThumb(job, buf.Bytes()); err != nil {
+		t.Fatalf("writeThumb: %v", err)
+	}
+	if !store.Fresh(job.relPath, file.ModTime()) {
+		t.Fatal("no preview written for a file that is still listed")
+	}
+	store.Remove(job.relPath)
+
+	// removeChild ran (and called forgetThumbs) while the job was in flight.
+	dir.removeChild("a.jpg")
+	if err := st.writeThumb(job, buf.Bytes()); err != nil {
+		t.Fatalf("writeThumb: %v", err)
+	}
+	if store.Fresh(job.relPath, file.ModTime()) {
+		t.Fatal("preview left behind for a file removed while its fetch was in flight")
+	}
+
+	// Renamed in place: same link, new name.
+	dir.upsertChild(node("l1", "b.jpg"))
+	if err := st.writeThumb(job, buf.Bytes()); err != nil {
+		t.Fatalf("writeThumb: %v", err)
+	}
+	if store.Fresh(job.relPath, file.ModTime()) {
+		t.Fatal("preview left behind under the old name of a renamed file")
 	}
 }
 

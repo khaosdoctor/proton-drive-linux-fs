@@ -37,15 +37,15 @@ const thumbFetchTimeout = time.Minute
 
 // thumbJob is one file whose Proton thumbnail should be fetched and cached.
 type thumbJob struct {
-	node    *drive.Node
-	relPath string
+	node     *drive.Node
+	relPath  string
+	parentID string // LinkID of the folder whose listing queued it; see stillListed
 }
 
 // externalThumbJob is a file that needs an external thumbnailer run on a downloaded copy.
 type externalThumbJob struct {
-	node    *drive.Node
-	relPath string
-	ext     string // file extension including dot
+	thumbJob
+	ext string // file extension including dot
 }
 
 // thumbKey identifies a revision, so the same fetch is never queued twice.
@@ -86,7 +86,7 @@ func (st *mountState) fetchThumb(ctx context.Context, job thumbJob) {
 // every try downloads the whole file again.
 func (st *mountState) finishThumb(job thumbJob, img []byte, err error) {
 	if err == nil {
-		err = st.thumbs.Write(job.relPath, job.node.ModTime(), job.node.Size(), img)
+		err = st.writeThumb(job, img)
 	}
 	if err == nil {
 		slog.Debug("thumbnail written", "path", job.relPath, "uri", st.thumbs.URI(job.relPath))
@@ -100,6 +100,43 @@ func (st *mountState) finishThumb(job thumbJob, img []byte, err error) {
 		return
 	}
 	slog.Warn("thumbnail failed", "path", job.relPath, "err", err)
+}
+
+// writeThumb writes img for job, then takes it back out when the file was deleted, renamed or
+// moved while the job sat in the queue or was in flight. removeChild drops the listing entry before
+// it calls forgetThumbs, so either stillListed sees the entry gone, or that forgetThumbs runs after
+// this Write: no interleaving leaves a preview behind for a path the file no longer has.
+func (st *mountState) writeThumb(job thumbJob, img []byte) error {
+	if err := st.thumbs.Write(job.relPath, job.node.ModTime(), job.node.Size(), img); err != nil {
+		return err
+	}
+	if !st.stillListed(job) {
+		st.thumbs.Remove(job.relPath)
+	}
+	return nil
+}
+
+// stillListed reports whether job's file is still in its folder's cached listing under the name
+// it was queued with.
+func (st *mountState) stillListed(job thumbJob) bool {
+	st.mu.Lock()
+	d := st.dirs[job.parentID]
+	st.mu.Unlock()
+	if d == nil {
+		return false
+	}
+
+	d.mu.Lock()
+	children := d.children
+	d.mu.Unlock()
+
+	name := path.Base(job.relPath)
+	for _, ch := range children {
+		if ch.Link.LinkID == job.node.Link.LinkID {
+			return ch.Name == name
+		}
+	}
+	return false
 }
 
 // transientThumbErr reports whether a failed preview may work on a later try: a timeout or
@@ -151,7 +188,7 @@ func (st *mountState) generateExternalThumb(ctx context.Context, job externalThu
 	defer cancel()
 
 	img, err := st.externalThumb(opCtx, job)
-	st.finishThumb(thumbJob{node: job.node, relPath: job.relPath}, img, err)
+	st.finishThumb(job.thumbJob, img, err)
 }
 
 // externalThumb downloads the file to a temp copy and runs its external thumbnailer on it.
@@ -211,12 +248,13 @@ func (st *mountState) queueThumbs(dirPath string, children []*drive.Node) {
 			continue
 		}
 
+		job := thumbJob{node: ch, relPath: relPath, parentID: st.oldParent(ch.Link.LinkID)}
 		if ch.HasThumbnail() {
 			if !st.claimThumb(ch) {
 				continue
 			}
 			select {
-			case st.thumbJobs <- thumbJob{node: ch, relPath: relPath}:
+			case st.thumbJobs <- job:
 			default:
 				st.releaseThumb(ch)
 				slog.Debug("thumbnail queue full, skipping", "path", relPath)
@@ -240,7 +278,7 @@ func (st *mountState) queueThumbs(dirPath string, children []*drive.Node) {
 			continue
 		}
 		select {
-		case st.externalThumbJobs <- externalThumbJob{node: ch, relPath: relPath, ext: ext}:
+		case st.externalThumbJobs <- externalThumbJob{thumbJob: job, ext: ext}:
 		default:
 			st.releaseThumb(ch)
 			slog.Debug("external thumbnail queue full, skipping", "path", relPath)
