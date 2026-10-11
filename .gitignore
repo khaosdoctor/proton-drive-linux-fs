@@ -30,6 +30,7 @@ config.yml
 
 # Agent worktrees
 /.claude/
+/.serena/
 
 # Build output
 /bin/
