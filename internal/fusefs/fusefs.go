@@ -2033,6 +2033,12 @@ func (d *dirNode) renamePending(ctx context.Context, name string, newDir *dirNod
 // left the first one's timer to upload "x" as a new file, and the second then failed to create
 // "x" on every retry. src waits out an upload of it already in flight (see awaitReplaced). A
 // file under name whose link is srcLink is the moved file itself, so it is left alone.
+//
+// A destination still open for write loses what that writer goes on to save: its close drops
+// the buffer. That is POSIX rename(), deliberately: the writer's descriptor refers to the
+// replaced inode, which is unlinked now, and uploading its close over the renamed-in file (what
+// happened before this) overwrote the newer save with the older one. A buffer whose upload
+// already failed for good is kept anyway (discard).
 func (d *dirNode) replace(ctx context.Context, name string, src *fileNode, srcLink string) {
 	dst := d.fileChild(name)
 	if dst == nil || dst == src {
