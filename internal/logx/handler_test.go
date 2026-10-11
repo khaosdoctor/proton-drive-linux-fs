@@ -305,3 +305,21 @@ func TestLevelToPriority(t *testing.T) {
 		}
 	}
 }
+
+// TestSetupStopsPreviousWriter covers the daemon calling Setup twice: the first logger's writer
+// goroutine must be gone once the second Setup returns, not left running until exit.
+func TestSetupStopsPreviousWriter(t *testing.T) {
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	first, stopFirst := Setup(Options{ForceStderr: true})
+	defer stopFirst()
+	_, stopSecond := Setup(Options{ForceStderr: true})
+	defer stopSecond()
+
+	select {
+	case <-first.Handler().(*asyncHandler).core.done:
+	default:
+		t.Fatal("first Setup's writer goroutine still running after a second Setup")
+	}
+}
