@@ -175,6 +175,43 @@ func TestRenameDuringUploadMovesOnlyTheUploadedFile(t *testing.T) {
 	}
 }
 
+func TestRenameDuringUploadWithoutReadBackMovesNothing(t *testing.T) {
+	st := newWriteState()
+	d := newTreeDir(st)
+	ctx := context.Background()
+	_, hp := addPending(t, d, "a")
+
+	// A refetched listing already has another "a" (saved after the rename and uploaded).
+	origFetch := fetchChildren
+	t.Cleanup(func() { fetchChildren = origFetch })
+	fetchChildren = func(context.Context, *drive.Client, *drive.Node) ([]*drive.Node, error) {
+		return []*drive.Node{node("other", "a")}, nil
+	}
+
+	var moved []string
+	fakeDrive(t,
+		func(string) (*drive.Node, error) {
+			if errno := d.Rename(ctx, "a", d, "b", 0); errno != 0 {
+				t.Fatalf("Rename = %v", errno)
+			}
+			d.MvChild("a", d.EmbeddedInode(), "b", true)
+			return nil, nil // uploaded, but the link could not be read back
+		},
+		func(n *drive.Node, newName string) (*drive.Node, error) {
+			moved = append(moved, n.Link.LinkID)
+			return node(n.Link.LinkID, newName), nil
+		},
+		func(*drive.Node) error { return nil },
+	)
+
+	if errno := hp.Release(ctx); errno != 0 {
+		t.Fatalf("Release = %v, want 0", errno)
+	}
+	if len(moved) != 0 {
+		t.Errorf("moved %v by name after a failed read-back, want nothing moved", moved)
+	}
+}
+
 func TestUnmountRetriesReparkedUploadsAndSavesTheRest(t *testing.T) {
 	stateHome := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", stateHome)

@@ -3205,20 +3205,19 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 
 	// A Rename that arrived mid-upload only retargeted this node (FreeCAD writes "x.FCStd.<uuid>"
 	// and renames it over "x.FCStd" while the upload runs), so the drive still has the file under
-	// the old name. Move it to where it is now, by its own link and for this node only: the inode
-	// under the old name may already be another file (renamed away, then saved anew under it),
-	// which going through Rename would retarget onto this file's link.
+	// the old name. Move it to where it is now, by the link the upload returned, and update this
+	// node only: the inode under the old name may already be another file (renamed away, then
+	// saved anew under it), which going through Rename would retarget onto this file's link.
 	if uploadedName != name || uploadedParent != parent {
-		target := uploaded
-		if target == nil {
+		// Without the link, looking the old name up could find that other file, so nothing moves.
+		// ponytail: the upload then stays on the drive under the old name until the user moves it
+		if uploaded == nil {
+			slog.Warn("uploaded file renamed meanwhile, but its link could not be read back; it stays under its old name on the drive", "path", displayPath, "renamed_to", path.Join(uploadedParent.relPath(), uploadedName))
 			parent.expire()
-			found, errno := parent.findChild(ctx, name)
-			if errno != 0 {
-				return errno
-			}
-			target = found
+			uploadedParent.expire()
+			return 0
 		}
-		moved, errno := parent.moveLink(ctx, target, name, uploadedParent, uploadedName)
+		moved, errno := parent.moveLink(ctx, uploaded, name, uploadedParent, uploadedName)
 		if errno != 0 {
 			return errno
 		}
