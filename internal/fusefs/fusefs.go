@@ -677,13 +677,14 @@ func (st *mountState) unregister(d *dirNode) {
 	st.forgetChildrenLocked(id, children)
 }
 
-// dropDir drops the directory registered for linkID, whatever dirNode it is, for a folder that no
-// longer exists remotely, along with its children's parentOf entries (a trashed or deleted
-// folder's children never get an event of their own).
-func (st *mountState) dropDir(linkID string) {
+// forgetChildren drops the parentOf entries of the children of a folder that no longer exists
+// remotely (a deleted folder's children never get an event of their own). The dirNode itself stays
+// registered: the kernel may still hold it, and a later Lookup hands that same inode back through
+// GetChild without registering it again, so removing it here would leave it deaf to events until
+// the kernel forgets it. OnForget unregisters it then.
+func (st *mountState) forgetChildren(linkID string) {
 	st.mu.Lock()
 	d, ok := st.dirs[linkID]
-	delete(st.dirs, linkID)
 	st.mu.Unlock()
 	if !ok {
 		return
@@ -811,7 +812,7 @@ func (st *mountState) handle(ev drive.Event) {
 
 	if ev.Type == proton.LinkEventDelete {
 		st.forgetParent(ev.LinkID)
-		st.dropDir(ev.LinkID)
+		st.forgetChildren(ev.LinkID)
 	}
 }
 

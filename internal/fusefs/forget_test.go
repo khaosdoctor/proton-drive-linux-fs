@@ -9,7 +9,8 @@ import (
 )
 
 // TestForgottenDirsLeaveTheRegistry checks st.dirs shrinks back once the kernel forgets a
-// directory or the folder is deleted remotely, instead of holding every directory ever walked.
+// directory, instead of holding every directory ever walked, and that a remote delete alone keeps
+// the dirNode registered while the kernel may still hold it.
 func TestForgottenDirsLeaveTheRegistry(t *testing.T) {
 	st := &mountState{dirs: make(map[string]*dirNode), parentOf: make(map[string]string)}
 	root := &dirNode{st: st, node: node("root", "root")}
@@ -33,8 +34,13 @@ func TestForgottenDirsLeaveTheRegistry(t *testing.T) {
 	}
 
 	st.handle(drive.Event{Type: proton.LinkEventDelete, LinkID: "b", IsDir: true})
+	if st.dirs["b"] != newer {
+		t.Fatalf("dirs = %v, want b kept after a remote delete until the kernel forgets it", st.dirs)
+	}
+
+	newer.OnForget()
 	if _, ok := st.dirs["b"]; ok || len(st.dirs) != 1 {
-		t.Fatalf("dirs = %v, want b dropped after a remote delete", st.dirs)
+		t.Fatalf("dirs = %v, want b dropped once forgotten", st.dirs)
 	}
 }
 
