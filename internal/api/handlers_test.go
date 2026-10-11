@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -360,6 +361,32 @@ func TestFreshClientPerRequestDoesNotLeakSockets(t *testing.T) {
 	}
 	if after-before > 2 {
 		t.Fatalf("socket fds grew from %d to %d over 200 requests", before, after)
+	}
+}
+
+// TestSilentConnIsClosed covers a client that connects and never sends a request: the server must
+// hang up on it after readHeaderTimeout instead of holding the conn open forever.
+func TestSilentConnIsClosed(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	orig := readHeaderTimeout
+	readHeaderTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { readHeaderTimeout = orig })
+
+	srv, err := Start(Deps{Status: func() state.Status { return state.Status{} }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	conn, err := net.Dial("unix", srv.sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, err := io.Copy(io.Discard, conn); err != nil {
+		t.Fatalf("server kept a silent conn open: %v", err)
 	}
 }
 

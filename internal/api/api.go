@@ -25,6 +25,11 @@ const shutdownGrace = 2 * time.Second
 // idleTimeout is how long the server keeps an idle keep-alive conn before closing it.
 const idleTimeout = 30 * time.Second
 
+// readHeaderTimeout is how long a new conn gets to send its request headers. Without it a client
+// that connects and never sends a request holds a goroutine and an fd in the daemon forever. A var
+// so tests can shorten it.
+var readHeaderTimeout = 5 * time.Second
+
 // SocketName is the unix socket's filename under the runtime directory.
 const SocketName = "api.sock"
 
@@ -98,8 +103,10 @@ func Start(deps Deps) (*Server, error) {
 	mux := http.NewServeMux()
 	registerRoutes(mux, deps, s.done)
 	// IdleTimeout reaps keep-alive conns a client opened and then forgot, so a misbehaving client
-	// cannot pile up fds in the daemon. It does not touch an active SSE stream.
-	s.http = &http.Server{Handler: mux, IdleTimeout: idleTimeout}
+	// cannot pile up fds in the daemon. It does not touch an active SSE stream, and neither does
+	// ReadHeaderTimeout, which only covers the request headers. No WriteTimeout: it would cut the
+	// SSE log stream off.
+	s.http = &http.Server{Handler: mux, IdleTimeout: idleTimeout, ReadHeaderTimeout: readHeaderTimeout}
 
 	go func() {
 		if err := s.http.Serve(l); err != nil && !errors.Is(err, http.ErrServerClosed) {
