@@ -646,8 +646,34 @@ func (st *mountState) uploadCounters(now time.Time) (queued, done, failed int64)
 }
 
 func (st *mountState) register(d *dirNode) {
+	id := d.linkID()
 	st.mu.Lock()
-	st.dirs[d.node.Link.LinkID] = d
+	st.dirs[id] = d
+	st.mu.Unlock()
+}
+
+// unregister drops d from st.dirs once the kernel has forgotten it (see dirNode.OnForget), so the
+// map, and every listing it pins, only covers directories the kernel still knows instead of every
+// directory ever walked. An event for a forgotten directory then has nothing to invalidate, which
+// is fine: the kernel holds no dentries under it, and the next lookup builds a fresh, cold dirNode.
+// A newer dirNode registered for the same LinkID (a lookup that raced this forget) is left alone.
+// ponytail: a cold dirNode serves the disk-persisted listing once before its background refresh,
+// so a remote change made while the directory was forgotten can show stale for that one call.
+func (st *mountState) unregister(d *dirNode) {
+	id := d.linkID()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.dirs[id] != d {
+		return
+	}
+	delete(st.dirs, id)
+}
+
+// dropDir drops the directory registered for linkID, whatever dirNode it is, for a folder that no
+// longer exists remotely.
+func (st *mountState) dropDir(linkID string) {
+	st.mu.Lock()
+	delete(st.dirs, linkID)
 	st.mu.Unlock()
 }
 
@@ -756,6 +782,7 @@ func (st *mountState) handle(ev drive.Event) {
 
 	if ev.Type == proton.LinkEventDelete {
 		st.forgetParent(ev.LinkID)
+		st.dropDir(ev.LinkID)
 	}
 }
 
@@ -932,6 +959,21 @@ func (d *dirNode) setNode(n *drive.Node) {
 	d.mu.Unlock()
 }
 
+// linkID returns the LinkID of the folder this directory stands for. node is read under d.mu since
+// setNode can swap it from another goroutine.
+func (d *dirNode) linkID() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.node.Link.LinkID
+}
+
+// OnForget runs once the kernel has dropped its last reference to this directory and go-fuse has
+// removed it from the tree (go-fuse keeps a directory alive while it has children, so every inode
+// under it is gone by now). Unregistering it here is what bounds st.dirs to live directories.
+func (d *dirNode) OnForget() {
+	d.st.unregister(d)
+}
+
 // expire drops the cached listing so the next Lookup/Readdir refetches it, without touching the
 // kernel. A request handler for this directory must call this, never invalidate: the kernel holds
 // the directory locked for the duration of a Mkdir/Create/Unlink/Rmdir/Rename/Release and waits
@@ -987,6 +1029,7 @@ var _ = (fs.NodeUnlinker)((*dirNode)(nil))
 var _ = (fs.NodeRmdirer)((*dirNode)(nil))
 var _ = (fs.NodeRenamer)((*dirNode)(nil))
 var _ = (fs.NodeCreater)((*dirNode)(nil))
+var _ = (fs.NodeOnForgetter)((*dirNode)(nil))
 
 func (d *dirNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = d.Mode() | 0o755
