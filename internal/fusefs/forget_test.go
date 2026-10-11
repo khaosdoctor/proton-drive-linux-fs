@@ -37,3 +37,28 @@ func TestForgottenDirsLeaveTheRegistry(t *testing.T) {
 		t.Fatalf("dirs = %v, want b dropped after a remote delete", st.dirs)
 	}
 }
+
+// TestDroppedDirsForgetTheirChildrenParents checks a forgotten or deleted directory takes its
+// children's parentOf entries with it, except a child since listed under another parent.
+func TestDroppedDirsForgetTheirChildrenParents(t *testing.T) {
+	st := &mountState{dirs: make(map[string]*dirNode), parentOf: make(map[string]string)}
+	a := &dirNode{st: st, node: node("a", "a"), children: []*drive.Node{node("a1", "x"), node("moved", "y")}}
+	b := &dirNode{st: st, node: node("b", "b"), children: []*drive.Node{node("b1", "z")}}
+	for _, d := range []*dirNode{a, b} {
+		st.register(d)
+	}
+	st.parentOf = map[string]string{"a": "root", "b": "root", "a1": "a", "moved": "elsewhere", "b1": "b"}
+
+	a.OnForget()
+	st.handle(drive.Event{Type: proton.LinkEventDelete, LinkID: "b", IsDir: true})
+
+	want := map[string]string{"a": "root", "moved": "elsewhere"}
+	if len(st.parentOf) != len(want) {
+		t.Fatalf("parentOf = %v, want %v", st.parentOf, want)
+	}
+	for id, p := range want {
+		if st.parentOf[id] != p {
+			t.Fatalf("parentOf = %v, want %v", st.parentOf, want)
+		}
+	}
+}

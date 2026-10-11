@@ -349,8 +349,8 @@ func isMounted(path string) bool {
 	return false
 }
 
-// mountState tracks every registered directory node and each node's last-known parent, so a
-// remote event naming a LinkID can find which cached listings to drop.
+// mountState tracks every directory node the kernel still knows and the last-known parent of each
+// child listed under one, so a remote event naming a LinkID can find which cached listings to drop.
 type mountState struct {
 	client      *drive.Client
 	uid         uint32
@@ -661,20 +661,44 @@ func (st *mountState) register(d *dirNode) {
 // so a remote change made while the directory was forgotten can show stale for that one call.
 func (st *mountState) unregister(d *dirNode) {
 	id := d.linkID()
+	children := d.listing()
+
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	if st.dirs[id] != d {
 		return
 	}
 	delete(st.dirs, id)
+	st.forgetChildrenLocked(id, children)
 }
 
 // dropDir drops the directory registered for linkID, whatever dirNode it is, for a folder that no
-// longer exists remotely.
+// longer exists remotely, along with its children's parentOf entries (a trashed or deleted
+// folder's children never get an event of their own).
 func (st *mountState) dropDir(linkID string) {
 	st.mu.Lock()
+	d, ok := st.dirs[linkID]
 	delete(st.dirs, linkID)
 	st.mu.Unlock()
+	if !ok {
+		return
+	}
+
+	// d.mu is never taken under st.mu, so the listing is read with st.mu released.
+	children := d.listing()
+	st.mu.Lock()
+	st.forgetChildrenLocked(linkID, children)
+	st.mu.Unlock()
+}
+
+// forgetChildrenLocked drops the parentOf entry of every child that still points at parentID; one
+// that moved since and was re-listed under another parent keeps its entry. Caller holds st.mu.
+func (st *mountState) forgetChildrenLocked(parentID string, children []*drive.Node) {
+	for _, ch := range children {
+		if st.parentOf[ch.Link.LinkID] == parentID {
+			delete(st.parentOf, ch.Link.LinkID)
+		}
+	}
 }
 
 func (st *mountState) setParent(childID, parentID string) {
@@ -965,6 +989,13 @@ func (d *dirNode) linkID() string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.node.Link.LinkID
+}
+
+// listing returns the in-memory listing as it is right now, nil when none was loaded.
+func (d *dirNode) listing() []*drive.Node {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.children
 }
 
 // OnForget runs once the kernel has dropped its last reference to this directory and go-fuse has
