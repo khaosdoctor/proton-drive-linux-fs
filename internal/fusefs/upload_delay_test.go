@@ -6,6 +6,11 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/hanwen/go-fuse/v2/fs"
+	"github.com/hanwen/go-fuse/v2/fuse"
+
+	"github.com/khaosdoctor/proton-drive-linux-fs/internal/drive"
 )
 
 func TestDelayForFirstRuleWins(t *testing.T) {
@@ -36,6 +41,59 @@ func newDelayedHandle(t *testing.T, st *mountState, name string) (*fileNode, *fi
 	h := &fileHandle{node: fn, tmp: tmp, dirty: true, owns: true}
 	fn.handle = h
 	return fn, h
+}
+
+// newTreeDir makes d the root of an in-memory go-fuse inode tree (no kernel mount) with an empty,
+// fresh listing, so handlers that find children by name run without a drive.
+func newTreeDir(st *mountState) *dirNode {
+	d := &dirNode{
+		st:       st,
+		node:     &drive.Node{},
+		children: []*drive.Node{},
+		expires:  time.Now().Add(time.Hour),
+	}
+	fs.NewNodeFS(d, nil)
+	return d
+}
+
+// addPending mounts a pending file with a dirty, still open write buffer under name in d.
+func addPending(t *testing.T, d *dirNode, name string) (*fileNode, *fileHandle) {
+	t.Helper()
+	fn, h := newDelayedHandle(t, d.st, name)
+	fn.parent = d
+	d.AddChild(name, d.NewPersistentInode(context.Background(), fn, fs.StableAttr{Mode: fuse.S_IFREG}), true)
+	return fn, h
+}
+
+func TestRenamePendingOverPendingDropsTheReplacedBuffer(t *testing.T) {
+	st := &mountState{uploadDelay: time.Hour}
+	d := newTreeDir(st)
+	ctx := context.Background()
+
+	// Two atomic saves within the upload delay: x.tmp1 -> x, then x.tmp2 -> x.
+	first, h1 := addPending(t, d, "x")
+	second, h2 := addPending(t, d, "x.tmp2")
+	buf1 := h1.tmp.Name()
+	_ = h1.Release(ctx)
+	_ = h2.Release(ctx)
+	defer h2.unpark(false)
+
+	if errno := d.Rename(ctx, "x.tmp2", d, "x", 0); errno != 0 {
+		t.Fatalf("Rename = %v, want 0", errno)
+	}
+
+	if first.parkedHandle() != nil || first.handle != nil {
+		t.Error("replaced file still holds a buffer that would upload")
+	}
+	if _, err := os.Stat(buf1); !os.IsNotExist(err) {
+		t.Errorf("replaced buffer still on disk: %v", err)
+	}
+	if len(st.delayed) != 1 || second.parkedHandle() != h2 || second.currentName() != "x" {
+		t.Error("renamed file is not the only one waiting to upload, under its new name")
+	}
+	if second.replaces != first {
+		t.Error("renamed file does not wait for an upload of the file it replaced")
+	}
 }
 
 func TestReleaseDelaysUploadAndReopenTakesItBack(t *testing.T) {

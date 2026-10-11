@@ -81,7 +81,7 @@ When you open a file for writing, everything goes to a local temp file and nothi
 
 The delay is there because a lot of apps save in several steps. FreeCAD, for example, writes `model.FCStd.<uuid>`, renames `model.FCStd` to a timestamped `.FCBak`, then renames the temp file to `model.FCStd`. While a file is waiting:
 
-- **Rename**: the file moves to the new name and the wait starts over with that name's delay.
+- **Rename**: the file moves to the new name and the wait starts over with that name's delay. If another file was waiting under that name, the rename replaces it and only the renamed file gets uploaded.
 - **Open for writing**: the app gets the same buffer back and the wait stops. Closing it again starts the wait again.
 - **Delete**: we drop the buffer and nothing is uploaded.
 - **Listing, stat, read**: you see the file and its content normally, even though Proton doesn't have it yet.

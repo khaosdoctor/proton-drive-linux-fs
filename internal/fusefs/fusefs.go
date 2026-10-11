@@ -1615,6 +1615,10 @@ func (d *dirNode) Rename(ctx context.Context, name string, newParent fs.InodeEmb
 		return syscall.EIO
 	}
 
+	// A pending file under newName, or a parked edit of the file just trashed there, would
+	// otherwise still upload over the file moved in.
+	newDir.replace(ctx, newName, d.fileChild(name), target.Link.LinkID)
+
 	if child := d.GetChild(name); child != nil {
 		refreshNode(child, moved)
 		if fn, ok := child.Operations().(*fileNode); ok {
@@ -1658,6 +1662,7 @@ func (d *dirNode) renamePending(ctx context.Context, name string, newDir *dirNod
 
 	slog.Info("renaming pending file", "from", path.Join(d.path, name), "to", path.Join(newDir.path, newName))
 
+	newDir.replace(ctx, newName, fn, "")
 	existing, _ := newDir.findChild(ctx, newName)
 
 	fn.mu.Lock()
@@ -1675,6 +1680,43 @@ func (d *dirNode) renamePending(ctx context.Context, name string, newDir *dirNod
 	}
 
 	return 0
+}
+
+// replace takes the file mounted under name out of the way of a rename putting src over it
+// (srcLink is src's LinkID when it is on the drive). The rename replaces that file, so its write
+// buffer is marked gone and, when parked, dropped right away. Without this a pending file renamed
+// over another pending one (two atomic saves within the upload delay: x.tmp1 -> x, x.tmp2 -> x)
+// left the first one's timer to upload "x" as a new file, and the second then failed to create
+// "x" on every retry. src waits out an upload of it already in flight (see awaitReplaced).
+// Release's own move of a file renamed mid-upload finds that very file under name; srcLink
+// matches it there, so it is left alone.
+func (d *dirNode) replace(ctx context.Context, name string, src *fileNode, srcLink string) {
+	dst := d.fileChild(name)
+	if dst == nil || dst == src {
+		return
+	}
+
+	dst.mu.Lock()
+	if srcLink != "" && dst.node != nil && dst.node.Link.LinkID == srcLink {
+		dst.mu.Unlock()
+		return
+	}
+	h := dst.handle
+	dst.mu.Unlock()
+
+	if src != nil {
+		src.mu.Lock()
+		src.replaces = dst
+		src.mu.Unlock()
+	}
+
+	if h == nil {
+		return
+	}
+	h.gone.Store(true)
+	if h.unpark(false) {
+		_ = h.Release(ctx)
+	}
 }
 
 func (d *dirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
@@ -1778,6 +1820,15 @@ type fileNode struct {
 	parent *dirNode    // current parent, kept in sync by Rename
 	name   string      // current name, kept in sync by Rename
 	handle *fileHandle // most recently opened write handle with a temp buffer, if any
+
+	// replaces is the file this one was renamed over (see dirNode.replace). Release waits out an
+	// upload of it, or of the files it replaced in turn, before uploading this one, so the two
+	// never race for the same name.
+	replaces *fileNode
+
+	// uploadMu is held by Release from its last gone check until the upload's result is claimed
+	// (see claim), so a file renamed over this one can wait for an upload already in flight.
+	uploadMu sync.Mutex
 }
 
 var _ = (fs.NodeGetattrer)((*fileNode)(nil))
@@ -2072,6 +2123,12 @@ type fileHandle struct {
 	parked bool        // released but not uploaded: tmp kept until timer, a rename, a reopen or Unlink moves it on
 	timer  *time.Timer // set while parked for an upload delay; nil while parked under an excluded name
 	due    bool        // the upload delay ran out, so the next Release uploads instead of parking again
+
+	// gone is set when a rename puts another file over this buffer's file before the buffer
+	// reached the drive: Release drops it instead of uploading it, and trashes a new file an
+	// upload already in flight created. It lives on the handle, not the node, because go-fuse can
+	// hand the same inode out again for a later file under that name.
+	gone atomic.Bool
 }
 
 var _ = (fs.FileReader)((*fileHandle)(nil))
@@ -2095,6 +2152,42 @@ func (f *fileNode) parkedHandle() *fileHandle {
 		return nil
 	}
 	return h
+}
+
+// awaitReplaced waits out an upload still in flight of the files this one was renamed over, so
+// this one's upload never races theirs for the same name: a new file one of them created would
+// make this one's create fail, and a revision it committed after this one's would win. Their
+// buffers are all marked gone, so none of them starts an upload once this returns.
+func (f *fileNode) awaitReplaced() {
+	f.mu.Lock()
+	r := f.replaces
+	f.mu.Unlock()
+
+	for r != nil {
+		r.uploadMu.Lock() // held for the length of r's upload, if one is running
+		r.mu.Lock()
+		next := r.replaces
+		r.mu.Unlock()
+		r.uploadMu.Unlock()
+		r = next
+	}
+}
+
+// claim points the node at the link h's upload created, unless a rename over the file marked h
+// gone while the upload ran; false means the caller trashes what it created instead. A claimed
+// upload ends the wait chain, since every file it replaced has settled by now.
+func (f *fileNode) claim(h *fileHandle, n *drive.Node) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if h.gone.Load() {
+		return false
+	}
+	if n != nil {
+		f.node = n
+	}
+	f.replaces = nil
+	return true
 }
 
 // park keeps tmp after Release; with delay > 0 it uploads once delay passes without a rename,
@@ -2126,6 +2219,11 @@ const uploadRetryDelay = 30 * time.Second
 // ponytail: retries every uploadRetryDelay with no cap; a permanent failure (quota, a trashed
 // parent) keeps retrying until unmount
 func (h *fileHandle) keepForRetry(tmp *os.File, name string) {
+	// Replaced while it tried: there is no save left to keep.
+	if h.gone.Load() {
+		h.drop(tmp)
+		return
+	}
 	slog.Warn("keeping the buffer to retry the upload", "path", name, "buffer", tmp.Name(), "retry_in", uploadRetryDelay)
 	h.park(tmp, uploadRetryDelay)
 }
@@ -2362,6 +2460,12 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 	parent := fn.parent
 	fn.mu.Unlock()
 
+	// Renamed over before it reached the drive (see dirNode.replace): nothing to upload.
+	if h.gone.Load() {
+		h.drop(tmp)
+		return 0
+	}
+
 	// An excluded name (Orca saves "x.3mf.tmp", then renames it) is never uploaded. The buffer
 	// stays parked on the node so renamePending uploads it under the real name, or Unlink drops it.
 	// ponytail: a parked buffer never renamed or unlinked stays in $TMPDIR until the daemon exits
@@ -2398,6 +2502,17 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 		slog.Error("seek temp file failed", "path", name, "err", err)
 		h.keepForRetry(tmp, name)
 		return syscall.EIO
+	}
+
+	// Wait out the upload of a file this one replaced, then check again under uploadMu: a rename
+	// over this file from here on either finds this upload running and waits for it, or finds the
+	// buffer gone before it starts.
+	fn.awaitReplaced()
+	fn.uploadMu.Lock()
+	defer fn.uploadMu.Unlock()
+	if h.gone.Load() {
+		h.drop(tmp)
+		return 0
 	}
 
 	st := parent.st
@@ -2445,6 +2560,26 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 	st.uploadsDone.Add(1)
 	st.recordFinished(recentTransfer{Path: displayPath, Action: "upload", Status: "done", Bytes: info.Size(), Finished: time.Now()})
 	slog.Info("uploaded file", "path", name, "size", logx.FormatSize(info.Size()), logx.Elapsed(uploadStart))
+
+	// Renamed over while the upload ran: a new file it created is in the way of the file that
+	// replaced it, so it goes to the trash. A revision is left alone; the file it revised was
+	// trashed by the rename, or now belongs to the replacing file, which uploads after it.
+	if !fn.claim(h, uploaded) {
+		if existing != nil {
+			return 0
+		}
+		if uploaded == nil {
+			parent.expire()
+			return 0
+		}
+		slog.Info("deleting replaced upload", "path", displayPath)
+		trashCtx, cancel := context.WithTimeout(ctx, st.metaTimeout)
+		defer cancel()
+		if err := fn.client.Trash(trashCtx, parent.node, uploaded); err != nil {
+			slog.Error("deleting replaced upload failed", "path", displayPath, "err", err)
+		}
+		return 0
+	}
 
 	// Re-read parent/name: a concurrent Rename during the upload may have moved this file, and
 	// the entry has to be patched in where it is now, not where it was.
