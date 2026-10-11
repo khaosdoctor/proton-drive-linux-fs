@@ -410,6 +410,27 @@ func TestKeepForRetryBacksOffAndStopsOnPermanentErrors(t *testing.T) {
 	}
 }
 
+func TestPermanentUploadErrorOnlyForNamedCodes(t *testing.T) {
+	cases := map[string]struct {
+		err  error
+		want bool
+	}{
+		"name taken":       {&proton.APIError{Status: http.StatusUnprocessableEntity, Code: proton.AFileOrFolderNameExist}, true},
+		"wrapped value":    {fmt.Errorf("upload: %w", proton.APIError{Status: http.StatusUnprocessableEntity, Code: proton.AFileOrFolderNameExist}), true},
+		"paid plan":        {&proton.APIError{Status: http.StatusUnprocessableEntity, Code: proton.PaidPlanRequired}, true},
+		"stale draft":      {&proton.APIError{Status: http.StatusConflict, Code: proton.ADraftExist}, false},
+		"other conflict":   {&proton.APIError{Status: http.StatusConflict, Code: 2000}, false},
+		"other validation": {&proton.APIError{Status: http.StatusUnprocessableEntity, Code: proton.InvalidValue}, false},
+		"not found":        {&proton.APIError{Status: http.StatusNotFound}, false},
+		"network":          {errors.New("connection reset"), false},
+	}
+	for name, c := range cases {
+		if got := permanentUploadError(c.err); got != c.want {
+			t.Errorf("%s: permanentUploadError = %v, want %v", name, got, c.want)
+		}
+	}
+}
+
 func TestSettleUnderExcludedNameParksAgain(t *testing.T) {
 	st := &mountState{uploadDelay: time.Hour, excludes: parseExcludes([]string{"*.tmp"})}
 	fn, h := newDelayedHandle(t, st, "model.FCStd")

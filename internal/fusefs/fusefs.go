@@ -2633,18 +2633,18 @@ func (h *fileHandle) keepForRetry(tmp *os.File, name string, err error) {
 	h.park(tmp, delay)
 }
 
-// permanentUploadError reports whether retrying an upload that failed with err cannot help:
-// Proton refused the request itself (the name is taken, the parent folder is gone, the account is
-// out of space), as opposed to a timeout, a rate limit, a server error or an expired session.
+// permanentUploadError reports whether retrying an upload that failed with err cannot help. Only
+// Proton codes go-proton-api itself names count: the name is taken by another file (2500 with a
+// 422; the same code with a 409 is a stale draft, which clears), or the account needs a paid plan
+// (10004). Anything else, other 4xx conflicts included, is retried with backoff, since a wrong
+// "permanent" strands a save while a wrong "transient" only costs a retry every half hour.
 func permanentUploadError(err error) bool {
-	if err == nil || drive.IsUnrecoverableAuth(err) {
-		return false
-	}
-
 	// go-proton-api wraps a pointer, drive's hand-rolled requests a value (see drive.asAPIError).
 	var apiErr proton.APIError
 	var p *proton.APIError
 	switch {
+	case err == nil:
+		return false
 	case errors.As(err, &p):
 		apiErr = *p
 	case errors.As(err, &apiErr):
@@ -2652,11 +2652,13 @@ func permanentUploadError(err error) bool {
 		return false
 	}
 
-	switch apiErr.Status {
-	case http.StatusUnauthorized, http.StatusRequestTimeout, http.StatusTooManyRequests:
-		return false
+	switch {
+	case apiErr.Code == proton.AFileOrFolderNameExist && apiErr.Status == http.StatusUnprocessableEntity:
+		return true
+	case apiErr.Code == proton.PaidPlanRequired:
+		return true
 	}
-	return apiErr.Status >= 400 && apiErr.Status < 500
+	return false
 }
 
 // discard lets go of a buffer a rename over its file, or an unlink, made obsolete. One whose

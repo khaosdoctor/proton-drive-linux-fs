@@ -57,7 +57,7 @@ func TestUnmountLetsGoOfKeptBuffers(t *testing.T) {
 	}
 	_, failed := newDelayedHandle(t, st, "c.3mf")
 	failedBuf := failed.tmp.Name()
-	failed.keepForRetry(failed.sharedTmp(), "c.3mf", proton.APIError{Status: http.StatusNotFound})
+	failed.keepForRetry(failed.sharedTmp(), "c.3mf", proton.APIError{Status: http.StatusUnprocessableEntity, Code: proton.AFileOrFolderNameExist})
 
 	st.flushDelayed()
 	if exists(unmountedBuf) {
