@@ -18,6 +18,12 @@ import (
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/logx"
 )
 
+// httpClient carries every request this package sends around go-proton-api: putJSON's PUTs and
+// getRaw's GETs. Its Timeout covers the whole exchange, body included, so a stalled connection
+// can't hang a caller whose ctx has no deadline (the thumbnail worker's has none); two minutes
+// leaves a 4 MiB block room on a slow link.
+var httpClient = &http.Client{Timeout: 2 * time.Minute}
+
 // putJSON sends body as a JSON PUT to path (relative to auth.APIURL), authenticated with the
 // client's token source, and retries once after forcing a token refresh on a 401.
 //
@@ -65,7 +71,7 @@ func (c *Client) putJSONOnce(ctx context.Context, path string, body any) (int, e
 	req.Header.Set("Content-Type", "application/json")
 
 	slog.Debug("api request", "method", "PUT", "path", path)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return 0, err
 	}
@@ -86,6 +92,82 @@ func (c *Client) putJSONOnce(ctx context.Context, path string, body any) (int, e
 	// key's string length (never its value; names/passphrases are encrypted but still sensitive)
 	// so the next failure names the empty one straight from the journal.
 	return resp.StatusCode, fmt.Errorf("%w (payload keys: %s)", apiErr, payloadFieldLengths(payload))
+}
+
+// getRaw reads a GET to completion: a storage URL (absolute, with its pm-storage-token), or an API
+// path (leading "/", relative to apiURL, token empty) for thumbnailURL's JSON. Like putJSON, it
+// retries once after forcing a token refresh on a 401.
+//
+// It replaces go-proton-api's GetBlock, whose SetDoNotParseResponse(true) breaks three ways:
+// resty's retry loop on 429/503 overwrites each response without closing its body, Client.doRes
+// re-runs the request after a 401 refresh without closing the first one, and resty skips the
+// afterResponse middleware that turns a non-2xx status into an APIError, so a final 429 or 404
+// body came back with a nil error and was decrypted as ciphertext. The headers are the ones
+// GetBlock sends (exec, plus manager_builder.go's OnBeforeRequest).
+//
+// ponytail: no in-call retry on 429/503; it opens the shared backoff window and fails this read,
+// and the reader's next attempt retries.
+func (c *Client) getRaw(ctx context.Context, url, token string) ([]byte, error) {
+	body, status, err := c.getRawOnce(ctx, url, token)
+	if status != http.StatusUnauthorized {
+		return body, err
+	}
+
+	if _, refreshErr := c.api.GetUser(ctx); refreshErr != nil {
+		return nil, err
+	}
+
+	body, _, err = c.getRawOnce(ctx, url, token)
+	return body, err
+}
+
+// getRawOnce issues a single GET attempt, returning the HTTP status code (0 on a transport error)
+// so getRaw can tell a 401 apart. A non-2xx status comes back as a *proton.APIError, so IsNotFound
+// and the rest of the package's error checks see it the same way as a go-proton-api error.
+func (c *Client) getRawOnce(ctx context.Context, url, token string) ([]byte, int, error) {
+	if strings.HasPrefix(url, "/") {
+		url = c.apiURL + url
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	uid, access := c.tokenSource()
+	req.Header.Set("x-pm-uid", uid)
+	req.Header.Set("Authorization", "Bearer "+access)
+	req.Header.Set("x-pm-appversion", auth.AppVersion)
+	if token != "" {
+		req.Header.Set("pm-storage-token", token)
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		body, err := io.ReadAll(resp.Body)
+		return body, resp.StatusCode, err
+	}
+
+	// Storage hosts don't always answer with Proton's JSON error shape, so a body that doesn't
+	// decode still leaves the status and its standard text.
+	apiErr := &proton.APIError{}
+	_ = json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(apiErr)
+	apiErr.Status = resp.StatusCode
+	if apiErr.Message == "" {
+		apiErr.Message = http.StatusText(resp.StatusCode)
+	}
+
+	c.noteRateLimitStatus(resp.StatusCode, apiErr)
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+		return nil, resp.StatusCode, fmt.Errorf("%w: %w", ErrRateLimited, *apiErr)
+	}
+
+	return nil, resp.StatusCode, apiErr
 }
 
 // payloadFieldLengths summarizes a marshaled JSON object's top-level fields as "Key=len Key2=len2

@@ -375,7 +375,7 @@ func (f *File) fetchAndCacheBlock(ctx context.Context, idx int, debug bool) ([]b
 // fetchBlock downloads one encrypted block; overridden in tests to fake or count downloads
 // without a real Proton API client.
 var fetchBlock = func(ctx context.Context, c *Client, bareURL, token string) ([]byte, error) {
-	return c.getBlockBytes(ctx, bareURL, token)
+	return c.getRaw(ctx, bareURL, token)
 }
 
 // cachePut stores a decrypted block, evicting the oldest entry once the cache is full.
@@ -438,7 +438,7 @@ func (c *Client) Thumbnail(ctx context.Context, n *Node) ([]byte, error) {
 		return nil, err
 	}
 
-	ciphertext, err := c.getBlockBytes(ctx, bareURL, token)
+	ciphertext, err := c.getRaw(ctx, bareURL, token)
 	if err != nil {
 		return nil, err
 	}
@@ -463,14 +463,12 @@ func (c *Client) Thumbnail(ctx context.Context, n *Node) ([]byte, error) {
 // with DriveFileRevisionThumbnailResult{ThumbnailLink, ThumbnailBareURL, ThumbnailToken}
 // (packages/shared/lib/interfaces/drive/file.ts).
 //
-// go-proton-api exposes no way to build an arbitrary request, but GetBlock issues an
-// authenticated GET (with the automatic token refresh in Client.doRes) against any path and
-// hands back the raw body, so the JSON is decoded here. The empty storage token it sends along
-// is an unused header on an API path.
+// go-proton-api has no method for this endpoint, so getRaw issues the authenticated GET (with the
+// same refresh-on-401 putJSON does) and the JSON is decoded here.
 func (c *Client) thumbnailURL(ctx context.Context, linkID, revID string) (bareURL, token string, err error) {
 	path := fmt.Sprintf("/drive/shares/%s/files/%s/revisions/%s/thumbnail?Type=%d", c.shareID, linkID, revID, thumbnailPreview)
 
-	body, err := c.getBlockBytes(ctx, path, "")
+	body, err := c.getRaw(ctx, path, "")
 	if err != nil {
 		return "", "", err
 	}
@@ -487,17 +485,6 @@ func (c *Client) thumbnailURL(ctx context.Context, linkID, revID string) (bareUR
 	}
 
 	return res.ThumbnailBareURL, res.ThumbnailToken, nil
-}
-
-// getBlockBytes reads a storage GET to completion.
-func (c *Client) getBlockBytes(ctx context.Context, bareURL, token string) ([]byte, error) {
-	rc, err := c.api.GetBlock(ctx, bareURL, token)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rc.Close() }()
-
-	return io.ReadAll(rc)
 }
 
 // blockIndexForOffset returns the 1-based Proton block index covering byte offset off.

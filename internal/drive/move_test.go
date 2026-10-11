@@ -3,6 +3,7 @@ package drive
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -120,5 +121,42 @@ func TestPutJSON(t *testing.T) {
 	}
 	if got := gotHeaders.Get("Content-Type"); got != "application/json" {
 		t.Errorf("Content-Type = %q, want application/json", got)
+	}
+}
+
+// TestGetRawStatus checks that a storage GET hands back the body only on a 2xx: a 404 is a
+// not-found error and a 429 opens the backoff window, never a body to decrypt as ciphertext.
+func TestGetRawStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ok":
+			_, _ = w.Write([]byte(r.Header.Get("pm-storage-token")))
+		case "/missing":
+			http.Error(w, "<html>not here</html>", http.StatusNotFound)
+		case "/busy":
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"Code":2028,"Error":"Too many recent API requests"}`))
+		}
+	}))
+	defer server.Close()
+
+	c := &Client{tokenSource: func() (string, string) { return "uid", "access" }}
+	ctx := context.Background()
+
+	body, err := c.getRaw(ctx, server.URL+"/ok", "tok")
+	if err != nil || string(body) != "tok" {
+		t.Fatalf("ok: body %q err %v, want the storage token echoed back", body, err)
+	}
+
+	if body, err := c.getRaw(ctx, server.URL+"/missing", "tok"); body != nil || !IsNotFound(err) {
+		t.Errorf("missing: body %q err %v, want nil body and a not-found error", body, err)
+	}
+
+	body, err = c.getRaw(ctx, server.URL+"/busy", "tok")
+	if body != nil || !errors.Is(err, ErrRateLimited) {
+		t.Errorf("busy: body %q err %v, want nil body and ErrRateLimited", body, err)
+	}
+	if _, limited := c.RateLimited(); !limited {
+		t.Error("busy: backoff window not opened")
 	}
 }
