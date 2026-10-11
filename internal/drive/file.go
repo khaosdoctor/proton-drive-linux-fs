@@ -37,6 +37,7 @@ type File struct {
 	// reported under (see ensureTransfer).
 	path string
 
+	// mu guards the cache and blocks, which refreshBlock replaces when storage tokens expire.
 	mu       sync.Mutex
 	cache    map[int][]byte
 	cacheLRU []int
@@ -48,9 +49,11 @@ type File struct {
 	inflight sync.Map
 
 	// transferMu guards transfer, lazily created on this file's first real network fetch so a
-	// file served entirely from cache never shows up as "downloading".
+	// file served entirely from cache never shows up as "downloading", and closed, set by Close
+	// so a fetch still running after it never registers a transfer nobody would end.
 	transferMu sync.Mutex
 	transfer   *Transfer
+	closed     bool
 	failed     atomic.Bool
 }
 
@@ -88,14 +91,9 @@ func (c *Client) OpenFile(ctx context.Context, n *Node, path string) (*File, err
 
 	revID := n.Link.FileProperties.ActiveRevision.ID
 
-	rev, err := c.api.GetRevisionAllBlocks(ctx, c.shareID, n.Link.LinkID, revID)
+	blocks, err := revisionBlocks(ctx, c, n.Link.LinkID, revID)
 	if err != nil {
 		return nil, err
-	}
-
-	blocks := make(map[int]proton.Block, len(rev.Blocks))
-	for _, b := range rev.Blocks {
-		blocks[b.Index] = b
 	}
 
 	f := &File{
@@ -126,11 +124,74 @@ func (c *Client) OpenFile(ctx context.Context, n *Node, path string) (*File, err
 	return f, nil
 }
 
+// revisionBlocks fetches a revision's block list keyed by block index, each with the storage URL
+// and token to download it; overridden in tests to hand out fresh tokens without a real API.
+var revisionBlocks = func(ctx context.Context, c *Client, linkID, revID string) (map[int]proton.Block, error) {
+	rev, err := c.api.GetRevisionAllBlocks(ctx, c.shareID, linkID, revID)
+	if err != nil {
+		return nil, err
+	}
+
+	blocks := make(map[int]proton.Block, len(rev.Blocks))
+	for _, b := range rev.Blocks {
+		blocks[b.Index] = b
+	}
+	return blocks, nil
+}
+
+// storageTokenRejected reports whether a block GET failed in a way a fresh storage token may fix:
+// 401 (still there after getRaw's own session refresh), 403 or 422 from the storage host.
+// ponytail: these statuses are a guess; Proton does not document what an expired storage token
+// returns. A different status still fails the read, as it did before this retry existed.
+func storageTokenRejected(err error) bool {
+	apiErr, ok := asAPIError(err)
+	if !ok {
+		return false
+	}
+	switch apiErr.Status {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusUnprocessableEntity:
+		return true
+	}
+	return false
+}
+
+// block returns block idx's storage URL and token.
+func (f *File) block(idx int) (proton.Block, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	blk, ok := f.blocks[idx]
+	return blk, ok
+}
+
+// refreshBlock refetches the revision's block list, whose storage tokens OpenFile fetched and
+// which expire while a handle stays open for hours (a long video), and returns block idx's
+// fresh entry.
+func (f *File) refreshBlock(ctx context.Context, idx int) (proton.Block, error) {
+	blocks, err := revisionBlocks(ctx, f.client, f.linkID, f.revID)
+	if err != nil {
+		return proton.Block{}, err
+	}
+
+	f.mu.Lock()
+	f.blocks = blocks
+	f.mu.Unlock()
+
+	blk, ok := blocks[idx]
+	if !ok {
+		return proton.Block{}, errors.New("block not found")
+	}
+	return blk, nil
+}
+
 // ensureTransfer lazily starts this file's tracked download transfer on its first real network
-// fetch, so a file served entirely from cache never shows up as "downloading".
+// fetch, so a file served entirely from cache never shows up as "downloading". After Close it
+// hands back an unregistered Transfer: the fetch still counts into it, but the tray never sees it.
 func (f *File) ensureTransfer() *Transfer {
 	f.transferMu.Lock()
 	defer f.transferMu.Unlock()
+	if f.closed {
+		return &Transfer{}
+	}
 	if f.transfer == nil {
 		f.transfer = f.client.begin(f.path, "download", f.size)
 	}
@@ -154,6 +215,7 @@ func (f *File) Close() error {
 	f.transferMu.Lock()
 	t := f.transfer
 	f.transfer = nil
+	f.closed = true
 	f.transferMu.Unlock()
 
 	if t == nil {
@@ -223,7 +285,8 @@ func (f *File) ReadAt(ctx context.Context, p []byte, off int64) (int, error) {
 
 // correctSizeFromBlocks computes the plaintext file size by downloading and measuring the last
 // block. Used when XAttr resolution failed and the only known size is the encrypted one. The
-// downloaded block is cached, so the caller's first real read of it is a memory hit.
+// downloaded block is cached, so the caller's first real read of it is a memory hit. Only
+// OpenFile calls it, before f is shared, so it reads f.blocks without f.mu.
 func (f *File) correctSizeFromBlocks(ctx context.Context) (int64, error) {
 	if len(f.blocks) == 0 {
 		return 0, nil
@@ -326,26 +389,27 @@ func (f *File) fetchAndCacheBlock(ctx context.Context, idx int, debug bool) ([]b
 		}
 	}
 
-	blk, ok := f.blocks[idx]
+	blk, ok := f.block(idx)
 	if !ok {
 		return nil, errors.New("block not found")
 	}
 
-	releaseSlot, err := f.client.acquireDownload(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	transfer := f.ensureTransfer()
-
 	dlStart := time.Now()
 	slog.Debug("downloading block", "link", f.linkID, "block", idx, "url", blk.BareURL)
-	ciphertext, err := fetchBlock(ctx, f.client, blk.BareURL, blk.Token)
-	releaseSlot()
+	ciphertext, err := f.downloadBlock(ctx, blk)
+	if storageTokenRejected(err) {
+		// The refetch is an API call, not a block download, so it runs without a download slot:
+		// holding one under SetMaxDownloads would stall every other block behind it.
+		slog.Debug("storage token rejected, refreshing block list", "link", f.linkID, "block", idx, "err", err)
+		if blk, err = f.refreshBlock(ctx, idx); err == nil {
+			ciphertext, err = f.downloadBlock(ctx, blk)
+		}
+	}
 	if err != nil {
 		f.failed.Store(true)
 		return nil, err
 	}
+	transfer := f.ensureTransfer()
 
 	decStart := time.Now()
 	plain, err := f.sessionKey.Decrypt(ciphertext)
@@ -372,10 +436,23 @@ func (f *File) fetchAndCacheBlock(ctx context.Context, idx int, debug bool) ([]b
 	return data, nil
 }
 
+// downloadBlock fetches blk's ciphertext while holding one download slot, starting this file's
+// tracked transfer once the slot is granted.
+func (f *File) downloadBlock(ctx context.Context, blk proton.Block) ([]byte, error) {
+	releaseSlot, err := f.client.acquireDownload(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseSlot()
+
+	f.ensureTransfer()
+	return fetchBlock(ctx, f.client, blk.BareURL, blk.Token)
+}
+
 // fetchBlock downloads one encrypted block; overridden in tests to fake or count downloads
 // without a real Proton API client.
 var fetchBlock = func(ctx context.Context, c *Client, bareURL, token string) ([]byte, error) {
-	return c.getBlockBytes(ctx, bareURL, token)
+	return c.getRaw(ctx, bareURL, token)
 }
 
 // cachePut stores a decrypted block, evicting the oldest entry once the cache is full.
@@ -423,6 +500,14 @@ func (c *Client) Thumbnail(ctx context.Context, n *Node) ([]byte, error) {
 		return nil, errors.New("revision has no thumbnail")
 	}
 
+	// The thumbnail worker calls this with the mount's own ctx, which never expires, so a
+	// preview (a URL lookup and one small download) is bounded here like any metadata call.
+	if c.metaTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.metaTimeout)
+		defer cancel()
+	}
+
 	kr, err := n.Keyring()
 	if err != nil {
 		return nil, err
@@ -438,7 +523,7 @@ func (c *Client) Thumbnail(ctx context.Context, n *Node) ([]byte, error) {
 		return nil, err
 	}
 
-	ciphertext, err := c.getBlockBytes(ctx, bareURL, token)
+	ciphertext, err := c.getRaw(ctx, bareURL, token)
 	if err != nil {
 		return nil, err
 	}
@@ -463,14 +548,12 @@ func (c *Client) Thumbnail(ctx context.Context, n *Node) ([]byte, error) {
 // with DriveFileRevisionThumbnailResult{ThumbnailLink, ThumbnailBareURL, ThumbnailToken}
 // (packages/shared/lib/interfaces/drive/file.ts).
 //
-// go-proton-api exposes no way to build an arbitrary request, but GetBlock issues an
-// authenticated GET (with the automatic token refresh in Client.doRes) against any path and
-// hands back the raw body, so the JSON is decoded here. The empty storage token it sends along
-// is an unused header on an API path.
+// go-proton-api has no method for this endpoint, so getRaw issues the authenticated GET (with the
+// same refresh-on-401 putJSON does) and the JSON is decoded here.
 func (c *Client) thumbnailURL(ctx context.Context, linkID, revID string) (bareURL, token string, err error) {
 	path := fmt.Sprintf("/drive/shares/%s/files/%s/revisions/%s/thumbnail?Type=%d", c.shareID, linkID, revID, thumbnailPreview)
 
-	body, err := c.getBlockBytes(ctx, path, "")
+	body, err := c.getRaw(ctx, path, "")
 	if err != nil {
 		return "", "", err
 	}
@@ -487,17 +570,6 @@ func (c *Client) thumbnailURL(ctx context.Context, linkID, revID string) (bareUR
 	}
 
 	return res.ThumbnailBareURL, res.ThumbnailToken, nil
-}
-
-// getBlockBytes reads a storage GET to completion.
-func (c *Client) getBlockBytes(ctx context.Context, bareURL, token string) ([]byte, error) {
-	rc, err := c.api.GetBlock(ctx, bareURL, token)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rc.Close() }()
-
-	return io.ReadAll(rc)
 }
 
 // blockIndexForOffset returns the 1-based Proton block index covering byte offset off.

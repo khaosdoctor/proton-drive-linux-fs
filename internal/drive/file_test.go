@@ -75,6 +75,92 @@ func TestGetBlockSingleflight(t *testing.T) {
 	}
 }
 
+// TestGetBlockAfterCloseRegistersNoTransfer checks that a fetch finishing after Close doesn't
+// leave a "downloading" transfer behind that nothing will ever end.
+func TestGetBlockAfterCloseRegistersNoTransfer(t *testing.T) {
+	sk, err := crypto.GenerateSessionKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ciphertext, err := sk.Encrypt(crypto.NewPlainMessage([]byte("late")))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c := &Client{}
+	f := &File{
+		client:     c,
+		sessionKey: sk,
+		blocks:     map[int]proton.Block{1: {Index: 1}},
+		size:       4,
+		cache:      make(map[int][]byte),
+	}
+
+	orig := fetchBlock
+	fetchBlock = func(_ context.Context, _ *Client, _, _ string) ([]byte, error) { return ciphertext, nil }
+	t.Cleanup(func() { fetchBlock = orig })
+
+	_ = f.Close()
+	if _, err := f.getBlock(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := c.Transfers(); got != 0 {
+		t.Fatalf("Transfers() = %d after Close, want 0", got)
+	}
+}
+
+// TestGetBlockRefreshesRejectedStorageToken checks that a block whose storage token the host
+// rejects is retried once with a token from a refetched block list, and that the refetch runs
+// without holding a download slot.
+func TestGetBlockRefreshesRejectedStorageToken(t *testing.T) {
+	sk, err := crypto.GenerateSessionKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := []byte("fresh")
+	ciphertext, err := sk.Encrypt(crypto.NewPlainMessage(plain))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c := &Client{}
+	c.SetMaxDownloads(1)
+	f := &File{
+		client:     c,
+		sessionKey: sk,
+		blocks:     map[int]proton.Block{1: {Index: 1, Token: "expired"}},
+		size:       int64(len(plain)),
+		cache:      make(map[int][]byte),
+	}
+
+	origFetch, origBlocks := fetchBlock, revisionBlocks
+	fetchBlock = func(_ context.Context, _ *Client, _, token string) ([]byte, error) {
+		if token != "new" {
+			return nil, &proton.APIError{Status: http.StatusForbidden}
+		}
+		return ciphertext, nil
+	}
+	revisionBlocks = func(_ context.Context, c *Client, _, _ string) (map[int]proton.Block, error) {
+		select {
+		case c.downloads <- struct{}{}:
+			<-c.downloads
+		default:
+			return nil, errors.New("download slot held during the block list refetch")
+		}
+		return map[int]proton.Block{1: {Index: 1, Token: "new"}}, nil
+	}
+	t.Cleanup(func() { fetchBlock, revisionBlocks = origFetch, origBlocks })
+
+	got, err := f.getBlock(context.Background(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(plain) {
+		t.Fatalf("got %q, want %q", got, plain)
+	}
+}
+
 func TestIsNotFound(t *testing.T) {
 	notFound := errors.Join(errors.New("404 GET /x"), &proton.APIError{Status: http.StatusNotFound, Message: "not found"})
 	if !IsNotFound(notFound) {

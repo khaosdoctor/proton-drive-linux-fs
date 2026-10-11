@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -53,7 +54,12 @@ func OpenBlockCache(dir string, limit int64) (*BlockCache, error) {
 	}
 
 	var size int64
-	err := filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		// Another daemon sharing this cache dir can evict an entry out from under the walk; a
+		// vanished entry is no reason to fail the mount.
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
@@ -61,8 +67,20 @@ func OpenBlockCache(dir string, limit int64) (*BlockCache, error) {
 			return nil
 		}
 		info, err := d.Info()
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
 		if err != nil {
 			return err
+		}
+		// A temp file is never counted before its rename. One older than staleTempAge is a write
+		// a crash cut short, which evict (it skips temp files) would never remove; a fresh one may
+		// be another daemon's write in progress.
+		if isTempFile(d.Name()) {
+			if time.Since(info.ModTime()) > staleTempAge {
+				_ = os.Remove(path)
+			}
+			return nil
 		}
 		size += info.Size()
 		return nil
@@ -133,6 +151,16 @@ func (c *BlockCache) Get(linkID, revID string, index int) ([]byte, bool) {
 	return data, true
 }
 
+// staleTempAge is how old a temp file must be before OpenBlockCache treats it as abandoned; a
+// single block or listing write takes seconds at most.
+const staleTempAge = time.Hour
+
+// isTempFile reports whether name is one of writeTemp's in-progress files (block-*.tmp,
+// listing-*.tmp), which are not counted in the size until their rename.
+func isTempFile(name string) bool {
+	return strings.HasSuffix(name, ".tmp")
+}
+
 func writeTemp(dir, pattern string, data []byte) (string, error) {
 	tmp, err := os.CreateTemp(dir, pattern)
 	if err != nil {
@@ -168,14 +196,21 @@ func (c *BlockCache) Put(linkID, revID string, index int, data []byte) {
 		return
 	}
 
+	// Two Files on the same revision can miss the same block at once, and each Put's rename then
+	// replaces the other's file. Only the size delta counts, and the stat, rename and count stay
+	// under c.mu together so two concurrent Puts can't both see the block as new.
 	path := filepath.Join(dir, strconv.Itoa(index))
+	c.mu.Lock()
+	oldSize := int64(0)
+	if info, err := os.Stat(path); err == nil {
+		oldSize = info.Size()
+	}
 	if err := os.Rename(tmpPath, path); err != nil {
+		c.mu.Unlock()
 		_ = os.Remove(tmpPath)
 		return
 	}
-
-	c.mu.Lock()
-	c.size += int64(len(data))
+	c.size += int64(len(data)) - oldSize
 	c.mu.Unlock()
 
 	c.evict()
@@ -291,6 +326,11 @@ func (c *BlockCache) evict() {
 		if err != nil || d.IsDir() {
 			return nil
 		}
+		// writeTemp runs outside c.mu, so a temp file here may be mid-write, and it isn't in
+		// c.size yet: deleting it would fail that Put and subtract bytes never added.
+		if isTempFile(d.Name()) {
+			return nil
+		}
 		info, err := d.Info()
 		if err != nil {
 			return nil
@@ -311,6 +351,22 @@ func (c *BlockCache) evict() {
 			continue
 		}
 		c.size -= e.size
+		c.removeEmptyParents(filepath.Dir(e.path))
+	}
+}
+
+// removeEmptyParents removes dir, then each parent, while they are empty and still under
+// blocks/, so an evicted revision doesn't leave its blocks/<linkID>/<revID>/ shell behind. os.Remove
+// refuses a non-empty directory, which is the emptiness check. A Put that just ran MkdirAll on
+// the same directory can lose it here before writeTemp creates its file; that Put then fails
+// quietly and the block is fetched again on the next miss.
+func (c *BlockCache) removeEmptyParents(dir string) {
+	blocks := filepath.Join(c.dir, blocksSubdir) + string(filepath.Separator)
+	for strings.HasPrefix(dir, blocks) {
+		if os.Remove(dir) != nil {
+			return
+		}
+		dir = filepath.Dir(dir)
 	}
 }
 

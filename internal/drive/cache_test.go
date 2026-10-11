@@ -53,6 +53,110 @@ func TestBlockCacheEvictsOldest(t *testing.T) {
 	}
 }
 
+// TestBlockCachePutSameBlockCountsOnce checks that a Put replacing an already cached block (two
+// Files missing the same block) adds only the size delta, not the whole block again.
+func TestBlockCachePutSameBlockCountsOnce(t *testing.T) {
+	bc, err := OpenBlockCache(t.TempDir(), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bc.Put("link1", "rev1", 1, make([]byte, 10))
+	bc.Put("link1", "rev1", 1, make([]byte, 10))
+
+	if bc.size != 10 {
+		t.Fatalf("size = %d, want 10", bc.size)
+	}
+}
+
+// TestBlockCacheEvictSkipsTempFiles checks that eviction leaves an in-progress temp file alone
+// (another Put may be writing it) and does not subtract its never-counted size.
+func TestBlockCacheEvictSkipsTempFiles(t *testing.T) {
+	root := t.TempDir()
+	bc, err := OpenBlockCache(root, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bc.Put("link1", "rev1", 1, make([]byte, 10))
+	tmp := filepath.Join(root, blocksSubdir, "link1", "rev1", "block-123.tmp")
+	if err := os.WriteFile(tmp, make([]byte, 100), 0600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(tmp, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	bc.Put("link1", "rev1", 2, make([]byte, 10))
+	bc.Put("link1", "rev1", 3, make([]byte, 10)) // size 30 > 20: evicts one real block
+
+	if _, err := os.Stat(tmp); err != nil {
+		t.Fatalf("temp file evicted: %v", err)
+	}
+	if bc.size != 20 {
+		t.Fatalf("size = %d, want 20", bc.size)
+	}
+}
+
+// TestBlockCacheEvictRemovesEmptyDirs checks that evicting a revision's last block removes its
+// now-empty blocks/<linkID>/<revID>/ directories, and keeps the blocks root itself.
+func TestBlockCacheEvictRemovesEmptyDirs(t *testing.T) {
+	root := t.TempDir()
+	bc, err := OpenBlockCache(root, 15)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bc.Put("link1", "rev1", 1, make([]byte, 10))
+	time.Sleep(10 * time.Millisecond)            // distinct mtimes for LRU ordering
+	bc.Put("link2", "rev2", 1, make([]byte, 10)) // size 20 > 15: evicts link1's only block
+
+	if _, err := os.Stat(filepath.Join(root, blocksSubdir, "link1")); !os.IsNotExist(err) {
+		t.Fatalf("link1 directory still present after its last block was evicted (err %v)", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, blocksSubdir)); err != nil {
+		t.Fatalf("blocks root removed: %v", err)
+	}
+}
+
+// TestOpenBlockCacheRemovesOnlyStaleTempFiles checks that opening the cache deletes a temp file a
+// crash left behind long ago, keeps a fresh one (another daemon's write in progress), and counts
+// neither.
+func TestOpenBlockCacheRemovesOnlyStaleTempFiles(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, blocksSubdir, "link1", "rev1")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(dir, "block-old.tmp")
+	fresh := filepath.Join(dir, "block-new.tmp")
+	for _, p := range []string{stale, fresh} {
+		if err := os.WriteFile(p, make([]byte, 100), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-2 * staleTempAge)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	bc, err := OpenBlockCache(root, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("stale temp file still present (err %v)", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("fresh temp file removed: %v", err)
+	}
+	if bc.size != 0 {
+		t.Errorf("size = %d, want 0", bc.size)
+	}
+}
+
 func TestBlockCacheDisabled(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "unused")
 	bc, err := OpenBlockCache(dir, 0)

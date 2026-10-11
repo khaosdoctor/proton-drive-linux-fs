@@ -32,14 +32,16 @@ type rateLimit struct {
 // ETIMEDOUT.
 var ErrRateLimited = errors.New("proton api rate limited, backing off")
 
-// SetMetaTimeout tells the client how long a caller is willing to wait out a rate-limit window
-// before giving up. Called once from fusefs.Mount with Options.MetaTimeout.
+// SetMetaTimeout sets the deadline Thumbnail puts on its requests, since its caller (the
+// thumbnail worker) has none of its own. Called once from fusefs.Mount with Options.MetaTimeout.
 func (c *Client) SetMetaTimeout(d time.Duration) {
 	c.metaTimeout = d
 }
 
 // noteRateLimitStatus opens or extends the shared backoff window for a 429/503 response.
-func (c *Client) noteRateLimitStatus(status int, err error) {
+// retryAfter is the response's Retry-After header when the caller has it (getRaw does), 0
+// otherwise.
+func (c *Client) noteRateLimitStatus(status int, err error, retryAfter time.Duration) {
 	if status != http.StatusTooManyRequests && status != http.StatusServiceUnavailable {
 		return
 	}
@@ -49,6 +51,9 @@ func (c *Client) noteRateLimitStatus(status int, err error) {
 		if hint, ok := retryAfterHint(apiErr); ok {
 			wait = hint
 		}
+	}
+	if retryAfter > 0 {
+		wait = retryAfter
 	}
 	if wait > maxRateLimitBackoff {
 		wait = maxRateLimitBackoff

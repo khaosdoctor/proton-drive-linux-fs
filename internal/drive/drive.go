@@ -57,7 +57,7 @@ type Client struct {
 	downloads chan struct{}
 
 	metaTimeout time.Duration
-	rateLimit rateLimit
+	rateLimit   rateLimit
 }
 
 // SetMaxDownloads caps how many block downloads run at once. n <= 0 leaves them unbounded.

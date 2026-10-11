@@ -3,10 +3,13 @@ package drive
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // TestMoveLinkReqJSON asserts every field Proton's move endpoint requires -- exactly WebClients'
@@ -121,4 +124,129 @@ func TestPutJSON(t *testing.T) {
 	if got := gotHeaders.Get("Content-Type"); got != "application/json" {
 		t.Errorf("Content-Type = %q, want application/json", got)
 	}
+}
+
+// TestGetRawStatus checks that a storage GET hands back the body only on a 2xx: a 404 is a
+// not-found error, a short 429 burst is retried away, and 429s on every attempt open the backoff
+// window, never a body to decrypt as ciphertext.
+func TestGetRawStatus(t *testing.T) {
+	fastRetries(t)
+
+	var burstHits, busyHits atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ok":
+			_, _ = w.Write([]byte(r.Header.Get("pm-storage-token")))
+		case "/missing":
+			http.Error(w, "<html>not here</html>", http.StatusNotFound)
+		case "/burst":
+			if burstHits.Add(1) <= getRawAttempts-1 {
+				w.WriteHeader(http.StatusTooManyRequests)
+				return
+			}
+			_, _ = w.Write([]byte("after burst"))
+		case "/busy":
+			busyHits.Add(1)
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"Code":2028,"Error":"Too many recent API requests"}`))
+		}
+	}))
+	defer server.Close()
+
+	c := &Client{tokenSource: func() (string, string) { return "uid", "access" }}
+	ctx := context.Background()
+
+	body, err := c.getRaw(ctx, server.URL+"/ok", "tok")
+	if err != nil || string(body) != "tok" {
+		t.Fatalf("ok: body %q err %v, want the storage token echoed back", body, err)
+	}
+
+	if body, err := c.getRaw(ctx, server.URL+"/missing", "tok"); body != nil || !IsNotFound(err) {
+		t.Errorf("missing: body %q err %v, want nil body and a not-found error", body, err)
+	}
+
+	body, err = c.getRaw(ctx, server.URL+"/burst", "tok")
+	if err != nil || string(body) != "after burst" {
+		t.Fatalf("burst: body %q err %v, want the body after %d 429s", body, err, getRawAttempts-1)
+	}
+	if _, limited := c.RateLimited(); limited {
+		t.Error("burst: backoff window opened for a burst the retries absorbed")
+	}
+
+	body, err = c.getRaw(ctx, server.URL+"/busy", "tok")
+	if body != nil || !errors.Is(err, ErrRateLimited) {
+		t.Errorf("busy: body %q err %v, want nil body and ErrRateLimited", body, err)
+	}
+	if got := busyHits.Load(); got != getRawAttempts {
+		t.Errorf("busy: %d attempts, want %d", got, getRawAttempts)
+	}
+	if _, limited := c.RateLimited(); !limited {
+		t.Error("busy: backoff window not opened")
+	}
+}
+
+// TestGetRawRetriesTransportError checks that a connection dropped halfway through the body is
+// retried instead of failing the read.
+func TestGetRawRetriesTransportError(t *testing.T) {
+	fastRetries(t)
+
+	var hits atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hits.Add(1) > 1 {
+			_, _ = w.Write([]byte("whole block"))
+			return
+		}
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("partial"))
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		_ = conn.Close()
+	}))
+	defer server.Close()
+
+	c := &Client{tokenSource: func() (string, string) { return "uid", "access" }}
+	body, err := c.getRaw(context.Background(), server.URL+"/block", "tok")
+	if err != nil || string(body) != "whole block" {
+		t.Fatalf("body %q err %v, want the body from the retry", body, err)
+	}
+}
+
+// TestGetRawCancelDuringWaitKeepsWindowClosed checks that a caller whose ctx ends while waiting
+// out a 429 gets its ctx error back without opening the shared backoff window.
+func TestGetRawCancelDuringWaitKeepsWindowClosed(t *testing.T) {
+	origWait, origJitter := rateLimitDefaultWait, rateLimitJitter
+	rateLimitDefaultWait = time.Minute
+	rateLimitJitter = func() time.Duration { return 0 }
+	t.Cleanup(func() { rateLimitDefaultWait, rateLimitJitter = origWait, origJitter })
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	c := &Client{tokenSource: func() (string, string) { return "uid", "access" }}
+	if _, err := c.getRaw(ctx, server.URL+"/block", "tok"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err %v, want context.DeadlineExceeded", err)
+	}
+	if _, limited := c.RateLimited(); limited {
+		t.Error("backoff window opened by a caller's own deadline")
+	}
+}
+
+// fastRetries shrinks getRawRetrying's waits to a millisecond for the rest of the test.
+func fastRetries(t *testing.T) {
+	origWait, origJitter, origTransport := rateLimitDefaultWait, rateLimitJitter, transportRetryBase
+	rateLimitDefaultWait = time.Millisecond
+	rateLimitJitter = func() time.Duration { return 0 }
+	transportRetryBase = time.Millisecond
+	t.Cleanup(func() {
+		rateLimitDefaultWait, rateLimitJitter, transportRetryBase = origWait, origJitter, origTransport
+	})
 }
