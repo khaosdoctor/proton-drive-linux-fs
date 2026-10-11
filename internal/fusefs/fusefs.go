@@ -584,11 +584,19 @@ func (st *mountState) trackIn(set *map[*fileHandle]struct{}, h *fileHandle, on b
 }
 
 // flushDelayed uploads every buffer still waiting out its delay and waits for them, so an unmount
-// does not drop a save made just before it, then lets go of the buffers parked with no timer.
+// does not drop a save made just before it. An upload that fails parks its buffer again for a
+// retry, after the snapshot a pass works from, so a second pass gives each of those one more try.
+// Whatever is still parked after that is let go of (abandonKept), its save kept out of $TMPDIR.
 // ponytail: a settle the timer started a moment before this may finish after the process exits
 func (st *mountState) flushDelayed() {
-	defer st.abandonKept()
+	for range 2 {
+		st.settleDelayed()
+	}
+	st.abandonKept()
+}
 
+// settleDelayed uploads every buffer waiting out a delay right now, and waits for them.
+func (st *mountState) settleDelayed() {
 	st.delayedMu.Lock()
 	pending := make([]*fileHandle, 0, len(st.delayed))
 	for h := range st.delayed {
@@ -609,12 +617,16 @@ func (st *mountState) flushDelayed() {
 	st.settling.Wait()
 }
 
-// abandonKept lets go of every buffer parked with no timer, after the uploads flushDelayed ran
-// (one of them may have parked under an excluded name, or failed for good).
+// abandonKept lets go of every buffer still parked once flushDelayed's uploads ran: the ones with
+// no timer (an excluded name, an upload that failed for good) and the ones whose retry would only
+// come after the process exits.
 func (st *mountState) abandonKept() {
 	st.delayedMu.Lock()
-	kept := make([]*fileHandle, 0, len(st.kept))
+	kept := make([]*fileHandle, 0, len(st.kept)+len(st.delayed))
 	for h := range st.kept {
+		kept = append(kept, h)
+	}
+	for h := range st.delayed {
 		kept = append(kept, h)
 	}
 	st.delayedMu.Unlock()
@@ -2564,7 +2576,8 @@ const (
 
 // keepForRetry parks a buffer whose upload failed with err, so the only copy of a save is never
 // deleted: its close already returned success, and nothing else would try again. The log names
-// the temp file, which survives a daemon exit for manual recovery. A permanent failure (see
+// the temp file, and an unmount before the upload works moves it out of $TMPDIR for recovery
+// (keepUnsaved). A permanent failure (see
 // permanentUploadError) parks it with no timer instead, since retrying cannot help: it stays
 // readable on the mount until a rename, a save or a delete takes it back.
 func (h *fileHandle) keepForRetry(tmp *os.File, name string, err error) {
@@ -2688,29 +2701,89 @@ func (h *fileHandle) unpark(dirty bool) bool {
 	return true
 }
 
-// abandon lets go of a buffer parked with no timer at unmount, once nothing can take it back any
-// more. (A kernel forget is no such point: a pending file stays pinned in the tree, see Create.)
-// An excluded name was never going to upload, so its temp file is removed. A buffer whose upload failed for good is the only copy of a save, so only
-// its descriptor is closed, and the temp file stays where the log says for manual recovery.
+// abandon lets go of a parked buffer at unmount, once nothing can take it back any more. (A
+// kernel forget is no such point: a pending file stays pinned in the tree, see Create.) An
+// excluded name was never going to upload, so its temp file is removed. Anything else is a save
+// that never reached the drive, kept for recovery (keepUnsaved).
 func (h *fileHandle) abandon() {
 	h.mu.Lock()
-	if !h.parked || h.timer != nil {
+	if !h.parked {
 		h.mu.Unlock()
 		return
 	}
 	h.parked = false
-	tmp, failed := h.tmp, h.failed
+	timer, tmp, failed := h.timer, h.tmp, h.failed
+	h.timer = nil
 	h.mu.Unlock()
 
-	h.node.mountState().trackKept(h, false)
-	if !failed {
+	st := h.node.mountState()
+	st.trackKept(h, false)
+	st.trackDelayed(h, false)
+	if timer != nil {
+		timer.Stop()
+	}
+
+	if timer == nil && !failed {
 		h.drop(tmp)
 		return
 	}
+	h.keepUnsaved(tmp)
+}
 
-	slog.Error("upload failed for good, its save is only in the buffer", "path", h.node.displayPath(), "buffer", tmp.Name())
+// keepUnsaved lets go of the buffer of a save that never reached the drive without losing it: the
+// temp file moves out of $TMPDIR (tmpfs on many systems, emptied on reboot) into
+// state.UnsavedDir, and the log names both the file and where its save went. A failed move leaves
+// it where it is, still named in the log.
+func (h *fileHandle) keepUnsaved(tmp *os.File) {
+	where := h.node.displayPath()
 	h.detach()
+
+	saved, err := saveUnsaved(tmp, path.Base(where))
 	_ = tmp.Close()
+	if err != nil {
+		slog.Error("save not uploaded, and moving its buffer out of the temp dir failed; it is still there", "path", where, "buffer", tmp.Name(), "err", err)
+		return
+	}
+	slog.Error("save not uploaded, buffer moved for recovery", "path", where, "saved", saved)
+}
+
+// saveUnsaved moves tmp's file into state.UnsavedDir as "<time>-<random>-<name>", by a rename on
+// the same filesystem or a copy across them, and returns its new path.
+func saveUnsaved(tmp *os.File, name string) (string, error) {
+	dir, err := state.UnsavedDir()
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+
+	dst, err := os.CreateTemp(dir, time.Now().Format("20060102-150405")+"-*-"+name)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = dst.Close() }()
+
+	if os.Rename(tmp.Name(), dst.Name()) == nil {
+		return dst.Name(), nil
+	}
+
+	// Across filesystems (tmpfs $TMPDIR to the home disk): copy, and remove the temp file only
+	// once the copy is safely written.
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		_ = os.Remove(dst.Name())
+		return "", err
+	}
+	if _, err := io.Copy(dst, tmp); err != nil {
+		_ = os.Remove(dst.Name())
+		return "", err
+	}
+	if err := dst.Sync(); err != nil {
+		_ = os.Remove(dst.Name())
+		return "", err
+	}
+	_ = os.Remove(tmp.Name())
+	return dst.Name(), nil
 }
 
 func (h *fileHandle) hasTmp() bool {

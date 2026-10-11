@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -107,14 +109,26 @@ func TestRenamePendingOverPendingDropsTheReplacedBuffer(t *testing.T) {
 	}
 }
 
+// newWriteState is a mountState whose listing patches (upsertChild, removeChild) work without a
+// drive, for tests that run an upload or a move through fakeDrive.
+func newWriteState() *mountState {
+	return &mountState{
+		opTimeout:    time.Minute,
+		metaTimeout:  time.Minute,
+		dirs:         make(map[string]*dirNode),
+		parentOf:     make(map[string]string),
+		cacheListing: func(*drive.Node, []*drive.Node) {},
+	}
+}
+
 // fakeDrive swaps the drive writes for fakes for the length of a test.
-func fakeDrive(t *testing.T, upload func() (*drive.Node, error), move func(n *drive.Node, newName string) (*drive.Node, error), trash func(n *drive.Node) error) {
+func fakeDrive(t *testing.T, upload func(name string) (*drive.Node, error), move func(n *drive.Node, newName string) (*drive.Node, error), trash func(n *drive.Node) error) {
 	t.Helper()
 	origUpload, origMove, origTrash := driveUpload, driveMove, driveTrash
 	t.Cleanup(func() { driveUpload, driveMove, driveTrash = origUpload, origMove, origTrash })
 
-	driveUpload = func(context.Context, *drive.Client, *drive.Node, string, *drive.Node, io.Reader, int64, time.Time) (*drive.Node, error) {
-		return upload()
+	driveUpload = func(_ context.Context, _ *drive.Client, _ *drive.Node, name string, _ *drive.Node, _ io.Reader, _ int64, _ time.Time) (*drive.Node, error) {
+		return upload(name)
 	}
 	driveMove = func(_ context.Context, _ *drive.Client, n, _, _ *drive.Node, newName string) (*drive.Node, error) {
 		return move(n, newName)
@@ -125,13 +139,7 @@ func fakeDrive(t *testing.T, upload func() (*drive.Node, error), move func(n *dr
 }
 
 func TestRenameDuringUploadMovesOnlyTheUploadedFile(t *testing.T) {
-	st := &mountState{
-		opTimeout:    time.Minute,
-		metaTimeout:  time.Minute,
-		dirs:         make(map[string]*dirNode),
-		parentOf:     make(map[string]string),
-		cacheListing: func(*drive.Node, []*drive.Node) {},
-	}
+	st := newWriteState()
 	d := newTreeDir(st)
 	ctx := context.Background()
 	p, hp := addPending(t, d, "a")
@@ -140,7 +148,7 @@ func TestRenameDuringUploadMovesOnlyTheUploadedFile(t *testing.T) {
 	var q *fileNode
 	var movedLink string
 	fakeDrive(t,
-		func() (*drive.Node, error) {
+		func(string) (*drive.Node, error) {
 			if errno := d.Rename(ctx, "a", d, "b", 0); errno != 0 {
 				t.Fatalf("Rename = %v", errno)
 			}
@@ -164,6 +172,57 @@ func TestRenameDuringUploadMovesOnlyTheUploadedFile(t *testing.T) {
 	}
 	if !q.pending() || q.currentName() != "a" || q.handle == nil {
 		t.Error("the new file saved under the old name was retargeted onto the uploaded file")
+	}
+}
+
+func TestUnmountRetriesReparkedUploadsAndSavesTheRest(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	st := newWriteState()
+	st.uploadDelay = time.Hour
+	d := newTreeDir(st)
+	ctx := context.Background()
+
+	flaky, hf := addPending(t, d, "flaky")
+	_, hd := addPending(t, d, "down")
+	if _, err := hd.tmp.WriteString("save"); err != nil {
+		t.Fatal(err)
+	}
+	downBuf := hd.tmp.Name()
+	_ = hf.Release(ctx)
+	_ = hd.Release(ctx)
+
+	// "flaky" fails its first upload, during the unmount flush; "down" never gets through.
+	var mu sync.Mutex
+	tries := map[string]int{}
+	fakeDrive(t,
+		func(name string) (*drive.Node, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			tries[name]++
+			if name == "flaky" && tries[name] > 1 {
+				return node("flaky", "flaky"), nil
+			}
+			return nil, errors.New("connection reset")
+		},
+		func(n *drive.Node, newName string) (*drive.Node, error) { return n, nil },
+		func(*drive.Node) error { return nil },
+	)
+
+	st.flushDelayed()
+
+	if tries["flaky"] != 2 || flaky.pending() {
+		t.Errorf("upload that failed during the flush tried %d times, want a second try that works", tries["flaky"])
+	}
+	if exists(downBuf) {
+		t.Error("save that never uploaded left in $TMPDIR at unmount")
+	}
+	saved, _ := filepath.Glob(filepath.Join(stateHome, "proton-drive-fs", "unsaved", "*-down"))
+	if len(saved) != 1 {
+		t.Fatalf("unsaved dir has %v, want the one save that never uploaded", saved)
+	}
+	if got, _ := os.ReadFile(saved[0]); string(got) != "save" {
+		t.Errorf("saved buffer holds %q, want %q", got, "save")
 	}
 }
 

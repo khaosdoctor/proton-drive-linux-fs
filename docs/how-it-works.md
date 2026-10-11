@@ -85,11 +85,11 @@ The delay is there because a lot of apps save in several steps. FreeCAD, for exa
 - **Open for writing**: the app gets the same buffer back and the wait stops. Closing it again starts the wait again.
 - **Delete**: we drop the buffer and nothing is uploaded. That holds for a new file that's still open too, and if its upload already started, whatever it created goes to the trash.
 - **Listing, stat, read**: you see the file and its content normally, even though Proton doesn't have it yet.
-- **Unmount**: we upload everything that's still waiting before the mount goes away.
+- **Unmount**: we upload everything that's still waiting before the mount goes away, and an upload that fails then gets one more try. A save that still didn't make it is moved out of the temp dir (often in RAM, and gone after a reboot) to `$XDG_STATE_HOME/proton-drive-fs/unsaved/` (`~/.local/state/proton-drive-fs/unsaved/` by default), and the log says which file it was.
 - **Failed upload**: we keep the buffer and try again after 30 seconds, then wait twice as long after each failure, up to 30 minutes. The log tells you where the temp file is, so you never lose a save because the network failed.
 - **Refused upload**: when Proton refuses the upload itself (the name is taken, the folder is gone, you're out of space), retrying won't help, so we stop, log an error with the temp file's path and show the failure in the tray's Recent menu. The file stays on the mount, and renaming it, saving it again or deleting it starts over.
 
-A file with a name in `-exclude` is kept the same way, just without a timer. It stays local until you rename it to something outside the list. If nothing renames or deletes it, its temp file is removed on unmount, since it was never going to be uploaded. The temp file of a refused upload is never removed this way: unmount leaves it in place and logs its path.
+A file with a name in `-exclude` is kept the same way, just without a timer. It stays local until you rename it to something outside the list. If nothing renames or deletes it, its temp file is removed on unmount, since it was never going to be uploaded. The temp file of a refused upload is never removed this way: unmount moves it to the `unsaved` folder instead.
 
 ```mermaid
 sequenceDiagram

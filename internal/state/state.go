@@ -90,6 +90,18 @@ func Dir() (string, error) {
 	return dir()
 }
 
+// UnsavedDir returns where unmount moves the buffers of saves it could not upload:
+// $XDG_STATE_HOME/proton-drive-fs/unsaved, or ~/.local/state/proton-drive-fs/unsaved. Never the
+// session runtime directory Dir prefers, which is tmpfs like the $TMPDIR the buffers come from.
+func UnsavedDir() (string, error) {
+	stateHome := os.Getenv("XDG_STATE_HOME")
+	home, err := os.UserHomeDir()
+	if err != nil && stateHome == "" {
+		return "", err
+	}
+	return filepath.Join(resolveDir("", stateHome, home), "unsaved"), nil
+}
+
 // PausePath returns the path of the pause marker.
 func PausePath() (string, error) {
 	d, err := dir()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -46,6 +47,8 @@ func TestForgottenPendingFileKeepsItsBuffer(t *testing.T) {
 }
 
 func TestUnmountLetsGoOfKeptBuffers(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
 	st := &mountState{excludes: parseExcludes([]string{"*.tmp"})}
 	_, h := newDelayedHandle(t, st, "b.3mf.tmp")
 	unmountedBuf := h.tmp.Name()
@@ -60,8 +63,9 @@ func TestUnmountLetsGoOfKeptBuffers(t *testing.T) {
 	if exists(unmountedBuf) {
 		t.Error("excluded buffer still in $TMPDIR after unmount")
 	}
-	if !exists(failedBuf) {
-		t.Error("unmount removed the only copy of a save whose upload failed for good")
+	saved, _ := filepath.Glob(filepath.Join(stateHome, "proton-drive-fs", "unsaved", "*-c.3mf"))
+	if exists(failedBuf) || len(saved) != 1 {
+		t.Error("unmount did not move the only copy of a save whose upload failed for good out of $TMPDIR")
 	}
 	if len(st.kept) != 0 {
 		t.Errorf("%d buffers still kept after unmount", len(st.kept))
