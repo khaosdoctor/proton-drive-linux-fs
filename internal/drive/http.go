@@ -19,11 +19,19 @@ import (
 	"github.com/khaosdoctor/proton-drive-linux-fs/internal/logx"
 )
 
-// httpClient carries every request this package sends around go-proton-api: putJSON's PUTs and
-// getRaw's GETs. Its Timeout covers the whole exchange, body included, so a stalled connection
-// can't hang a caller whose ctx has no deadline (the thumbnail worker's has none); two minutes
-// leaves a 4 MiB block room on a slow link.
-var httpClient = &http.Client{Timeout: 2 * time.Minute}
+// putClient carries putJSON's small JSON PUTs; its Timeout covers the whole exchange.
+var putClient = &http.Client{Timeout: 2 * time.Minute}
+
+// storageClient carries getRaw's GETs. It has no overall Timeout: a 4 MiB block on a slow link
+// can take minutes, and the caller's ctx already bounds that. ResponseHeaderTimeout still cuts
+// off a server that accepts the request and never answers, and getRawRetrying retries that.
+var storageClient = &http.Client{Transport: storageTransport()}
+
+func storageTransport() http.RoundTripper {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.ResponseHeaderTimeout = 60 * time.Second
+	return t
+}
 
 // putJSON sends body as a JSON PUT to path (relative to auth.APIURL), authenticated with the
 // client's token source, and retries once after forcing a token refresh on a 401.
@@ -72,7 +80,7 @@ func (c *Client) putJSONOnce(ctx context.Context, path string, body any) (int, e
 	req.Header.Set("Content-Type", "application/json")
 
 	slog.Debug("api request", "method", "PUT", "path", path)
-	resp, err := httpClient.Do(req)
+	resp, err := putClient.Do(req)
 	if err != nil {
 		return 0, err
 	}
@@ -198,7 +206,7 @@ func (c *Client) getRawOnce(ctx context.Context, url, token string) ([]byte, int
 		req.Header.Set("pm-storage-token", token)
 	}
 
-	resp, err := httpClient.Do(req)
+	resp, err := storageClient.Do(req)
 	if err != nil {
 		return nil, 0, 0, err
 	}
