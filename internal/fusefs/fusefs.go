@@ -378,9 +378,12 @@ type mountState struct {
 	delayRules  []delayRule
 
 	// delayed holds every write buffer waiting out its upload delay, so unmount can upload them
-	// instead of losing them; settling counts the ones uploading.
+	// instead of losing them; settling counts the ones uploading. kept holds the buffers parked
+	// with no timer (an excluded name, an upload that failed for good), so unmount can let go of
+	// them too (see fileHandle.abandon).
 	delayedMu sync.Mutex
 	delayed   map[*fileHandle]struct{}
+	kept      map[*fileHandle]struct{}
 	settling  sync.WaitGroup
 
 	// uploads bounds how many files upload at once, so a bulk copy does not open one connection
@@ -546,22 +549,32 @@ func (st *mountState) delayFor(name string) time.Duration {
 }
 
 func (st *mountState) trackDelayed(h *fileHandle, on bool) {
+	st.trackIn(&st.delayed, h, on)
+}
+
+func (st *mountState) trackKept(h *fileHandle, on bool) {
+	st.trackIn(&st.kept, h, on)
+}
+
+func (st *mountState) trackIn(set *map[*fileHandle]struct{}, h *fileHandle, on bool) {
 	st.delayedMu.Lock()
 	defer st.delayedMu.Unlock()
 	if on {
-		if st.delayed == nil {
-			st.delayed = make(map[*fileHandle]struct{})
+		if *set == nil {
+			*set = make(map[*fileHandle]struct{})
 		}
-		st.delayed[h] = struct{}{}
+		(*set)[h] = struct{}{}
 		return
 	}
-	delete(st.delayed, h)
+	delete(*set, h)
 }
 
 // flushDelayed uploads every buffer still waiting out its delay and waits for them, so an unmount
-// does not drop a save made just before it.
+// does not drop a save made just before it, then lets go of the buffers parked with no timer.
 // ponytail: a settle the timer started a moment before this may finish after the process exits
 func (st *mountState) flushDelayed() {
+	defer st.abandonKept()
+
 	st.delayedMu.Lock()
 	pending := make([]*fileHandle, 0, len(st.delayed))
 	for h := range st.delayed {
@@ -580,6 +593,21 @@ func (st *mountState) flushDelayed() {
 		}()
 	}
 	st.settling.Wait()
+}
+
+// abandonKept lets go of every buffer parked with no timer, after the uploads flushDelayed ran
+// (one of them may have parked under an excluded name, or failed for good).
+func (st *mountState) abandonKept() {
+	st.delayedMu.Lock()
+	kept := make([]*fileHandle, 0, len(st.kept))
+	for h := range st.kept {
+		kept = append(kept, h)
+	}
+	st.delayedMu.Unlock()
+
+	for _, h := range kept {
+		h.abandon()
+	}
 }
 
 // everything through.
@@ -1835,6 +1863,16 @@ type fileNode struct {
 var _ = (fs.NodeGetattrer)((*fileNode)(nil))
 var _ = (fs.NodeSetattrer)((*fileNode)(nil))
 var _ = (fs.NodeOpener)((*fileNode)(nil))
+var _ = (fs.NodeOnForgetter)((*fileNode)(nil))
+
+// OnForget runs once the kernel forgets the file, which nothing can rename, reopen or unlink
+// after that. A buffer parked with no timer would stay in $TMPDIR until the daemon exits, so it is
+// let go of now (abandon). A buffer waiting out a delay keeps its timer, which uploads it.
+func (f *fileNode) OnForget() {
+	if h := f.parkedHandle(); h != nil {
+		h.abandon()
+	}
+}
 
 // setNode replaces the node backing this file, e.g. after a remote listing refresh.
 func (f *fileNode) setNode(n *drive.Node) {
@@ -2126,8 +2164,10 @@ type fileHandle struct {
 	due    bool        // the upload delay ran out, so the next Release uploads instead of parking again
 
 	// retryIn is the wait before the next retry of a failed upload, doubled per failure
-	// (keepForRetry) and reset when something takes the buffer back to upload it again.
+	// (keepForRetry) and reset when something takes the buffer back to upload it again. failed is
+	// set while the buffer is parked after an upload that failed for good, so abandon keeps it.
 	retryIn time.Duration
+	failed  bool
 
 	// gone is set when a rename puts another file over this buffer's file before the buffer
 	// reached the drive: Release drops it instead of uploading it, and trashes a new file an
@@ -2202,11 +2242,13 @@ func (h *fileHandle) park(tmp *os.File, delay time.Duration) {
 	defer h.mu.Unlock()
 	h.tmp = tmp
 	h.parked = true
+
+	st := h.node.mountState()
 	if delay <= 0 {
+		st.trackKept(h, true)
 		return
 	}
 
-	st := h.node.mountState()
 	st.trackDelayed(h, true)
 	h.timer = time.AfterFunc(delay, func() {
 		st.settling.Add(1)
@@ -2237,6 +2279,9 @@ func (h *fileHandle) keepForRetry(tmp *os.File, name string, err error) {
 
 	if permanentUploadError(err) {
 		slog.Error("upload failed for good, keeping the buffer; rename, save or delete the file to try again", "path", name, "buffer", tmp.Name(), "err", err)
+		h.mu.Lock()
+		h.failed = true
+		h.mu.Unlock()
 		h.park(tmp, 0)
 		return
 	}
@@ -2279,6 +2324,13 @@ func permanentUploadError(err error) bool {
 // drop lets go of a buffer that was uploaded or never written to: the node stops pointing at this
 // handle, and the temp file is closed and removed. Readers keep their own descriptors (readerOf).
 func (h *fileHandle) drop(tmp *os.File) {
+	h.detach()
+	_ = tmp.Close()
+	_ = os.Remove(tmp.Name())
+}
+
+// detach unhooks the buffer from this handle and the handle from its node.
+func (h *fileHandle) detach() {
 	h.mu.Lock()
 	h.tmp = nil
 	h.mu.Unlock()
@@ -2289,9 +2341,6 @@ func (h *fileHandle) drop(tmp *os.File) {
 		fn.handle = nil
 	}
 	fn.mu.Unlock()
-
-	_ = tmp.Close()
-	_ = os.Remove(tmp.Name())
 }
 
 // settle uploads a buffer whose upload delay ran out, unless something took it back first.
@@ -2321,16 +2370,44 @@ func (h *fileHandle) unpark(dirty bool) bool {
 	h.dirty = dirty
 	if dirty {
 		h.retryIn = 0 // taken back to upload again: a fresh start, not the next step of a backoff
+		h.failed = false
 	}
 	timer := h.timer
 	h.timer = nil
 	h.mu.Unlock()
 
-	if timer != nil {
-		timer.Stop()
-		h.node.mountState().trackDelayed(h, false)
+	if timer == nil {
+		h.node.mountState().trackKept(h, false)
+		return true
 	}
+	timer.Stop()
+	h.node.mountState().trackDelayed(h, false)
 	return true
+}
+
+// abandon lets go of a buffer parked with no timer once nothing can take it back any more: on
+// unmount, or when the kernel forgets the file. An excluded name was never going to upload, so its
+// temp file is removed. A buffer whose upload failed for good is the only copy of a save, so only
+// its descriptor is closed, and the temp file stays where the log says for manual recovery.
+func (h *fileHandle) abandon() {
+	h.mu.Lock()
+	if !h.parked || h.timer != nil {
+		h.mu.Unlock()
+		return
+	}
+	h.parked = false
+	tmp, failed := h.tmp, h.failed
+	h.mu.Unlock()
+
+	h.node.mountState().trackKept(h, false)
+	if !failed {
+		h.drop(tmp)
+		return
+	}
+
+	slog.Error("upload failed for good, its save is only in the buffer", "path", h.node.displayPath(), "buffer", tmp.Name())
+	h.detach()
+	_ = tmp.Close()
 }
 
 func (h *fileHandle) hasTmp() bool {
@@ -2519,7 +2596,8 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 
 	// An excluded name (Orca saves "x.3mf.tmp", then renames it) is never uploaded. The buffer
 	// stays parked on the node so renamePending uploads it under the real name, or Unlink drops it.
-	// ponytail: a parked buffer never renamed or unlinked stays in $TMPDIR until the daemon exits
+	// Unmount, or the kernel forgetting the file, removes it (abandon).
+	// ponytail: a parked buffer never renamed or unlinked stays in $TMPDIR until one of those
 	if dirty && parent.st.excluded(name) {
 		h.park(tmp, 0)
 		return 0

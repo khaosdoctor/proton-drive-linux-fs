@@ -89,7 +89,7 @@ The delay is there because a lot of apps save in several steps. FreeCAD, for exa
 - **Failed upload**: we keep the buffer and try again after 30 seconds, then wait twice as long after each failure, up to 30 minutes. The log tells you where the temp file is, so you never lose a save because the network failed.
 - **Refused upload**: when Proton refuses the upload itself (the name is taken, the folder is gone, you're out of space), retrying won't help, so we stop, log an error with the temp file's path and show the failure in the tray's Recent menu. The file stays on the mount, and renaming it, saving it again or deleting it starts over.
 
-A file with a name in `-exclude` is kept the same way, just without a timer. It stays local until you rename it to something outside the list.
+A file with a name in `-exclude` is kept the same way, just without a timer. It stays local until you rename it to something outside the list. If nothing renames or deletes it, its temp file is removed on unmount, or earlier if the kernel forgets the file, since it was never going to be uploaded. The temp file of a refused upload is never removed this way: unmount leaves it in place and logs its path.
 
 ```mermaid
 sequenceDiagram
