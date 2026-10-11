@@ -94,7 +94,7 @@ func runTray(args []string) int {
 		Version:    version,
 		Commit:     commit,
 		Mounted:    func() bool { return isMounted(mp) },
-		LoggedIn:   func() bool { _, err := auth.Load(); return err == nil },
+		LoggedIn:   auth.LoggedInCheck(),
 	})
 
 	return 0

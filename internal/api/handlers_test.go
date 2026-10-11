@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -214,6 +215,39 @@ func TestHandleLogsInvalidLevel(t *testing.T) {
 	}
 }
 
+// TestHandleLogsEndsWhenScanStops covers the scan loop stopping while the client is still
+// connected: a fake journalctl prints a line over the scanner's 1 MiB limit and then stays alive
+// like -f does. The handler must kill it and end the response instead of waiting on it.
+func TestHandleLogsEndsWhenScanStops(t *testing.T) {
+	dir := t.TempDir()
+	script := "#!/bin/sh\nhead -c 1100000 /dev/zero | tr '\\0' x\necho\nexec sleep 30\n"
+	if err := os.WriteFile(filepath.Join(dir, "journalctl"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	srv := newTestServer(Deps{Status: func() state.Status { return state.Status{} }})
+	defer srv.Close()
+
+	res, err := http.Get(srv.URL + "/v1/logs?follow=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = res.Body.Close() }()
+
+	bodyDone := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(io.Discard, res.Body)
+		close(bodyDone)
+	}()
+
+	select {
+	case <-bodyDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("log stream did not end after the scan loop stopped; journalctl was left running")
+	}
+}
+
 func TestValidLevel(t *testing.T) {
 	for _, level := range []string{"emerg", "debug", "0", "7"} {
 		if !validLevel(level) {
@@ -327,6 +361,32 @@ func TestFreshClientPerRequestDoesNotLeakSockets(t *testing.T) {
 	}
 	if after-before > 2 {
 		t.Fatalf("socket fds grew from %d to %d over 200 requests", before, after)
+	}
+}
+
+// TestSilentConnIsClosed covers a client that connects and never sends a request: the server must
+// hang up on it after readHeaderTimeout instead of holding the conn open forever.
+func TestSilentConnIsClosed(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	orig := readHeaderTimeout
+	readHeaderTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { readHeaderTimeout = orig })
+
+	srv, err := Start(Deps{Status: func() state.Status { return state.Status{} }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	conn, err := net.Dial("unix", srv.sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, err := io.Copy(io.Discard, conn); err != nil {
+		t.Fatalf("server kept a silent conn open: %v", err)
 	}
 }
 

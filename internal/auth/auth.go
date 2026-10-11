@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/ProtonMail/gluon/async"
 	"github.com/ProtonMail/gopenpgp/v2/crypto"
@@ -27,6 +28,9 @@ const AppVersion = "macos-drive@1.0.0-alpha.1+rclone"
 
 // keyringService is the OS keyring service name the key password is stored under, keyed by username.
 const keyringService = "proton-drive-fs"
+
+// keyringGet is Load's keyring read, swapped in tests to count reads.
+var keyringGet = keyring.Get
 
 // Session holds the credentials needed to restore a Proton Drive client without logging in again.
 type Session struct {
@@ -209,7 +213,7 @@ func Load() (*Session, error) {
 		return &s, nil
 	}
 
-	encoded, err := keyring.Get(keyringService, s.Username)
+	encoded, err := keyringGet(keyringService, s.Username)
 	if err != nil {
 		return nil, errors.New("no key password in the session file or OS keyring; run \"proton-drive-fs login\" again")
 	}
@@ -220,6 +224,44 @@ func Load() (*Session, error) {
 	}
 
 	return &s, nil
+}
+
+// LoggedInCheck returns the tray's periodic logged-in check: whether Load succeeds, re-running Load
+// only on the first call and whenever the session file's mtime or size changed since the last one,
+// and answering from that result otherwise. A missing file is logged out at once. Load reaches the
+// OS keyring, and go-keyring calls Unlock on every Get, so polling Load itself would pop an unlock
+// prompt every few seconds while the keyring is locked, block the poller until it is answered, and
+// leave a D-Bus signal channel behind per prompt. The returned func is not safe for concurrent use;
+// the tray's single poll goroutine is its only caller.
+// ponytail: a keyring entry removed while the session file stays unchanged isn't noticed until the
+// file changes (a login, a logout, a token refresh) or the daemon restarts.
+func LoggedInCheck() func() bool {
+	var (
+		checked  bool
+		modTime  time.Time
+		size     int64
+		loggedIn bool
+	)
+
+	return func() bool {
+		path, err := sessionPath()
+		if err != nil {
+			return false
+		}
+
+		info, err := os.Stat(path)
+		if err != nil {
+			checked = false
+			return false
+		}
+		if checked && info.ModTime().Equal(modTime) && info.Size() == size {
+			return loggedIn
+		}
+
+		_, err = Load()
+		checked, modTime, size, loggedIn = true, info.ModTime(), info.Size(), err == nil
+		return loggedIn
+	}
 }
 
 // Tokens returns the current UID and access token, safe to call concurrently with the

@@ -173,7 +173,14 @@ func handleLogs(done <-chan struct{}) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		defer func() { _ = cmd.Wait() }()
+		// Cancel before Wait: defers run last-in-first-out, so the deferred cancel above would only
+		// fire after Wait returned. When the scan loop below stops on its own while the client is
+		// still connected (a line over the scanner's limit, a write error), a follow journalctl never
+		// exits by itself and Wait would block on it forever.
+		defer func() {
+			cancel()
+			_ = cmd.Wait()
+		}()
 
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")

@@ -27,9 +27,16 @@ type Options struct {
 	ForceStderr bool
 }
 
-// Setup builds the process-wide logger, installs it as slog's default, and returns it alongside
-// a func that flushes pending records and stops the writer goroutine. Call the func on shutdown
-// (or defer it right after Setup).
+// stopPrevious stops the writer of the logger the last Setup installed. The daemon calls Setup
+// twice (run's plain-info logger, then mount's -log-level one), and the first writer goroutine,
+// its ticker and its 4096-slot channel would otherwise live until exit with nothing logging to
+// them. Setup only runs during single-goroutine startup, so this needs no lock.
+var stopPrevious func()
+
+// Setup builds the process-wide logger, installs it as slog's default, stops the writer of the
+// logger a previous Setup installed (flushing what it still had queued), and returns the new
+// logger alongside a func that flushes pending records and stops its writer goroutine. Call the
+// func on shutdown (or defer it right after Setup).
 func Setup(opts Options) (*slog.Logger, func()) {
 	tag := opts.Tag
 	if tag == "" {
@@ -56,6 +63,12 @@ func Setup(opts Options) (*slog.Logger, func()) {
 	h, stop := newAsyncHandler(s, level)
 	logger := slog.New(h)
 	slog.SetDefault(logger)
+
+	// Stopped only after the new default is in place, so nothing logs into the old one meanwhile.
+	if stopPrevious != nil {
+		stopPrevious()
+	}
+	stopPrevious = stop
 	return logger, stop
 }
 

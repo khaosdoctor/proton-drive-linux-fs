@@ -345,7 +345,8 @@ func runMount(args []string) int {
 	}
 
 	// This process is the actual daemon (run directly with -foreground, or re-exec'd detached by
-	// the branch above): it owns the real logger, replacing the plain-info one run() installed.
+	// the branch above): it owns the real logger, replacing (and stopping) the plain-info one run()
+	// installed.
 	_, stopLog := logx.Setup(logx.Options{Level: level, Tag: journalTag, ForceStderr: *logStderr})
 	defer stopLog()
 
@@ -438,7 +439,7 @@ func runMount(args []string) int {
 			Version:    version,
 			Commit:     commit,
 			Mounted:    func() bool { return isMounted(mountpoint) },
-			LoggedIn:   func() bool { _, err := auth.Load(); return err == nil },
+			LoggedIn:   auth.LoggedInCheck(),
 			OnQuit:     stop,
 		})
 	}
