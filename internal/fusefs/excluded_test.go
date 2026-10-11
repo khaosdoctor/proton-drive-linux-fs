@@ -5,7 +5,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
 	proton "github.com/henrybear327/go-proton-api"
@@ -69,6 +71,27 @@ func TestUnmountLetsGoOfKeptBuffers(t *testing.T) {
 	}
 	if len(st.kept) != 0 {
 		t.Errorf("%d buffers still kept after unmount", len(st.kept))
+	}
+}
+
+func TestSaveUnsavedFitsAMaximalName(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	tmp, err := os.CreateTemp(t.TempDir(), "buf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tmp.Close() }()
+
+	name := strings.Repeat("é", 127) + "x" // 255 bytes, the longest name a file can have
+	saved, err := saveUnsaved(tmp, name)
+	if err != nil {
+		t.Fatalf("saveUnsaved with a %d-byte name = %v, want the buffer moved", len(name), err)
+	}
+	if base := filepath.Base(saved); !utf8.ValidString(base) || len(base) > 255 {
+		t.Errorf("saved as %q, want a valid name of at most 255 bytes", base)
+	}
+	if exists(tmp.Name()) {
+		t.Error("buffer still in the temp dir")
 	}
 }
 

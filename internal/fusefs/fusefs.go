@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -2851,6 +2852,23 @@ func (h *fileHandle) keepUnsaved(tmp *os.File) {
 	slog.Error("save not uploaded, buffer moved for recovery", "path", where, "saved", saved)
 }
 
+// unsavedNameMax caps the original name's part of a file in state.UnsavedDir. The time and random
+// parts before it take about 27 bytes, and a name may be up to 255 (NAME_MAX), so a long name
+// left whole fails CreateTemp with ENAMETOOLONG and its save stays in $TMPDIR.
+const unsavedNameMax = 200
+
+// truncateName cuts name to at most max bytes, back to the start of a UTF-8 character.
+func truncateName(name string, max int) string {
+	if len(name) <= max {
+		return name
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(name[cut]) {
+		cut--
+	}
+	return name[:cut]
+}
+
 // saveUnsaved moves tmp's file into state.UnsavedDir as "<time>-<random>-<name>", by a rename on
 // the same filesystem or a copy across them, and returns its new path.
 func saveUnsaved(tmp *os.File, name string) (string, error) {
@@ -2862,7 +2880,7 @@ func saveUnsaved(tmp *os.File, name string) (string, error) {
 		return "", err
 	}
 
-	dst, err := os.CreateTemp(dir, time.Now().Format("20060102-150405")+"-*-"+name)
+	dst, err := os.CreateTemp(dir, time.Now().Format("20060102-150405")+"-*-"+truncateName(name, unsavedNameMax))
 	if err != nil {
 		return "", err
 	}
