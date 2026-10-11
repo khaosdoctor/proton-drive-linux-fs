@@ -36,6 +36,10 @@ You can only have one writer per file at a time. Two apps writing to the same fi
 
 The whole file is buffered locally while it's open, and the whole thing uploads again after you close it and its [upload delay](usage.md#mount) passes. We don't do partial uploads, so editing a really big file means uploading all of it again.
 
+**What happens to a save if the upload fails?**
+
+We keep it on the mount and keep retrying, waiting longer each time. If the mount stops before it uploads, the file is moved to `~/.local/state/proton-drive-fs/unsaved/` instead of being lost. Check [A save didn't reach Proton](troubleshooting.md#a-save-didnt-reach-proton).
+
 **Is there a trash or restore?**
 
 Not yet. Deleting a file removes it from the mount and from Proton, and you can't restore it through proton-drive-fs today.

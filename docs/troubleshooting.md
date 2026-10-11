@@ -197,6 +197,19 @@ systemctl --user reset-failed proton-drive-fs
 systemctl --user restart proton-drive-fs
 ```
 
+## A save didn't reach Proton
+
+When an upload fails, we keep the file on the mount and try again: first after 30s, then waiting twice as long each time, up to 30 minutes between tries. Renaming the file or saving it again starts over right away. The tray's Recent menu and the logs show each failure.
+
+Some failures can't be fixed by retrying (another file already has that name, or the account needs a paid plan). For those we stop, log an error with the path of the local copy, and show "gave up" in the tray's Recent menu. Rename the file or save it again to try once more.
+
+If the mount stops while a save is still waiting or failing, we try to upload it one more time. Whatever is still not uploaded after a minute is moved to `$XDG_STATE_HOME/proton-drive-fs/unsaved/` (`~/.local/state/proton-drive-fs/unsaved/` by default), named `<time>-<random>-<original name>`, and the log says which file it was. The same happens to a refused save when another file is renamed over it. Nothing in that folder is uploaded or cleaned up for you, so copy what you need back into the mount and delete the rest:
+
+```sh
+ls -l ~/.local/state/proton-drive-fs/unsaved/
+journalctl --user -t proton-drive-fs | grep "save not uploaded"
+```
+
 ## Read the logs
 
 The mount daemon logs to the systemd user journal under the `proton-drive-fs` identifier.
@@ -226,6 +239,7 @@ If your distro doesn't have a systemd journal, or you pass `-log-stderr`, the da
 | On-disk block cache | `$XDG_CACHE_HOME/proton-drive-fs/blocks` (`-cache-dir`) |
 | Thumbnails | `$XDG_CACHE_HOME/thumbnails` (`-thumbnail-dir`) |
 | Mount log  | `$XDG_STATE_HOME/proton-drive-fs/mount.log` |
+| Saves that never uploaded | `$XDG_STATE_HOME/proton-drive-fs/unsaved/` |
 | Status snapshot (pid, version, transfers) | `$XDG_RUNTIME_DIR/proton-drive-fs/status.json` |
 | Pause marker | `$XDG_RUNTIME_DIR/proton-drive-fs/paused` |
 | Lockfile | `$XDG_RUNTIME_DIR/proton-drive-fs/mount.lock` |
