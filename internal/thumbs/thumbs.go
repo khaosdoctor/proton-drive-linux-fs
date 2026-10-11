@@ -120,6 +120,20 @@ func (s *Store) Write(relPath string, mtime time.Time, size int64, img []byte) e
 	return nil
 }
 
+// cacheSizes are every size directory the standard defines. Write only fills normal and large,
+// but a file manager may have added the bigger ones for the same URI.
+var cacheSizes = []string{"normal", "large", "x-large", "xx-large"}
+
+// Remove deletes the thumbnails cached for relPath in every size directory, for a file that was
+// deleted or renamed away. Left behind, they pile up for paths that no longer exist, and a new
+// file taking the path over with the same mtime would show the old preview.
+func (s *Store) Remove(relPath string) {
+	name := s.fileName(relPath)
+	for _, dir := range cacheSizes {
+		_ = os.Remove(filepath.Join(s.dir, dir, name)) // usually ENOENT: most files have no preview
+	}
+}
+
 // fit scales src down so neither edge exceeds max, preserving the aspect ratio. An image that
 // already fits is returned untouched.
 func fit(src image.Image, max int) image.Image {

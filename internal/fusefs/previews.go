@@ -182,6 +182,10 @@ func (st *mountState) generateExternalThumb(ctx context.Context, job externalThu
 
 // queueThumbs fetches previews for the files in a fresh listing that are not already cached.
 // It runs off the FUSE handler goroutine because the freshness check reads the cache from disk.
+// ponytail: runs for every fetched listing, so a crawler (find, an indexer) previews whatever it
+// walks. Limiting it to Readdir would not help: find reads folders through Readdir too, and the
+// fetch is shared by Readdir and Lookup, so telling them apart means plumbing the caller through
+// load and finishLoad.
 func (st *mountState) queueThumbs(dirPath string, children []*drive.Node) {
 	if st.thumbs == nil {
 		return
@@ -228,6 +232,17 @@ func (st *mountState) queueThumbs(dirPath string, children []*drive.Node) {
 			slog.Debug("external thumbnail queue full, skipping", "path", relPath)
 		}
 	}
+}
+
+// forgetThumbs removes the cached thumbnails of a file this mount deleted or renamed away.
+// ponytail: the path itself only. A trashed or moved folder leaves its descendants' thumbnails
+// behind (finding them means listing the whole subtree), and so does a delete or rename made on
+// another device, which reaches us as an event that expires listings, not through removeChild.
+func (st *mountState) forgetThumbs(relPath string) {
+	if st.thumbs == nil {
+		return
+	}
+	st.thumbs.Remove(relPath)
 }
 
 // claimThumb reports whether this revision's thumbnail still needs fetching, marking it as

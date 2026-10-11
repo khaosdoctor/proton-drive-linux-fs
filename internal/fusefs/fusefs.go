@@ -1338,6 +1338,7 @@ func (d *dirNode) removeChild(name string) {
 	node, gen := d.node, d.gen
 	d.mu.Unlock()
 
+	d.st.forgetThumbs(path.Join(d.path, name)) // delete, rename source, trashed rename destination
 	if removed != nil {
 		d.st.forgetParent(removed.Link.LinkID)
 	}

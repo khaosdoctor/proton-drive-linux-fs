@@ -158,6 +158,32 @@ func TestFresh(t *testing.T) {
 	}
 }
 
+func TestRemoveDropsEverySize(t *testing.T) {
+	s := newStore(t)
+
+	if err := s.Write("a.jpg", time.Unix(1700000000, 0), 0, sampleJPEG(t, 64, 64)); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := s.Write("keep.jpg", time.Unix(1700000000, 0), 0, sampleJPEG(t, 64, 64)); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	// A size only a file manager writes, for the same URI.
+	if err := writeAtomic(filepath.Join(s.dir, "x-large"), s.fileName("a.jpg"), []byte("png")); err != nil {
+		t.Fatalf("writeAtomic: %v", err)
+	}
+
+	s.Remove("a.jpg")
+
+	for _, dir := range cacheSizes {
+		if _, err := os.Stat(filepath.Join(s.dir, dir, s.fileName("a.jpg"))); !os.IsNotExist(err) {
+			t.Fatalf("%s thumbnail for a.jpg still there after Remove (stat err %v)", dir, err)
+		}
+	}
+	if !s.Fresh("keep.jpg", time.Unix(1700000000, 0)) {
+		t.Fatal("Remove took another file's thumbnail with it")
+	}
+}
+
 // countingReader counts the bytes read through it; seeks are free.
 type countingReader struct {
 	*bytes.Reader
