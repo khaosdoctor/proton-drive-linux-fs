@@ -215,28 +215,49 @@ func TestGetRawRetriesTransportError(t *testing.T) {
 	}
 }
 
-// TestGetRawCancelDuringWaitKeepsWindowClosed checks that a caller whose ctx ends while waiting
-// out a 429 gets its ctx error back without opening the shared backoff window.
-func TestGetRawCancelDuringWaitKeepsWindowClosed(t *testing.T) {
-	origWait, origJitter := rateLimitDefaultWait, rateLimitJitter
+// TestGetRawCancelDuringWait checks that a caller whose ctx ends mid-wait gets its ctx error back,
+// and that only a 429 wait opens the shared backoff window (the server sent it), never a
+// transport-error wait.
+func TestGetRawCancelDuringWait(t *testing.T) {
+	origWait, origJitter, origTransport := rateLimitDefaultWait, rateLimitJitter, transportRetryBase
 	rateLimitDefaultWait = time.Minute
 	rateLimitJitter = func() time.Duration { return 0 }
-	t.Cleanup(func() { rateLimitDefaultWait, rateLimitJitter = origWait, origJitter })
+	transportRetryBase = time.Minute
+	t.Cleanup(func() {
+		rateLimitDefaultWait, rateLimitJitter, transportRetryBase = origWait, origJitter, origTransport
+	})
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusTooManyRequests)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/busy" {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		_ = conn.Close()
 	}))
 	defer server.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-
-	c := &Client{tokenSource: func() (string, string) { return "uid", "access" }}
-	if _, err := c.getRaw(ctx, server.URL+"/block", "tok"); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("err %v, want context.DeadlineExceeded", err)
-	}
-	if _, limited := c.RateLimited(); limited {
-		t.Error("backoff window opened by a caller's own deadline")
+	for _, tc := range []struct {
+		path       string
+		wantWindow bool
+	}{
+		{"/busy", true},
+		{"/drop", false},
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		c := &Client{tokenSource: func() (string, string) { return "uid", "access" }}
+		_, err := c.getRaw(ctx, server.URL+tc.path, "tok")
+		cancel()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("%s: err %v, want context.DeadlineExceeded", tc.path, err)
+		}
+		if _, limited := c.RateLimited(); limited != tc.wantWindow {
+			t.Errorf("%s: backoff window open = %v, want %v", tc.path, limited, tc.wantWindow)
+		}
 	}
 }
 

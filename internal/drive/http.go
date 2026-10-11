@@ -190,11 +190,15 @@ func (c *Client) getRawRetrying(ctx context.Context, url, token string) ([]byte,
 			wait = min(wait+rateLimitJitter(), maxRateLimitWait)
 		}
 
-		// A caller giving up mid-wait (Thumbnail's deadline, an interrupted FUSE read) says nothing
-		// about the server, so it leaves the shared window alone: opening it would fail every
-		// listing for 30s over one impatient caller.
+		// A caller giving up mid-wait (Thumbnail's deadline, an interrupted FUSE read) still leaves
+		// the server's 429/503 standing, and a Retry-After longer than the caller's deadline would
+		// otherwise never reach the shared window, so listings would keep hitting it. A transport
+		// error says nothing about rate limits, so that wait leaves the window alone.
 		select {
 		case <-ctx.Done():
+			if rateLimited {
+				c.noteRateLimitStatus(status, apiErr, retryAfter)
+			}
 			return nil, status, ctx.Err()
 		case <-time.After(wait):
 		}
