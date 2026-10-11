@@ -215,6 +215,31 @@ func TestGetRawRetriesTransportError(t *testing.T) {
 	}
 }
 
+// TestGetRawCancelDuringWaitKeepsWindowClosed checks that a caller whose ctx ends while waiting
+// out a 429 gets its ctx error back without opening the shared backoff window.
+func TestGetRawCancelDuringWaitKeepsWindowClosed(t *testing.T) {
+	origWait, origJitter := rateLimitDefaultWait, rateLimitJitter
+	rateLimitDefaultWait = time.Minute
+	rateLimitJitter = func() time.Duration { return 0 }
+	t.Cleanup(func() { rateLimitDefaultWait, rateLimitJitter = origWait, origJitter })
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	c := &Client{tokenSource: func() (string, string) { return "uid", "access" }}
+	if _, err := c.getRaw(ctx, server.URL+"/block", "tok"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err %v, want context.DeadlineExceeded", err)
+	}
+	if _, limited := c.RateLimited(); limited {
+		t.Error("backoff window opened by a caller's own deadline")
+	}
+}
+
 // fastRetries shrinks getRawRetrying's waits to a millisecond for the rest of the test.
 func fastRetries(t *testing.T) {
 	origWait, origJitter, origTransport := rateLimitDefaultWait, rateLimitJitter, transportRetryBase

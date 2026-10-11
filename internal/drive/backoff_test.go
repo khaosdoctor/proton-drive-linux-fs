@@ -10,7 +10,7 @@ func TestNoteRateLimitStatusExtendsWindow(t *testing.T) {
 		rateLimit: rateLimit{},
 	}
 
-	c.noteRateLimitStatus(429, nil)
+	c.noteRateLimitStatus(429, nil, 0)
 
 	c.rateLimit.mu.Lock()
 	firstUntil := c.rateLimit.until
@@ -18,7 +18,7 @@ func TestNoteRateLimitStatusExtendsWindow(t *testing.T) {
 
 	time.Sleep(10 * time.Millisecond)
 
-	c.noteRateLimitStatus(429, nil)
+	c.noteRateLimitStatus(429, nil, 0)
 
 	c.rateLimit.mu.Lock()
 	secondUntil := c.rateLimit.until

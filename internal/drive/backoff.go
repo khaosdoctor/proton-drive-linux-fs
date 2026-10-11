@@ -39,7 +39,9 @@ func (c *Client) SetMetaTimeout(d time.Duration) {
 }
 
 // noteRateLimitStatus opens or extends the shared backoff window for a 429/503 response.
-func (c *Client) noteRateLimitStatus(status int, err error) {
+// retryAfter is the response's Retry-After header when the caller has it (getRaw does), 0
+// otherwise.
+func (c *Client) noteRateLimitStatus(status int, err error, retryAfter time.Duration) {
 	if status != http.StatusTooManyRequests && status != http.StatusServiceUnavailable {
 		return
 	}
@@ -49,6 +51,9 @@ func (c *Client) noteRateLimitStatus(status int, err error) {
 		if hint, ok := retryAfterHint(apiErr); ok {
 			wait = hint
 		}
+	}
+	if retryAfter > 0 {
+		wait = retryAfter
 	}
 	if wait > maxRateLimitBackoff {
 		wait = maxRateLimitBackoff
