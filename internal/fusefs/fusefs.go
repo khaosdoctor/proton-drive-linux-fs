@@ -361,6 +361,11 @@ type mountState struct {
 	opTimeout   time.Duration
 	metaTimeout time.Duration
 
+	// cacheListing replaces client.CacheListing when set; tests use it to count listing writes.
+	// It lives here rather than in a package var so a background refresh left running by one test
+	// writes through its own mountState instead of racing the next test's swap.
+	cacheListing func(node *drive.Node, children []*drive.Node)
+
 	// ctx is the mount's own lifetime context, cancelled on unmount. A directory listing fetch
 	// parents its own deadline on this instead of on whichever request's context happened to
 	// trigger it, so one caller cancelling its request never fails every other goroutine waiting
@@ -380,7 +385,8 @@ type mountState struct {
 	delayRules  []delayRule
 
 	// delayed holds every write buffer waiting out its upload delay, so unmount can upload them
-	// instead of losing them; settling counts the ones uploading.
+	// instead of losing them; settling counts the ones uploading, plus the external thumbnail
+	// worker so unmount waits for it to kill its thumbnailer and remove its temp file.
 	delayedMu sync.Mutex
 	delayed   map[*fileHandle]struct{}
 	settling  sync.WaitGroup
@@ -1027,6 +1033,11 @@ func (d *dirNode) relPath() string {
 // by Rmdir, or by a rename over it, is detached, and relPath then returns "", the root's own path:
 // fine for a log line, wrong for anything keyed by the path, such as a thumbnail.
 func (d *dirNode) inTree() bool {
+	// A dirNode never handed to NewInode has no bridge, and IsRoot would dereference it. Every
+	// attached dirNode, root included, carries S_IFDIR; the root's Ino can legitimately be 0.
+	if d.StableAttr().Mode == 0 {
+		return false
+	}
 	if _, parent := d.Parent(); parent != nil {
 		return true
 	}
@@ -1432,13 +1443,11 @@ func (d *dirNode) persistListingLocked(node *drive.Node, children []*drive.Node,
 	}
 	d.persistedGen = gen
 
-	cacheListing(d.client, node, children)
-}
-
-// cacheListing writes one listing to disk; overridden in tests to count writes. See
-// drive.Client.CacheListing.
-var cacheListing = func(c *drive.Client, node *drive.Node, children []*drive.Node) {
-	c.CacheListing(node, children)
+	if d.st != nil && d.st.cacheListing != nil {
+		d.st.cacheListing(node, children)
+		return
+	}
+	d.client.CacheListing(node, children)
 }
 
 // listingPersistDelay is how long a patched listing waits before it is written to disk. Each write
@@ -1557,7 +1566,11 @@ func (d *dirNode) removeChild(name string) {
 	d.gen++
 	d.mu.Unlock()
 
-	d.st.forgetThumbs(path.Join(d.path, name)) // delete, rename source, trashed rename destination
+	// Delete, rename source, trashed rename destination. A detached dir's relPath is "", which
+	// would hit a same-named file at the root instead.
+	if d.inTree() {
+		d.st.forgetThumbs(path.Join(d.relPath(), name))
+	}
 	if removed != nil {
 		d.st.forgetParent(removed.Link.LinkID)
 	}

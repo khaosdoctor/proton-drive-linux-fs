@@ -49,13 +49,10 @@ func TestForgottenDirsLeaveTheRegistry(t *testing.T) {
 // the same folder took over, so its timer can never overwrite a newer listing later.
 func TestForgetSettlesThePendingListingWrite(t *testing.T) {
 	var written [][]*drive.Node
-	orig := cacheListing
-	cacheListing = func(c *drive.Client, n *drive.Node, children []*drive.Node) {
+	st := &mountState{dirs: make(map[string]*dirNode), parentOf: make(map[string]string)}
+	st.cacheListing = func(n *drive.Node, children []*drive.Node) {
 		written = append(written, children)
 	}
-	defer func() { cacheListing = orig }()
-
-	st := &mountState{dirs: make(map[string]*dirNode), parentOf: make(map[string]string)}
 
 	d1 := &dirNode{st: st, node: node("a", "a")}
 	st.register(d1)

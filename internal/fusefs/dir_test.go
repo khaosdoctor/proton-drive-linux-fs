@@ -297,14 +297,11 @@ func TestPersistListingConcurrentWritesStayInGenOrder(t *testing.T) {
 func TestPatchesCoalesceListingWrites(t *testing.T) {
 	var writes int
 	var last []*drive.Node
-	orig := cacheListing
-	cacheListing = func(c *drive.Client, n *drive.Node, children []*drive.Node) {
+	st := &mountState{parentOf: make(map[string]string)}
+	st.cacheListing = func(n *drive.Node, children []*drive.Node) {
 		writes++
 		last = children
 	}
-	defer func() { cacheListing = orig }()
-
-	st := &mountState{parentOf: make(map[string]string)}
 	d := &dirNode{ttl: time.Minute, st: st, node: node("root", "root")}
 
 	const n = 100
@@ -333,15 +330,12 @@ func TestPatchesCoalesceListingWrites(t *testing.T) {
 func TestUnmountFlushWaitsForTheTimersWrite(t *testing.T) {
 	started, release := make(chan struct{}), make(chan struct{})
 	var writes atomic.Int32
-	orig := cacheListing
-	cacheListing = func(c *drive.Client, n *drive.Node, children []*drive.Node) {
+	st := &mountState{parentOf: make(map[string]string)}
+	st.cacheListing = func(n *drive.Node, children []*drive.Node) {
 		writes.Add(1)
 		close(started)
 		<-release
 	}
-	defer func() { cacheListing = orig }()
-
-	st := &mountState{parentOf: make(map[string]string)}
 	d := &dirNode{ttl: time.Minute, st: st, node: node("root", "root")}
 	d.upsertChild(node("l1", "a"))
 
