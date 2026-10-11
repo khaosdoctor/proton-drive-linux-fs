@@ -185,5 +185,23 @@ dockers_v2:
       - linux/arm64
     dockerfile: Dockerfile.goreleaser
 
+# github-native only lists merged pull requests, and everything is pushed straight to main, so
+# the notes came out empty. Build them from the Conventional Commit subjects instead.
 changelog:
-  use: github-native
+  use: git
+  sort: asc
+  filters:
+    exclude:
+      - '^docs(\([[:word:]]+\))??!?:'
+      - '^chore(\([[:word:]]+\))??!?:'
+      - '^test(\([[:word:]]+\))??!?:'
+      - '^merge '
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: Fixes
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: Other
+      order: 999
