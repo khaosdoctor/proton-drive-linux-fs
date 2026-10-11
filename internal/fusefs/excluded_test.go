@@ -2,9 +2,50 @@ package fusefs
 
 import (
 	"context"
+	"net/http"
 	"os"
 	"testing"
+
+	proton "github.com/henrybear327/go-proton-api"
 )
+
+func TestUnmountAndForgetLetGoOfKeptBuffers(t *testing.T) {
+	st := &mountState{excludes: parseExcludes([]string{"*.tmp"})}
+	exists := func(name string) bool {
+		_, err := os.Stat(name)
+		return err == nil
+	}
+	parkExcluded := func(name string) (*fileNode, string) {
+		fn, h := newDelayedHandle(t, st, name)
+		buf := h.tmp.Name()
+		if errno := h.Release(context.Background()); errno != 0 {
+			t.Fatalf("Release = %v, want 0", errno)
+		}
+		return fn, buf
+	}
+
+	forgotten, forgottenBuf := parkExcluded("a.3mf.tmp")
+	_, unmountedBuf := parkExcluded("b.3mf.tmp")
+	_, failed := newDelayedHandle(t, st, "c.3mf")
+	failedBuf := failed.tmp.Name()
+	failed.keepForRetry(failed.sharedTmp(), "c.3mf", proton.APIError{Status: http.StatusNotFound})
+
+	forgotten.OnForget()
+	if exists(forgottenBuf) {
+		t.Error("excluded buffer of a forgotten file still in $TMPDIR")
+	}
+
+	st.flushDelayed()
+	if exists(unmountedBuf) {
+		t.Error("excluded buffer still in $TMPDIR after unmount")
+	}
+	if !exists(failedBuf) {
+		t.Error("unmount removed the only copy of a save whose upload failed for good")
+	}
+	if len(st.kept) != 0 {
+		t.Errorf("%d buffers still kept after unmount", len(st.kept))
+	}
+}
 
 func TestReleaseParksExcludedNameUntilDropped(t *testing.T) {
 	st := &mountState{excludes: parseExcludes([]string{"*.tmp"})}
