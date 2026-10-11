@@ -423,6 +423,14 @@ func (c *Client) Thumbnail(ctx context.Context, n *Node) ([]byte, error) {
 		return nil, errors.New("revision has no thumbnail")
 	}
 
+	// The thumbnail worker calls this with the mount's own ctx, which never expires, so a
+	// preview (a URL lookup and one small download) is bounded here like any metadata call.
+	if c.metaTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.metaTimeout)
+		defer cancel()
+	}
+
 	kr, err := n.Keyring()
 	if err != nil {
 		return nil, err

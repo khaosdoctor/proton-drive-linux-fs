@@ -32,8 +32,8 @@ type rateLimit struct {
 // ETIMEDOUT.
 var ErrRateLimited = errors.New("proton api rate limited, backing off")
 
-// SetMetaTimeout tells the client how long a caller is willing to wait out a rate-limit window
-// before giving up. Called once from fusefs.Mount with Options.MetaTimeout.
+// SetMetaTimeout sets the deadline Thumbnail puts on its requests, since its caller (the
+// thumbnail worker) has none of its own. Called once from fusefs.Mount with Options.MetaTimeout.
 func (c *Client) SetMetaTimeout(d time.Duration) {
 	c.metaTimeout = d
 }
