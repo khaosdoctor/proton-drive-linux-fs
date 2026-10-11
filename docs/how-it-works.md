@@ -173,7 +173,7 @@ We get thumbnails from two places, in this order:
 
 Since we generate thumbnails ourselves, thumbnailer processes are always blocked from reading through the mount, no matter the file size. Otherwise they'd do the same work twice and time out reading remote files through FUSE.
 
-If a preview fails (Proton has none, the network is down, a thumbnailer crashes), we try that file again after 10 minutes. When you delete or rename a file through the mount, we remove its old thumbnails from the cache. Deleting or moving a folder, or changing files from another device, leaves the old thumbnails in place.
+If a preview fails because of the network (a timeout, rate limiting, a Proton server error), we try that file again after 10 minutes. Any other failure, like a broken image or a thumbnailer that exits with an error, isn't retried until the next mount. When you delete or rename a file through the mount, we remove its old thumbnails from the cache. Deleting or moving a folder, or changing files from another device, leaves the old thumbnails in place.
 
 ## Reader denylist
 

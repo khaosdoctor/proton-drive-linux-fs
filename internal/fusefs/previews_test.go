@@ -1,36 +1,77 @@
 package fusefs
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"net"
+	"os/exec"
 	"testing"
 	"time"
+
+	proton "github.com/henrybear327/go-proton-api"
+
+	"github.com/khaosdoctor/proton-drive-linux-fs/internal/drive"
 )
 
-// A failed thumbnail must not stay claimed for the life of the mount: a network outage or a
-// timeout would otherwise block that preview until restart, and the map would grow per failure.
-func TestFailedThumbRetriesLater(t *testing.T) {
+// A transient failure (outage, timeout) retries after thumbRetryAfter instead of blocking that
+// preview until restart. A permanent one (bad image, thumbnailer exit) stays marked, so a folder
+// of files whose thumbnailer fails does not re-download every file every retry period.
+func TestFailedThumbRetriesOnlyTransient(t *testing.T) {
 	prev := thumbRetryAfter
 	thumbRetryAfter = 20 * time.Millisecond
 	t.Cleanup(func() { thumbRetryAfter = prev })
 
 	st := &mountState{thumbInflight: make(map[string]bool)}
-	n := node("l1", "a.jpg")
+	transient := node("l1", "a.jpg")
+	permanent := node("l2", "b.jpg")
 
-	if !st.claimThumb(n) {
-		t.Fatal("first claim refused")
+	for _, n := range []*drive.Node{transient, permanent} {
+		if !st.claimThumb(n) {
+			t.Fatal("first claim refused")
+		}
 	}
-	st.thumbFailed(thumbJob{node: n, relPath: "a.jpg"}, errors.New("network down"))
+	st.finishThumb(thumbJob{node: transient, relPath: "a.jpg"}, nil, fmt.Errorf("get block: %w", context.DeadlineExceeded))
+	st.finishThumb(thumbJob{node: permanent, relPath: "b.jpg"}, nil, errors.New("decode thumbnail: invalid JPEG"))
 
-	if st.claimThumb(n) {
+	if st.claimThumb(transient) {
 		t.Fatal("failed revision claimable again right away; it should wait out thumbRetryAfter")
 	}
 
 	deadline := time.Now().Add(2 * time.Second)
-	for !st.claimThumb(n) {
+	for !st.claimThumb(transient) {
 		if time.Now().After(deadline) {
-			t.Fatal("failed revision still claimed long after thumbRetryAfter")
+			t.Fatal("transiently failed revision still claimed long after thumbRetryAfter")
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+
+	if st.claimThumb(permanent) {
+		t.Fatal("permanently failed revision claimable again; it should stay marked for the mount")
+	}
+}
+
+func TestTransientThumbErr(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"deadline", fmt.Errorf("get: %w", context.DeadlineExceeded), true},
+		{"canceled", context.Canceled, true},
+		{"rate limited", fmt.Errorf("thumbnail: %w", drive.ErrRateLimited), true},
+		{"network", &net.OpError{Op: "dial", Err: errors.New("connection refused")}, true},
+		{"5xx pointer", &proton.APIError{Status: 503}, true},
+		{"5xx value", fmt.Errorf("get: %w", proton.APIError{Status: 502}), true},
+		{"4xx", &proton.APIError{Status: 404}, false},
+		{"decode", errors.New("decode thumbnail: unknown format"), false},
+		{"thumbnailer exit", fmt.Errorf("thumbnailer x: %w", &exec.ExitError{}), false},
+	}
+
+	for _, tc := range tests {
+		if got := transientThumbErr(tc.err); got != tc.want {
+			t.Errorf("%s: transientThumbErr = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
 
