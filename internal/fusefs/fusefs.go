@@ -203,7 +203,6 @@ func Mount(ctx context.Context, mountpoint string, c *drive.Client, root *drive.
 		<-ctx.Done()
 
 		st.flushDelayed()
-		st.flushListings()
 
 		slog.Info("unmounting", "path", mountpoint)
 
@@ -233,6 +232,10 @@ func Mount(ctx context.Context, mountpoint string, c *drive.Client, root *drive.
 		case <-time.After(5 * time.Second):
 		}
 	}
+
+	// Handlers keep running until the server is gone, and a patch from one arms a listing write
+	// whose timer the exiting process never waits for, so the flush runs only once they stopped.
+	st.flushListings()
 
 	// Safety net: if the mount is still present after the shutdown select, try one more time.
 	if isMounted(mountpoint) {
@@ -1408,7 +1411,11 @@ var cachedChildren = func(c *drive.Client, node *drive.Node) ([]*drive.Node, boo
 func (d *dirNode) persistListing(node *drive.Node, children []*drive.Node, gen uint64) {
 	d.persistMu.Lock()
 	defer d.persistMu.Unlock()
+	d.persistListingLocked(node, children, gen)
+}
 
+// persistListingLocked is persistListing for a caller already holding d.persistMu.
+func (d *dirNode) persistListingLocked(node *drive.Node, children []*drive.Node, gen uint64) {
 	if gen < d.persistedGen {
 		return
 	}
@@ -1445,8 +1452,14 @@ func (d *dirNode) schedulePersist() {
 }
 
 // flushListing writes the listing now if a coalesced write is waiting, and is a no-op otherwise,
-// so the timer and an unmount flush racing each other write it once.
+// so the timer and an unmount flush racing each other write it once. persistMu is held from the
+// check through the write, so a flush that finds the write already taken by the timer still waits
+// for it to finish: an unmount flush that returned mid-write would let the process exit under it.
+// Taking persistMu before d.mu is safe because nothing takes persistMu while holding d.mu.
 func (d *dirNode) flushListing() {
+	d.persistMu.Lock()
+	defer d.persistMu.Unlock()
+
 	d.mu.Lock()
 	if d.persistTimer == nil {
 		d.mu.Unlock()
@@ -1454,13 +1467,19 @@ func (d *dirNode) flushListing() {
 	}
 	d.persistTimer.Stop()
 	d.persistTimer = nil
-	// Untracked under d.mu, so a schedulePersist that re-arms right after this can't have its own
-	// tracking undone by this flush.
-	d.st.trackListing(d, false)
 	node, children, gen := d.node, d.children, d.gen
 	d.mu.Unlock()
 
-	d.persistListing(node, children, gen)
+	d.persistListingLocked(node, children, gen)
+
+	// d stays tracked until its write is done, so an unmount flushListings running meanwhile still
+	// finds it and waits on persistMu above. A schedulePersist that re-armed during the write keeps
+	// its tracking.
+	d.mu.Lock()
+	if d.persistTimer == nil {
+		d.st.trackListing(d, false)
+	}
+	d.mu.Unlock()
 }
 
 // discardListing cancels a coalesced listing write still waiting, without writing it.

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -324,6 +325,49 @@ func TestPatchesCoalesceListingWrites(t *testing.T) {
 	}
 	if len(last) != n-1 {
 		t.Fatalf("written listing has %d entries, want %d", len(last), n-1)
+	}
+}
+
+// TestUnmountFlushWaitsForTheTimersWrite checks the unmount flush does not return while the timer's
+// own listing write is still running, since the process exits right after it.
+func TestUnmountFlushWaitsForTheTimersWrite(t *testing.T) {
+	started, release := make(chan struct{}), make(chan struct{})
+	var writes atomic.Int32
+	orig := cacheListing
+	cacheListing = func(c *drive.Client, n *drive.Node, children []*drive.Node) {
+		writes.Add(1)
+		close(started)
+		<-release
+	}
+	defer func() { cacheListing = orig }()
+
+	st := &mountState{parentOf: make(map[string]string)}
+	d := &dirNode{ttl: time.Minute, st: st, node: node("root", "root")}
+	d.upsertChild(node("l1", "a"))
+
+	go d.flushListing() // what the AfterFunc timer runs
+	<-started
+
+	flushed := make(chan struct{})
+	go func() {
+		st.flushListings()
+		close(flushed)
+	}()
+
+	select {
+	case <-flushed:
+		t.Fatal("flushListings returned while the timer's write was still running")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case <-flushed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("flushListings never returned once the write finished")
+	}
+	if n := writes.Load(); n != 1 {
+		t.Fatalf("writes = %d, want the one the timer started", n)
 	}
 }
 
