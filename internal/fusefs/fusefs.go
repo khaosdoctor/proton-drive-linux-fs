@@ -1023,6 +1023,16 @@ func (d *dirNode) relPath() string {
 	return d.Path(nil)
 }
 
+// inTree reports whether this directory is still attached to the mount's inode tree. One removed
+// by Rmdir, or by a rename over it, is detached, and relPath then returns "", the root's own path:
+// fine for a log line, wrong for anything keyed by the path, such as a thumbnail.
+func (d *dirNode) inTree() bool {
+	if _, parent := d.Parent(); parent != nil {
+		return true
+	}
+	return d.IsRoot()
+}
+
 // listing returns the in-memory listing as it is right now, nil when none was loaded.
 func (d *dirNode) listing() []*drive.Node {
 	d.mu.Lock()
@@ -1381,7 +1391,8 @@ func (d *dirNode) finishLoad(done chan struct{}) {
 		d.st.setParent(ch.Link.LinkID, parentID)
 	}
 
-	if d.st.thumbs != nil {
+	// A directory removed while this fetch was in flight would key its thumbnails under the root.
+	if d.st.thumbs != nil && d.inTree() {
 		go d.st.queueThumbs(d.relPath(), children)
 	}
 }

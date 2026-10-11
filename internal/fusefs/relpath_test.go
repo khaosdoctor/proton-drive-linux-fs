@@ -37,3 +37,23 @@ func TestRenamedDirPathFollowsTheTree(t *testing.T) {
 		t.Errorf("root.relPath() = %q, want empty", got)
 	}
 }
+
+// TestDetachedDirIsNotInTree checks a folder removed from the tree (Rmdir, or a rename over it)
+// reports itself detached, so finishLoad does not key its thumbnails under the root's "" path.
+func TestDetachedDirIsNotInTree(t *testing.T) {
+	ctx := context.Background()
+	root := &dirNode{node: node("root", "root")}
+	fs.NewNodeFS(root, &fs.Options{})
+
+	a := &dirNode{node: node("a", "a")}
+	root.AddChild("a", root.NewPersistentInode(ctx, a, fs.StableAttr{Mode: fuse.S_IFDIR, Ino: 2}), true)
+	if !root.inTree() || !a.inTree() {
+		t.Fatal("root and a should both be in the tree")
+	}
+
+	// What go-fuse does to the tree once an Rmdir handler returns success.
+	root.RmChild("a")
+	if a.inTree() {
+		t.Fatalf("a.inTree() = true after removal (relPath %q), want false", a.relPath())
+	}
+}
