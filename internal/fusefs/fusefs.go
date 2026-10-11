@@ -204,6 +204,7 @@ func Mount(ctx context.Context, mountpoint string, c *drive.Client, root *drive.
 		<-ctx.Done()
 
 		st.flushDelayed()
+		st.flushListings()
 
 		slog.Info("unmounting", "path", mountpoint)
 
@@ -404,6 +405,11 @@ type mountState struct {
 	dirs          map[string]*dirNode // folder LinkID -> its inode
 	parentOf      map[string]string   // child LinkID -> parent LinkID
 	thumbInflight map[string]bool     // revision key -> queued, being fetched, or given up on
+
+	// dirtyListings holds every directory with a coalesced listing write still waiting (see
+	// dirNode.schedulePersist), so unmount can write them out (see flushListings).
+	listingsMu    sync.Mutex
+	dirtyListings map[*dirNode]struct{}
 }
 
 // recentTransfer is one finished upload or download, kept for the tray's Recent submenu and the
@@ -974,6 +980,10 @@ type dirNode struct {
 	// clobbering newer content with older.
 	persistMu    sync.Mutex
 	persistedGen uint64
+
+	// persistTimer is non-nil while a coalesced listing write is waiting (see schedulePersist).
+	// Guarded by mu.
+	persistTimer *time.Timer
 }
 
 // setNode replaces the node backing this directory, e.g. after a remote listing refresh.
@@ -1385,7 +1395,82 @@ func (d *dirNode) persistListing(node *drive.Node, children []*drive.Node, gen u
 	}
 	d.persistedGen = gen
 
-	d.client.CacheListing(node, children)
+	cacheListing(d.client, node, children)
+}
+
+// cacheListing writes one listing to disk; overridden in tests to count writes. See
+// drive.Client.CacheListing.
+var cacheListing = func(c *drive.Client, node *drive.Node, children []*drive.Node) {
+	c.CacheListing(node, children)
+}
+
+// listingPersistDelay is how long a patched listing waits before it is written to disk. Each write
+// re-marshals the whole folder, so writing on every patch made a bulk copy of N files into one
+// folder write O(N^2) bytes (10k files is ~200 GB); coalescing caps it at one write per folder per
+// delay.
+const listingPersistDelay = 2 * time.Second
+
+// schedulePersist marks the listing dirty and, unless a write is already waiting, arms one for
+// listingPersistDelay from now. The timer is not reset by later patches, so a long bulk copy still
+// writes every listingPersistDelay instead of only once it goes quiet.
+// ponytail: a crash loses at most the last listingPersistDelay of patches to the disk cache, which
+// only serves a cold start once before the background refresh replaces it.
+func (d *dirNode) schedulePersist() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.persistTimer != nil {
+		return
+	}
+	d.persistTimer = time.AfterFunc(listingPersistDelay, d.flushListing)
+	d.st.trackListing(d, true)
+}
+
+// flushListing writes the listing now if a coalesced write is waiting, and is a no-op otherwise,
+// so the timer and an unmount flush racing each other write it once.
+func (d *dirNode) flushListing() {
+	d.mu.Lock()
+	if d.persistTimer == nil {
+		d.mu.Unlock()
+		return
+	}
+	d.persistTimer.Stop()
+	d.persistTimer = nil
+	// Untracked under d.mu, so a schedulePersist that re-arms right after this can't have its own
+	// tracking undone by this flush.
+	d.st.trackListing(d, false)
+	node, children, gen := d.node, d.children, d.gen
+	d.mu.Unlock()
+
+	d.persistListing(node, children, gen)
+}
+
+// trackListing adds d to, or removes it from, the directories with a listing write waiting.
+func (st *mountState) trackListing(d *dirNode, on bool) {
+	st.listingsMu.Lock()
+	defer st.listingsMu.Unlock()
+	if on {
+		if st.dirtyListings == nil {
+			st.dirtyListings = make(map[*dirNode]struct{})
+		}
+		st.dirtyListings[d] = struct{}{}
+		return
+	}
+	delete(st.dirtyListings, d)
+}
+
+// flushListings writes every listing still waiting out listingPersistDelay, so an unmount does
+// not leave the disk cache behind the last patches.
+func (st *mountState) flushListings() {
+	st.listingsMu.Lock()
+	dirty := make([]*dirNode, 0, len(st.dirtyListings))
+	for d := range st.dirtyListings {
+		dirty = append(dirty, d)
+	}
+	st.listingsMu.Unlock()
+
+	for _, d := range dirty {
+		d.flushListing()
+	}
 }
 
 // upsertChild patches one entry into the cached listing, replacing an entry with the same link or
@@ -1396,11 +1481,11 @@ func (d *dirNode) upsertChild(n *drive.Node) {
 	d.mu.Lock()
 	d.children = upsertNode(d.children, n)
 	d.gen++
-	node, children, gen := d.node, d.children, d.gen
+	node := d.node
 	d.mu.Unlock()
 
 	d.st.setParent(n.Link.LinkID, node.Link.LinkID)
-	d.persistListing(node, children, gen)
+	d.schedulePersist()
 }
 
 // removeChild drops the entry named name from the cached listing.
@@ -1409,13 +1494,12 @@ func (d *dirNode) removeChild(name string) {
 	removed, children := removeNode(d.children, name)
 	d.children = children
 	d.gen++
-	node, gen := d.node, d.gen
 	d.mu.Unlock()
 
 	if removed != nil {
 		d.st.forgetParent(removed.Link.LinkID)
 	}
-	d.persistListing(node, children, gen)
+	d.schedulePersist()
 }
 
 // upsertNode returns the listing with the entry n stands for replaced, matched by link id or by

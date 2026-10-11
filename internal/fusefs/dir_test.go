@@ -291,6 +291,42 @@ func TestPersistListingConcurrentWritesStayInGenOrder(t *testing.T) {
 	}
 }
 
+// TestPatchesCoalesceListingWrites checks a burst of upsertChild/removeChild patches writes the
+// folder's listing once, not once per patch, and that the unmount flush writes the final state.
+func TestPatchesCoalesceListingWrites(t *testing.T) {
+	var writes int
+	var last []*drive.Node
+	orig := cacheListing
+	cacheListing = func(c *drive.Client, n *drive.Node, children []*drive.Node) {
+		writes++
+		last = children
+	}
+	defer func() { cacheListing = orig }()
+
+	st := &mountState{parentOf: make(map[string]string)}
+	d := &dirNode{ttl: time.Minute, st: st, node: node("root", "root")}
+
+	const n = 100
+	for i := range n {
+		d.upsertChild(node(fmt.Sprintf("l%d", i), fmt.Sprintf("f%d", i)))
+	}
+	d.removeChild("f0")
+
+	if writes != 0 {
+		t.Fatalf("writes = %d before the delay, want the patches coalesced into none yet", writes)
+	}
+
+	st.flushListings()
+	st.flushListings() // nothing left: must not write again
+
+	if writes != 1 {
+		t.Fatalf("writes = %d, want exactly one for %d patches", writes, n+1)
+	}
+	if len(last) != n-1 {
+		t.Fatalf("written listing has %d entries, want %d", len(last), n-1)
+	}
+}
+
 func TestShouldPublish(t *testing.T) {
 	tests := []struct {
 		name        string
