@@ -44,10 +44,13 @@ Code is in `internal/fusefs/fusefs.go`. Detail is in section 7 of `NOTAS-DE-ARQU
 - A released buffer can be parked (`fileHandle.park`). A name matching `exclude` parks with no timer. Any other name parks for its upload delay, then `settle` uploads it.
 - A rename, a reopen for write, or an unlink takes the parked buffer back (`unpark`). `unpark` returns false when the buffer was no longer parked, so two paths never upload the same buffer.
 - A rename on either path (`renamePending` for a new file, the regular `Rename` for an existing one) restarts a parked buffer's wait under the new name.
-- The buffer stays on the node (`fn.handle`) until the upload succeeds, then `drop` removes it. A failed upload calls `keepForRetry`, which parks it again for `uploadRetryDelay`; a close has already returned success, so dropping it would lose the save.
+- A rename over a file marks the destination's write buffer gone (`dirNode.replace`). A parked one is dropped right away, and `Release` drops one still open or uploading instead of uploading it, trashing a new file an upload already in flight created. The renamed file waits out that upload (`awaitReplaced`, under the destination's `uploadMu`) before it uploads.
+- An unlink of a pending file still open or uploading marks its buffer gone (`unlinkPending`), so `Release` drops it instead of uploading it.
+- The buffer stays on the node (`fn.handle`) until the upload succeeds, then `drop` removes it. A failed upload calls `keepForRetry`, which parks it again after a wait starting at `uploadRetryDelay` (30s) and doubling up to `uploadRetryMax` (30min); a close has already returned success, so dropping it would lose the save. A permanent error (`permanentUploadError`) parks it with no timer and keeps the temp file.
+- Buffers parked with no timer are tracked in `st.kept`. Unmount and `fileNode.OnForget` call `abandon`, which removes an excluded buffer's temp file and keeps one whose upload gave up.
 - Readers of a buffered file get their own descriptor (`readerOf`), so they keep working after `drop` removes the temp file.
 - A parked new file is not on the drive yet, so lookups and listings include pending children.
-- Unmount flushes waiting buffers (`mountState.flushDelayed`) before the server unmounts.
+- Unmount flushes waiting buffers (`mountState.flushDelayed`) before the server unmounts, and writes coalesced folder listings (`mountState.flushListings`) after the server stops serving.
 
 ## Conventions
 
