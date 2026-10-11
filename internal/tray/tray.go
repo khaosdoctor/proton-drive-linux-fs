@@ -476,10 +476,7 @@ func (a *app) openRecentAt(i int) func() {
 			return
 		}
 
-		dir := filepath.Dir(filepath.Join(a.opts.Mountpoint, p))
-		if err := exec.Command("xdg-open", dir).Start(); err != nil {
-			slog.Warn("xdg-open failed", "path", dir, "err", err)
-		}
+		start([]string{"xdg-open", filepath.Dir(filepath.Join(a.opts.Mountpoint, p))})
 	}
 }
 
@@ -703,9 +700,7 @@ func setPausedViaAPIOrFile(paused bool) error {
 }
 
 func (a *app) showFolder() {
-	if err := exec.Command("xdg-open", a.opts.Mountpoint).Start(); err != nil {
-		slog.Warn("xdg-open failed", "path", a.opts.Mountpoint, "err", err)
-	}
+	start([]string{"xdg-open", a.opts.Mountpoint})
 }
 
 // configDir is the directory holding the config file the tray was started with, i.e. what "Open
@@ -718,10 +713,7 @@ func (a *app) configDir() string {
 }
 
 func (a *app) showConfigFolder() {
-	dir := a.configDir()
-	if err := exec.Command("xdg-open", dir).Start(); err != nil {
-		slog.Warn("xdg-open failed", "path", dir, "err", err)
-	}
+	start([]string{"xdg-open", a.configDir()})
 }
 
 // showLogs follows the journal when the mount logs there, and otherwise opens the log file.
@@ -738,9 +730,7 @@ func (a *app) showLogs() {
 		return
 	}
 
-	if err := exec.Command("xdg-open", a.opts.LogPath).Start(); err != nil {
-		slog.Warn("xdg-open failed", "path", a.opts.LogPath, "err", err)
-	}
+	start([]string{"xdg-open", a.opts.LogPath})
 }
 
 // startLogin opens a terminal for the login prompts, which need stdin.
@@ -760,6 +750,8 @@ func (a *app) startLogin() {
 	start(argv)
 }
 
+// start runs argv in the background and reaps it, so a long-running daemon embedding the tray
+// does not collect a zombie per click.
 func start(argv []string) {
 	cmd := exec.Command(argv[0], argv[1:]...)
 	if err := cmd.Start(); err != nil {
