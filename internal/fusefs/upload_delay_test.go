@@ -226,6 +226,43 @@ func TestUnmountRetriesReparkedUploadsAndSavesTheRest(t *testing.T) {
 	}
 }
 
+func TestUnmountDeadlineKeepsUploadsStillRunning(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	st := newWriteState()
+	st.uploadDelay = time.Hour
+	d := newTreeDir(st)
+
+	origTimeout, origUpload := unmountFlushTimeout, driveUpload
+	t.Cleanup(func() { unmountFlushTimeout, driveUpload = origTimeout, origUpload })
+	unmountFlushTimeout = 50 * time.Millisecond
+	// A big file: its upload outlasts the unmount deadline and stops only when cancelled.
+	driveUpload = func(ctx context.Context, _ *drive.Client, _ *drive.Node, _ string, _ *drive.Node, _ io.Reader, _ int64, _ time.Time) (*drive.Node, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	_, h := addPending(t, d, "big")
+	buf := h.tmp.Name()
+	_ = h.Release(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		st.flushDelayed()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("unmount flush did not stop at its deadline")
+	}
+
+	saved, _ := filepath.Glob(filepath.Join(stateHome, "proton-drive-fs", "unsaved", "*-big"))
+	if exists(buf) || len(saved) != 1 {
+		t.Errorf("buffer of an upload cut off by the unmount deadline not moved for recovery (saved: %v)", saved)
+	}
+}
+
 func TestFailedMoveKeepsTheTrashedDestinationsEdit(t *testing.T) {
 	st := newWriteState()
 	st.uploadDelay = time.Hour
@@ -441,7 +478,7 @@ func TestSettleUnderExcludedNameParksAgain(t *testing.T) {
 
 	// Renamed to an excluded name while waiting: the settle must not upload it.
 	fn.name = "model.tmp"
-	h.settle()
+	h.settle(context.Background())
 
 	if fn.parkedHandle() != h {
 		t.Fatal("excluded name was not parked after the delay ran out")

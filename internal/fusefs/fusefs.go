@@ -395,6 +395,10 @@ type mountState struct {
 	kept      map[*fileHandle]struct{}
 	settling  sync.WaitGroup
 
+	// closing is set once flushDelayed's deadline passed or its passes ended: an upload failing
+	// from then on keeps its buffer for recovery instead of parking it for a retry.
+	closing atomic.Bool
+
 	// uploads bounds how many files upload at once, so a bulk copy does not open one connection
 	// per file it was handed.
 	uploads sem
@@ -583,20 +587,61 @@ func (st *mountState) trackIn(set *map[*fileHandle]struct{}, h *fileHandle, on b
 	delete(*set, h)
 }
 
+// unmountFlushTimeout bounds flushDelayed's uploads as a whole. It has to fit, with
+// unmountCancelGrace and the moves to state.UnsavedDir after it, inside systemd's default
+// TimeoutStopSec of 90s: past that the unit is SIGKILLed and buffers still in $TMPDIR are lost.
+// A var only so tests can shorten it.
+var unmountFlushTimeout = 60 * time.Second
+
+// unmountCancelGrace is how long flushDelayed waits, once its deadline cancels the uploads still
+// running, for them to return and keep their buffers (keepForRetry while closing).
+const unmountCancelGrace = 5 * time.Second
+
 // flushDelayed uploads every buffer still waiting out its delay and waits for them, so an unmount
 // does not drop a save made just before it. An upload that fails parks its buffer again for a
 // retry, after the snapshot a pass works from, so a second pass gives each of those one more try.
-// Whatever is still parked after that is let go of (abandonKept), its save kept out of $TMPDIR.
+// Both passes share one deadline (unmountFlushTimeout). Whatever is still unsaved after that is
+// kept out of $TMPDIR: an upload cancelled by the deadline keeps its buffer itself (keepForRetry
+// sees closing), and abandonKept takes every buffer still parked.
 // ponytail: a settle the timer started a moment before this may finish after the process exits
 func (st *mountState) flushDelayed() {
+	ctx, cancel := context.WithTimeout(context.Background(), unmountFlushTimeout)
+	defer cancel()
+
 	for range 2 {
-		st.settleDelayed()
+		if !st.settleDelayed(ctx) {
+			slog.Warn("unmount upload deadline passed, keeping the rest for recovery", "timeout", unmountFlushTimeout)
+			break
+		}
 	}
+
+	st.closing.Store(true)
+	cancel()
+	grace, cancelGrace := context.WithTimeout(context.Background(), unmountCancelGrace)
+	defer cancelGrace()
+	st.waitSettling(grace)
 	st.abandonKept()
 }
 
-// settleDelayed uploads every buffer waiting out a delay right now, and waits for them.
-func (st *mountState) settleDelayed() {
+// waitSettling waits for every settle running to finish, or for ctx; false when ctx came first.
+func (st *mountState) waitSettling(ctx context.Context) bool {
+	done := make(chan struct{})
+	go func() {
+		st.settling.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// settleDelayed uploads every buffer waiting out a delay right now under ctx, and waits for them
+// until ctx is done; false when it ran out first.
+func (st *mountState) settleDelayed(ctx context.Context) bool {
 	st.delayedMu.Lock()
 	pending := make([]*fileHandle, 0, len(st.delayed))
 	for h := range st.delayed {
@@ -611,10 +656,10 @@ func (st *mountState) settleDelayed() {
 		st.settling.Add(1)
 		go func() {
 			defer st.settling.Done()
-			h.settle()
+			h.settle(ctx)
 		}()
 	}
-	st.settling.Wait()
+	return st.waitSettling(ctx)
 }
 
 // abandonKept lets go of every buffer still parked once flushDelayed's uploads ran: the ones with
@@ -2596,7 +2641,7 @@ func (h *fileHandle) park(tmp *os.File, delay time.Duration) {
 	h.timer = time.AfterFunc(delay, func() {
 		st.settling.Add(1)
 		defer st.settling.Done()
-		h.settle()
+		h.settle(context.Background())
 	})
 }
 
@@ -2618,6 +2663,13 @@ func (h *fileHandle) keepForRetry(tmp *os.File, name string, err error) {
 	// Replaced or unlinked while it tried: there is no save left to keep.
 	if h.gone.Load() {
 		h.discard(tmp)
+		return
+	}
+
+	// Unmount's deadline cancelled it, or it failed after: a retry would come after the process
+	// exits, and abandonKept may already have run, so keep the save now.
+	if h.node.mountState().closing.Load() {
+		h.keepUnsaved(tmp)
 		return
 	}
 
@@ -2710,8 +2762,9 @@ func (h *fileHandle) detach() {
 	}
 }
 
-// settle uploads a buffer whose upload delay ran out, unless something took it back first.
-func (h *fileHandle) settle() {
+// settle uploads a buffer whose upload delay ran out, unless something took it back first. ctx
+// bounds the upload: unmount's deadline (flushDelayed), or none for a timer.
+func (h *fileHandle) settle(ctx context.Context) {
 	h.mu.Lock()
 	if !h.parked || h.timer == nil {
 		h.mu.Unlock()
@@ -2722,7 +2775,7 @@ func (h *fileHandle) settle() {
 	h.mu.Unlock()
 
 	h.node.mountState().trackDelayed(h, false)
-	_ = h.Release(context.Background())
+	_ = h.Release(ctx)
 }
 
 // unpark takes a parked handle back for a second Release: dirty uploads (or delays again) the
