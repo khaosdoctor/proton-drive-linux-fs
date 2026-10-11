@@ -75,6 +75,41 @@ func TestGetBlockSingleflight(t *testing.T) {
 	}
 }
 
+// TestGetBlockAfterCloseRegistersNoTransfer checks that a fetch finishing after Close doesn't
+// leave a "downloading" transfer behind that nothing will ever end.
+func TestGetBlockAfterCloseRegistersNoTransfer(t *testing.T) {
+	sk, err := crypto.GenerateSessionKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ciphertext, err := sk.Encrypt(crypto.NewPlainMessage([]byte("late")))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c := &Client{}
+	f := &File{
+		client:     c,
+		sessionKey: sk,
+		blocks:     map[int]proton.Block{1: {Index: 1}},
+		size:       4,
+		cache:      make(map[int][]byte),
+	}
+
+	orig := fetchBlock
+	fetchBlock = func(_ context.Context, _ *Client, _, _ string) ([]byte, error) { return ciphertext, nil }
+	t.Cleanup(func() { fetchBlock = orig })
+
+	_ = f.Close()
+	if _, err := f.getBlock(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := c.Transfers(); got != 0 {
+		t.Fatalf("Transfers() = %d after Close, want 0", got)
+	}
+}
+
 func TestIsNotFound(t *testing.T) {
 	notFound := errors.Join(errors.New("404 GET /x"), &proton.APIError{Status: http.StatusNotFound, Message: "not found"})
 	if !IsNotFound(notFound) {

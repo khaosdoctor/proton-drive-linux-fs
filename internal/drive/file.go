@@ -48,9 +48,11 @@ type File struct {
 	inflight sync.Map
 
 	// transferMu guards transfer, lazily created on this file's first real network fetch so a
-	// file served entirely from cache never shows up as "downloading".
+	// file served entirely from cache never shows up as "downloading", and closed, set by Close
+	// so a fetch still running after it never registers a transfer nobody would end.
 	transferMu sync.Mutex
 	transfer   *Transfer
+	closed     bool
 	failed     atomic.Bool
 }
 
@@ -127,10 +129,14 @@ func (c *Client) OpenFile(ctx context.Context, n *Node, path string) (*File, err
 }
 
 // ensureTransfer lazily starts this file's tracked download transfer on its first real network
-// fetch, so a file served entirely from cache never shows up as "downloading".
+// fetch, so a file served entirely from cache never shows up as "downloading". After Close it
+// hands back an unregistered Transfer: the fetch still counts into it, but the tray never sees it.
 func (f *File) ensureTransfer() *Transfer {
 	f.transferMu.Lock()
 	defer f.transferMu.Unlock()
+	if f.closed {
+		return &Transfer{}
+	}
 	if f.transfer == nil {
 		f.transfer = f.client.begin(f.path, "download", f.size)
 	}
@@ -154,6 +160,7 @@ func (f *File) Close() error {
 	f.transferMu.Lock()
 	t := f.transfer
 	f.transfer = nil
+	f.closed = true
 	f.transferMu.Unlock()
 
 	if t == nil {
