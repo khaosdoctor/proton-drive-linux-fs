@@ -134,7 +134,6 @@ func Mount(ctx context.Context, mountpoint string, c *drive.Client, root *drive.
 	gid := uint32(os.Getgid())
 	st := newMountState(ctx, c, uid, gid, opts)
 
-	// The root directory's path relative to the mountpoint is the empty string.
 	rootNode := &dirNode{client: c, node: root, ttl: opts.TTL, st: st}
 	st.register(rootNode)
 
@@ -733,7 +732,7 @@ func (st *mountState) invalidateDir(linkID string) {
 		return
 	}
 	d.invalidate()
-	slog.Info("remote change applied", "path", displayPath(d.path))
+	slog.Info("remote change applied", "path", displayPath(d.relPath()))
 }
 
 func (st *mountState) invalidateAll() {
@@ -942,10 +941,6 @@ type dirNode struct {
 	ttl    time.Duration
 	st     *mountState
 
-	// path is this folder's path relative to the mountpoint, "" for the root. The thumbnail
-	// cache is keyed by the absolute path of each file, so children need it to build theirs.
-	path string
-
 	// notifying is set while a background NotifyEntry pass for this dir is in flight, so a burst
 	// of remote events dedupes to one pass instead of stacking up goroutines.
 	notifying atomic.Bool
@@ -999,6 +994,14 @@ func (d *dirNode) linkID() string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.node.Link.LinkID
+}
+
+// relPath returns this folder's path relative to the mountpoint, "" for the root. The thumbnail
+// cache is keyed by the absolute path of each file, so children need it to build theirs. It is
+// read off the inode tree on every call instead of stored: a stored copy went stale when this
+// folder or any folder above it was renamed, and thumbnails went to the old path.
+func (d *dirNode) relPath() string {
+	return d.Path(nil)
 }
 
 // listing returns the in-memory listing as it is right now, nil when none was loaded.
@@ -1171,7 +1174,7 @@ func (d *dirNode) load(ctx context.Context) ([]*drive.Node, syscall.Errno) {
 		d.mu.Unlock()
 
 		if decideStale(children != nil, false, true) == serveStale {
-			d.warnOncePerMinute("serving stale listing, rate limited", "path", displayPath(d.path))
+			d.warnOncePerMinute("serving stale listing, rate limited", "path", displayPath(d.relPath()))
 			return children, 0
 		}
 		return nil, syscall.ETIMEDOUT
@@ -1187,7 +1190,7 @@ func (d *dirNode) load(ctx context.Context) ([]*drive.Node, syscall.Errno) {
 			go d.finishLoad(done)
 			wait = done
 		} else if logx.DebugEnabled(ctx) {
-			slog.Debug("singleflight wait", "op", "readdir", "path", displayPath(d.path))
+			slog.Debug("singleflight wait", "op", "readdir", "path", displayPath(d.relPath()))
 		}
 
 		select {
@@ -1249,7 +1252,7 @@ func (d *dirNode) loadResult() ([]*drive.Node, syscall.Errno) {
 	}
 
 	if decideStale(children != nil, errno != 0, false) == serveStale {
-		d.warnOncePerMinute("serving stale listing, refresh failed", "path", displayPath(d.path), "err", errno)
+		d.warnOncePerMinute("serving stale listing, refresh failed", "path", displayPath(d.relPath()), "err", errno)
 		return children, 0
 	}
 	return nil, errno
@@ -1332,11 +1335,11 @@ func (d *dirNode) finishLoad(done chan struct{}) {
 		switch {
 		case timedOut(opCtx):
 			errno = syscall.ETIMEDOUT
-			d.errorOncePerMinute("readdir timed out", "path", displayPath(d.path), "timeout", d.st.metaTimeout)
+			d.errorOncePerMinute("readdir timed out", "path", displayPath(d.relPath()), "timeout", d.st.metaTimeout)
 		case drive.IsUnauthorized(err):
-			d.warnOncePerMinute("session expired, run: proton-drive-fs login", "path", displayPath(d.path))
+			d.warnOncePerMinute("session expired, run: proton-drive-fs login", "path", displayPath(d.relPath()))
 		default:
-			d.errorOncePerMinute("readdir failed", "path", displayPath(d.path), "err", err)
+			d.errorOncePerMinute("readdir failed", "path", displayPath(d.relPath()), "err", err)
 		}
 
 		d.mu.Lock()
@@ -1360,7 +1363,7 @@ func (d *dirNode) finishLoad(done chan struct{}) {
 	}
 
 	if d.st.thumbs != nil {
-		go d.st.queueThumbs(d.path, children)
+		go d.st.queueThumbs(d.relPath(), children)
 	}
 }
 
@@ -1605,7 +1608,7 @@ func (d *dirNode) findChild(ctx context.Context, name string) (*drive.Node, sysc
 // Mkdir creates a folder on the drive and mounts its inode from what the API returned, without
 // re-listing the parent.
 func (d *dirNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	target := path.Join(d.path, name)
+	target := path.Join(d.relPath(), name)
 	slog.Info("creating folder", "path", target)
 
 	defer d.st.track("mkdir", target)()
@@ -1633,7 +1636,7 @@ func (d *dirNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse
 func (d *dirNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
 	tmp, err := os.CreateTemp("", "proton-drive-fs-*")
 	if err != nil {
-		slog.Error("creating temp file failed", "path", path.Join(d.path, name), "err", err)
+		slog.Error("creating temp file failed", "path", path.Join(d.relPath(), name), "err", err)
 		return nil, nil, 0, syscall.EIO
 	}
 
@@ -1698,7 +1701,7 @@ func (d *dirNode) remove(ctx context.Context, name string) syscall.Errno {
 		return errno
 	}
 
-	targetPath := path.Join(d.path, name)
+	targetPath := path.Join(d.relPath(), name)
 	slog.Info("deleting", "path", targetPath)
 
 	defer d.st.track("remove", targetPath)()
@@ -1740,8 +1743,8 @@ func (d *dirNode) Rename(ctx context.Context, name string, newParent fs.InodeEmb
 		return errno
 	}
 
-	from := path.Join(d.path, name)
-	to := path.Join(newDir.path, newName)
+	from := path.Join(d.relPath(), name)
+	to := path.Join(newDir.relPath(), newName)
 
 	action := "moving"
 	if d == newDir {
@@ -1814,7 +1817,7 @@ func (d *dirNode) renamePending(ctx context.Context, name string, newDir *dirNod
 		return syscall.ENOENT
 	}
 
-	slog.Info("renaming pending file", "from", path.Join(d.path, name), "to", path.Join(newDir.path, newName))
+	slog.Info("renaming pending file", "from", path.Join(d.relPath(), name), "to", path.Join(newDir.relPath(), newName))
 
 	existing, _ := newDir.findChild(ctx, newName)
 
@@ -1879,7 +1882,7 @@ func (d *dirNode) makeChild(ctx context.Context, child *drive.Node, out *fuse.En
 
 	if child.IsDir() {
 		attr.Mode = fuse.S_IFDIR
-		dn := &dirNode{client: d.client, node: child, ttl: d.ttl, st: d.st, path: path.Join(d.path, child.Name)}
+		dn := &dirNode{client: d.client, node: child, ttl: d.ttl, st: d.st}
 		inode := d.NewInode(ctx, dn, attr)
 		d.st.register(dn)
 		return inode
@@ -1976,8 +1979,10 @@ func (f *fileNode) mountState() *mountState {
 // API to show which file a transfer belongs to.
 func (f *fileNode) displayPath() string {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	return path.Join(f.parent.path, f.name)
+	parent, name := f.parent, f.name
+	f.mu.Unlock()
+	// relPath takes go-fuse's inode locks, so it runs with f.mu released.
+	return path.Join(parent.relPath(), name)
 }
 
 func (f *fileNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
@@ -2543,7 +2548,7 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 	// The buffer stays on the node until the upload succeeds: a reader opened meanwhile still
 	// finds it, and a failed upload keeps it for a retry instead of deleting the only copy of a
 	// save whose close already returned success.
-	displayPath := path.Join(parent.path, name)
+	displayPath := path.Join(parent.relPath(), name)
 
 	info, err := tmp.Stat()
 	if err != nil {
