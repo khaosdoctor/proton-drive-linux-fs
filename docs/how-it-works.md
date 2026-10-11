@@ -162,6 +162,8 @@ flowchart TD
 
 Files bigger than `-large-file` never write anything to `blocks/`. We still read them block by block, but nothing goes to disk, so one huge file can't push everything else out of the cache.
 
+When you create, delete or rename things in a folder, we patch its listing in memory right away and write `listings/<link>.json` at most once every 2 seconds, so copying thousands of files into one folder doesn't rewrite that file thousands of times. Anything still waiting gets written when you unmount.
+
 ## Previews
 
 When you list a folder, we write preview images into the freedesktop thumbnail cache, so your file manager shows thumbnails without opening the files.

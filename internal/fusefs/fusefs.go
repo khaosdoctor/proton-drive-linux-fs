@@ -134,7 +134,6 @@ func Mount(ctx context.Context, mountpoint string, c *drive.Client, root *drive.
 	gid := uint32(os.Getgid())
 	st := newMountState(ctx, c, uid, gid, opts)
 
-	// The root directory's path relative to the mountpoint is the empty string.
 	rootNode := &dirNode{client: c, node: root, ttl: opts.TTL, st: st}
 	st.register(rootNode)
 
@@ -233,6 +232,10 @@ func Mount(ctx context.Context, mountpoint string, c *drive.Client, root *drive.
 		case <-time.After(5 * time.Second):
 		}
 	}
+
+	// Handlers keep running until the server is gone, and a patch from one arms a listing write
+	// whose timer the exiting process never waits for, so the flush runs only once they stopped.
+	st.flushListings()
 
 	// Safety net: if the mount is still present after the shutdown select, try one more time.
 	if isMounted(mountpoint) {
@@ -349,8 +352,8 @@ func isMounted(path string) bool {
 	return false
 }
 
-// mountState tracks every registered directory node and each node's last-known parent, so a
-// remote event naming a LinkID can find which cached listings to drop.
+// mountState tracks every directory node the kernel still knows and the last-known parent of each
+// child listed under one, so a remote event naming a LinkID can find which cached listings to drop.
 type mountState struct {
 	client      *drive.Client
 	uid         uint32
@@ -404,6 +407,11 @@ type mountState struct {
 	dirs          map[string]*dirNode // folder LinkID -> its inode
 	parentOf      map[string]string   // child LinkID -> parent LinkID
 	thumbInflight map[string]bool     // revision key -> queued, being fetched, or given up on
+
+	// dirtyListings holds every directory with a coalesced listing write still waiting (see
+	// dirNode.schedulePersist), so unmount can write them out (see flushListings).
+	listingsMu    sync.Mutex
+	dirtyListings map[*dirNode]struct{}
 }
 
 // recentTransfer is one finished upload or download, kept for the tray's Recent submenu and the
@@ -646,9 +654,75 @@ func (st *mountState) uploadCounters(now time.Time) (queued, done, failed int64)
 }
 
 func (st *mountState) register(d *dirNode) {
+	id := d.linkID()
 	st.mu.Lock()
-	st.dirs[d.node.Link.LinkID] = d
+	st.dirs[id] = d
 	st.mu.Unlock()
+}
+
+// unregister drops d from st.dirs once the kernel has forgotten it (see dirNode.OnForget), so the
+// map, and every listing it pins, only covers directories the kernel still knows instead of every
+// directory ever walked. An event for a forgotten directory then has nothing to invalidate, which
+// is fine: the kernel holds no dentries under it, and the next lookup builds a fresh, cold dirNode.
+// A newer dirNode registered for the same LinkID (a lookup that raced this forget) is left alone.
+// ponytail: a cold dirNode serves the disk-persisted listing once before its background refresh,
+// so a remote change made while the directory was forgotten can show stale for that one call.
+func (st *mountState) unregister(d *dirNode) {
+	id := d.linkID()
+
+	st.mu.Lock()
+	current := st.dirs[id] == d
+	st.mu.Unlock()
+
+	// A coalesced listing write still waiting must not fire after a fresh dirNode for this folder
+	// has persisted its own, newer listing: gens are per dirNode, so nothing would stop the older
+	// view from overwriting it. While d is the registered one no such dirNode exists yet, so its
+	// write goes out now; when a newer one already took over, d's view is the stale one and is
+	// dropped.
+	if !current {
+		d.discardListing()
+		return
+	}
+	d.flushListing()
+
+	children := d.listing()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.dirs[id] != d {
+		return
+	}
+	delete(st.dirs, id)
+	st.forgetChildrenLocked(id, children)
+}
+
+// forgetChildren drops the parentOf entries of the children of a folder that no longer exists
+// remotely (a deleted folder's children never get an event of their own). The dirNode itself stays
+// registered: the kernel may still hold it, and a later Lookup hands that same inode back through
+// GetChild without registering it again, so removing it here would leave it deaf to events until
+// the kernel forgets it. OnForget unregisters it then.
+func (st *mountState) forgetChildren(linkID string) {
+	st.mu.Lock()
+	d, ok := st.dirs[linkID]
+	st.mu.Unlock()
+	if !ok {
+		return
+	}
+
+	// d.mu is never taken under st.mu, so the listing is read with st.mu released.
+	children := d.listing()
+	st.mu.Lock()
+	st.forgetChildrenLocked(linkID, children)
+	st.mu.Unlock()
+}
+
+// forgetChildrenLocked drops the parentOf entry of every child that still points at parentID; one
+// that moved since and was re-listed under another parent keeps its entry. Caller holds st.mu.
+func (st *mountState) forgetChildrenLocked(parentID string, children []*drive.Node) {
+	for _, ch := range children {
+		if st.parentOf[ch.Link.LinkID] == parentID {
+			delete(st.parentOf, ch.Link.LinkID)
+		}
+	}
 }
 
 func (st *mountState) setParent(childID, parentID string) {
@@ -677,7 +751,7 @@ func (st *mountState) invalidateDir(linkID string) {
 		return
 	}
 	d.invalidate()
-	slog.Info("remote change applied", "path", displayPath(d.path))
+	slog.Info("remote change applied", "path", displayPath(d.relPath()))
 }
 
 func (st *mountState) invalidateAll() {
@@ -756,6 +830,7 @@ func (st *mountState) handle(ev drive.Event) {
 
 	if ev.Type == proton.LinkEventDelete {
 		st.forgetParent(ev.LinkID)
+		st.forgetChildren(ev.LinkID)
 	}
 }
 
@@ -885,10 +960,6 @@ type dirNode struct {
 	ttl    time.Duration
 	st     *mountState
 
-	// path is this folder's path relative to the mountpoint, "" for the root. The thumbnail
-	// cache is keyed by the absolute path of each file, so children need it to build theirs.
-	path string
-
 	// notifying is set while a background NotifyEntry pass for this dir is in flight, so a burst
 	// of remote events dedupes to one pass instead of stacking up goroutines.
 	notifying atomic.Bool
@@ -923,6 +994,10 @@ type dirNode struct {
 	// clobbering newer content with older.
 	persistMu    sync.Mutex
 	persistedGen uint64
+
+	// persistTimer is non-nil while a coalesced listing write is waiting (see schedulePersist).
+	// Guarded by mu.
+	persistTimer *time.Timer
 }
 
 // setNode replaces the node backing this directory, e.g. after a remote listing refresh.
@@ -930,6 +1005,46 @@ func (d *dirNode) setNode(n *drive.Node) {
 	d.mu.Lock()
 	d.node = n
 	d.mu.Unlock()
+}
+
+// linkID returns the LinkID of the folder this directory stands for. node is read under d.mu since
+// setNode can swap it from another goroutine.
+func (d *dirNode) linkID() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.node.Link.LinkID
+}
+
+// relPath returns this folder's path relative to the mountpoint, "" for the root. The thumbnail
+// cache is keyed by the absolute path of each file, so children need it to build theirs. It is
+// read off the inode tree on every call instead of stored: a stored copy went stale when this
+// folder or any folder above it was renamed, and thumbnails went to the old path.
+func (d *dirNode) relPath() string {
+	return d.Path(nil)
+}
+
+// inTree reports whether this directory is still attached to the mount's inode tree. One removed
+// by Rmdir, or by a rename over it, is detached, and relPath then returns "", the root's own path:
+// fine for a log line, wrong for anything keyed by the path, such as a thumbnail.
+func (d *dirNode) inTree() bool {
+	if _, parent := d.Parent(); parent != nil {
+		return true
+	}
+	return d.IsRoot()
+}
+
+// listing returns the in-memory listing as it is right now, nil when none was loaded.
+func (d *dirNode) listing() []*drive.Node {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.children
+}
+
+// OnForget runs once the kernel has dropped its last reference to this directory and go-fuse has
+// removed it from the tree (go-fuse keeps a directory alive while it has children, so every inode
+// under it is gone by now). Unregistering it here is what bounds st.dirs to live directories.
+func (d *dirNode) OnForget() {
+	d.st.unregister(d)
 }
 
 // expire drops the cached listing so the next Lookup/Readdir refetches it, without touching the
@@ -987,6 +1102,7 @@ var _ = (fs.NodeUnlinker)((*dirNode)(nil))
 var _ = (fs.NodeRmdirer)((*dirNode)(nil))
 var _ = (fs.NodeRenamer)((*dirNode)(nil))
 var _ = (fs.NodeCreater)((*dirNode)(nil))
+var _ = (fs.NodeOnForgetter)((*dirNode)(nil))
 
 func (d *dirNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = d.Mode() | 0o755
@@ -1087,7 +1203,7 @@ func (d *dirNode) load(ctx context.Context) ([]*drive.Node, syscall.Errno) {
 		d.mu.Unlock()
 
 		if decideStale(children != nil, false, true) == serveStale {
-			d.warnOncePerMinute("serving stale listing, rate limited", "path", displayPath(d.path))
+			d.warnOncePerMinute("serving stale listing, rate limited", "path", displayPath(d.relPath()))
 			return children, 0
 		}
 		return nil, syscall.ETIMEDOUT
@@ -1103,7 +1219,7 @@ func (d *dirNode) load(ctx context.Context) ([]*drive.Node, syscall.Errno) {
 			go d.finishLoad(done)
 			wait = done
 		} else if logx.DebugEnabled(ctx) {
-			slog.Debug("singleflight wait", "op", "readdir", "path", displayPath(d.path))
+			slog.Debug("singleflight wait", "op", "readdir", "path", displayPath(d.relPath()))
 		}
 
 		select {
@@ -1165,7 +1281,7 @@ func (d *dirNode) loadResult() ([]*drive.Node, syscall.Errno) {
 	}
 
 	if decideStale(children != nil, errno != 0, false) == serveStale {
-		d.warnOncePerMinute("serving stale listing, refresh failed", "path", displayPath(d.path), "err", errno)
+		d.warnOncePerMinute("serving stale listing, refresh failed", "path", displayPath(d.relPath()), "err", errno)
 		return children, 0
 	}
 	return nil, errno
@@ -1248,11 +1364,11 @@ func (d *dirNode) finishLoad(done chan struct{}) {
 		switch {
 		case timedOut(opCtx):
 			errno = syscall.ETIMEDOUT
-			d.errorOncePerMinute("readdir timed out", "path", displayPath(d.path), "timeout", d.st.metaTimeout)
+			d.errorOncePerMinute("readdir timed out", "path", displayPath(d.relPath()), "timeout", d.st.metaTimeout)
 		case drive.IsUnauthorized(err):
-			d.warnOncePerMinute("session expired, run: proton-drive-fs login", "path", displayPath(d.path))
+			d.warnOncePerMinute("session expired, run: proton-drive-fs login", "path", displayPath(d.relPath()))
 		default:
-			d.errorOncePerMinute("readdir failed", "path", displayPath(d.path), "err", err)
+			d.errorOncePerMinute("readdir failed", "path", displayPath(d.relPath()), "err", err)
 		}
 
 		d.mu.Lock()
@@ -1275,8 +1391,9 @@ func (d *dirNode) finishLoad(done chan struct{}) {
 		d.st.setParent(ch.Link.LinkID, parentID)
 	}
 
-	if d.st.thumbs != nil {
-		go d.st.queueThumbs(d.path, children)
+	// A directory removed while this fetch was in flight would key its thumbnails under the root.
+	if d.st.thumbs != nil && d.inTree() {
+		go d.st.queueThumbs(d.relPath(), children)
 	}
 }
 
@@ -1305,13 +1422,116 @@ var cachedChildren = func(c *drive.Client, node *drive.Node) ([]*drive.Node, boo
 func (d *dirNode) persistListing(node *drive.Node, children []*drive.Node, gen uint64) {
 	d.persistMu.Lock()
 	defer d.persistMu.Unlock()
+	d.persistListingLocked(node, children, gen)
+}
 
+// persistListingLocked is persistListing for a caller already holding d.persistMu.
+func (d *dirNode) persistListingLocked(node *drive.Node, children []*drive.Node, gen uint64) {
 	if gen < d.persistedGen {
 		return
 	}
 	d.persistedGen = gen
 
-	d.client.CacheListing(node, children)
+	cacheListing(d.client, node, children)
+}
+
+// cacheListing writes one listing to disk; overridden in tests to count writes. See
+// drive.Client.CacheListing.
+var cacheListing = func(c *drive.Client, node *drive.Node, children []*drive.Node) {
+	c.CacheListing(node, children)
+}
+
+// listingPersistDelay is how long a patched listing waits before it is written to disk. Each write
+// re-marshals the whole folder, so writing on every patch made a bulk copy of N files into one
+// folder write O(N^2) bytes (10k files is ~200 GB); coalescing caps it at one write per folder per
+// delay.
+const listingPersistDelay = 2 * time.Second
+
+// schedulePersist marks the listing dirty and, unless a write is already waiting, arms one for
+// listingPersistDelay from now. The timer is not reset by later patches, so a long bulk copy still
+// writes every listingPersistDelay instead of only once it goes quiet.
+// ponytail: a crash loses at most the last listingPersistDelay of patches to the disk cache, which
+// only serves a cold start once before the background refresh replaces it.
+func (d *dirNode) schedulePersist() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.persistTimer != nil {
+		return
+	}
+	d.persistTimer = time.AfterFunc(listingPersistDelay, d.flushListing)
+	d.st.trackListing(d, true)
+}
+
+// flushListing writes the listing now if a coalesced write is waiting, and is a no-op otherwise,
+// so the timer and an unmount flush racing each other write it once. persistMu is held from the
+// check through the write, so a flush that finds the write already taken by the timer still waits
+// for it to finish: an unmount flush that returned mid-write would let the process exit under it.
+// Taking persistMu before d.mu is safe because nothing takes persistMu while holding d.mu.
+func (d *dirNode) flushListing() {
+	d.persistMu.Lock()
+	defer d.persistMu.Unlock()
+
+	d.mu.Lock()
+	if d.persistTimer == nil {
+		d.mu.Unlock()
+		return
+	}
+	d.persistTimer.Stop()
+	d.persistTimer = nil
+	node, children, gen := d.node, d.children, d.gen
+	d.mu.Unlock()
+
+	d.persistListingLocked(node, children, gen)
+
+	// d stays tracked until its write is done, so an unmount flushListings running meanwhile still
+	// finds it and waits on persistMu above. A schedulePersist that re-armed during the write keeps
+	// its tracking.
+	d.mu.Lock()
+	if d.persistTimer == nil {
+		d.st.trackListing(d, false)
+	}
+	d.mu.Unlock()
+}
+
+// discardListing cancels a coalesced listing write still waiting, without writing it.
+func (d *dirNode) discardListing() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.persistTimer == nil {
+		return
+	}
+	d.persistTimer.Stop()
+	d.persistTimer = nil
+	d.st.trackListing(d, false)
+}
+
+// trackListing adds d to, or removes it from, the directories with a listing write waiting.
+func (st *mountState) trackListing(d *dirNode, on bool) {
+	st.listingsMu.Lock()
+	defer st.listingsMu.Unlock()
+	if on {
+		if st.dirtyListings == nil {
+			st.dirtyListings = make(map[*dirNode]struct{})
+		}
+		st.dirtyListings[d] = struct{}{}
+		return
+	}
+	delete(st.dirtyListings, d)
+}
+
+// flushListings writes every listing still waiting out listingPersistDelay, so an unmount does
+// not leave the disk cache behind the last patches.
+func (st *mountState) flushListings() {
+	st.listingsMu.Lock()
+	dirty := make([]*dirNode, 0, len(st.dirtyListings))
+	for d := range st.dirtyListings {
+		dirty = append(dirty, d)
+	}
+	st.listingsMu.Unlock()
+
+	for _, d := range dirty {
+		d.flushListing()
+	}
 }
 
 // upsertChild patches one entry into the cached listing, replacing an entry with the same link or
@@ -1322,11 +1542,11 @@ func (d *dirNode) upsertChild(n *drive.Node) {
 	d.mu.Lock()
 	d.children = upsertNode(d.children, n)
 	d.gen++
-	node, children, gen := d.node, d.children, d.gen
+	node := d.node
 	d.mu.Unlock()
 
 	d.st.setParent(n.Link.LinkID, node.Link.LinkID)
-	d.persistListing(node, children, gen)
+	d.schedulePersist()
 }
 
 // removeChild drops the entry named name from the cached listing.
@@ -1335,13 +1555,12 @@ func (d *dirNode) removeChild(name string) {
 	removed, children := removeNode(d.children, name)
 	d.children = children
 	d.gen++
-	node, gen := d.node, d.gen
 	d.mu.Unlock()
 
 	if removed != nil {
 		d.st.forgetParent(removed.Link.LinkID)
 	}
-	d.persistListing(node, children, gen)
+	d.schedulePersist()
 }
 
 // upsertNode returns the listing with the entry n stands for replaced, matched by link id or by
@@ -1447,7 +1666,7 @@ func (d *dirNode) findChild(ctx context.Context, name string) (*drive.Node, sysc
 // Mkdir creates a folder on the drive and mounts its inode from what the API returned, without
 // re-listing the parent.
 func (d *dirNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	target := path.Join(d.path, name)
+	target := path.Join(d.relPath(), name)
 	slog.Info("creating folder", "path", target)
 
 	defer d.st.track("mkdir", target)()
@@ -1475,7 +1694,7 @@ func (d *dirNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse
 func (d *dirNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
 	tmp, err := os.CreateTemp("", "proton-drive-fs-*")
 	if err != nil {
-		slog.Error("creating temp file failed", "path", path.Join(d.path, name), "err", err)
+		slog.Error("creating temp file failed", "path", path.Join(d.relPath(), name), "err", err)
 		return nil, nil, 0, syscall.EIO
 	}
 
@@ -1540,7 +1759,7 @@ func (d *dirNode) remove(ctx context.Context, name string) syscall.Errno {
 		return errno
 	}
 
-	targetPath := path.Join(d.path, name)
+	targetPath := path.Join(d.relPath(), name)
 	slog.Info("deleting", "path", targetPath)
 
 	defer d.st.track("remove", targetPath)()
@@ -1582,8 +1801,8 @@ func (d *dirNode) Rename(ctx context.Context, name string, newParent fs.InodeEmb
 		return errno
 	}
 
-	from := path.Join(d.path, name)
-	to := path.Join(newDir.path, newName)
+	from := path.Join(d.relPath(), name)
+	to := path.Join(newDir.relPath(), newName)
 
 	action := "moving"
 	if d == newDir {
@@ -1656,7 +1875,7 @@ func (d *dirNode) renamePending(ctx context.Context, name string, newDir *dirNod
 		return syscall.ENOENT
 	}
 
-	slog.Info("renaming pending file", "from", path.Join(d.path, name), "to", path.Join(newDir.path, newName))
+	slog.Info("renaming pending file", "from", path.Join(d.relPath(), name), "to", path.Join(newDir.relPath(), newName))
 
 	existing, _ := newDir.findChild(ctx, newName)
 
@@ -1721,7 +1940,7 @@ func (d *dirNode) makeChild(ctx context.Context, child *drive.Node, out *fuse.En
 
 	if child.IsDir() {
 		attr.Mode = fuse.S_IFDIR
-		dn := &dirNode{client: d.client, node: child, ttl: d.ttl, st: d.st, path: path.Join(d.path, child.Name)}
+		dn := &dirNode{client: d.client, node: child, ttl: d.ttl, st: d.st}
 		inode := d.NewInode(ctx, dn, attr)
 		d.st.register(dn)
 		return inode
@@ -1818,8 +2037,10 @@ func (f *fileNode) mountState() *mountState {
 // API to show which file a transfer belongs to.
 func (f *fileNode) displayPath() string {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	return path.Join(f.parent.path, f.name)
+	parent, name := f.parent, f.name
+	f.mu.Unlock()
+	// relPath takes go-fuse's inode locks, so it runs with f.mu released.
+	return path.Join(parent.relPath(), name)
 }
 
 func (f *fileNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
@@ -2385,7 +2606,7 @@ func (h *fileHandle) Release(ctx context.Context) syscall.Errno {
 	// The buffer stays on the node until the upload succeeds: a reader opened meanwhile still
 	// finds it, and a failed upload keeps it for a retry instead of deleting the only copy of a
 	// save whose close already returned success.
-	displayPath := path.Join(parent.path, name)
+	displayPath := path.Join(parent.relPath(), name)
 
 	info, err := tmp.Stat()
 	if err != nil {

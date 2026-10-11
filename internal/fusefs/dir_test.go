@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -288,6 +289,85 @@ func TestPersistListingConcurrentWritesStayInGenOrder(t *testing.T) {
 	}
 	if want := fmt.Sprintf("gen%d", highest); entries[0].Name != want {
 		t.Fatalf("entries[0].Name = %q, want %q (the highest gen must always win)", entries[0].Name, want)
+	}
+}
+
+// TestPatchesCoalesceListingWrites checks a burst of upsertChild/removeChild patches writes the
+// folder's listing once, not once per patch, and that the unmount flush writes the final state.
+func TestPatchesCoalesceListingWrites(t *testing.T) {
+	var writes int
+	var last []*drive.Node
+	orig := cacheListing
+	cacheListing = func(c *drive.Client, n *drive.Node, children []*drive.Node) {
+		writes++
+		last = children
+	}
+	defer func() { cacheListing = orig }()
+
+	st := &mountState{parentOf: make(map[string]string)}
+	d := &dirNode{ttl: time.Minute, st: st, node: node("root", "root")}
+
+	const n = 100
+	for i := range n {
+		d.upsertChild(node(fmt.Sprintf("l%d", i), fmt.Sprintf("f%d", i)))
+	}
+	d.removeChild("f0")
+
+	if writes != 0 {
+		t.Fatalf("writes = %d before the delay, want the patches coalesced into none yet", writes)
+	}
+
+	st.flushListings()
+	st.flushListings() // nothing left: must not write again
+
+	if writes != 1 {
+		t.Fatalf("writes = %d, want exactly one for %d patches", writes, n+1)
+	}
+	if len(last) != n-1 {
+		t.Fatalf("written listing has %d entries, want %d", len(last), n-1)
+	}
+}
+
+// TestUnmountFlushWaitsForTheTimersWrite checks the unmount flush does not return while the timer's
+// own listing write is still running, since the process exits right after it.
+func TestUnmountFlushWaitsForTheTimersWrite(t *testing.T) {
+	started, release := make(chan struct{}), make(chan struct{})
+	var writes atomic.Int32
+	orig := cacheListing
+	cacheListing = func(c *drive.Client, n *drive.Node, children []*drive.Node) {
+		writes.Add(1)
+		close(started)
+		<-release
+	}
+	defer func() { cacheListing = orig }()
+
+	st := &mountState{parentOf: make(map[string]string)}
+	d := &dirNode{ttl: time.Minute, st: st, node: node("root", "root")}
+	d.upsertChild(node("l1", "a"))
+
+	go d.flushListing() // what the AfterFunc timer runs
+	<-started
+
+	flushed := make(chan struct{})
+	go func() {
+		st.flushListings()
+		close(flushed)
+	}()
+
+	select {
+	case <-flushed:
+		t.Fatal("flushListings returned while the timer's write was still running")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case <-flushed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("flushListings never returned once the write finished")
+	}
+	if n := writes.Load(); n != 1 {
+		t.Fatalf("writes = %d, want the one the timer started", n)
 	}
 }
 
