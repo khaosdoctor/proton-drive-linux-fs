@@ -1,12 +1,14 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -273,6 +275,58 @@ func TestServerCloseStopsStreamingLogs(t *testing.T) {
 	case <-bodyDone:
 	case <-time.After(5 * time.Second):
 		t.Fatal("streaming response body never closed")
+	}
+}
+
+// socketFDs counts this process's open sockets in /proc/self/fd.
+func socketFDs(t *testing.T) int {
+	t.Helper()
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Skip("no /proc/self/fd:", err)
+	}
+	n := 0
+	for _, e := range entries {
+		target, _ := os.Readlink(filepath.Join("/proc/self/fd", e.Name()))
+		if strings.HasPrefix(target, "socket:") {
+			n++
+		}
+	}
+	return n
+}
+
+// TestFreshClientPerRequestDoesNotLeakSockets mirrors the embedded tray, which builds a new
+// Client for every once-a-second status poll. Each one used to leave a keep-alive conn open on
+// both ends, so the daemon's socket fd count grew without bound.
+func TestFreshClientPerRequestDoesNotLeakSockets(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	srv, err := Start(Deps{Status: func() state.Status { return state.Status{} }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	before := socketFDs(t)
+	for range 200 {
+		client, err := NewClient()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := client.Status(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The server closes its end just after writing the response, so give it a moment.
+	deadline := time.Now().Add(2 * time.Second)
+	after := socketFDs(t)
+	for after-before > 2 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+		after = socketFDs(t)
+	}
+	if after-before > 2 {
+		t.Fatalf("socket fds grew from %d to %d over 200 requests", before, after)
 	}
 }
 

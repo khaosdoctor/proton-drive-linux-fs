@@ -22,6 +22,9 @@ import (
 // notice s.done and return on their own before the listener is force-closed under them.
 const shutdownGrace = 2 * time.Second
 
+// idleTimeout is how long the server keeps an idle keep-alive conn before closing it.
+const idleTimeout = 30 * time.Second
+
 // SocketName is the unix socket's filename under the runtime directory.
 const SocketName = "api.sock"
 
@@ -94,7 +97,9 @@ func Start(deps Deps) (*Server, error) {
 
 	mux := http.NewServeMux()
 	registerRoutes(mux, deps, s.done)
-	s.http = &http.Server{Handler: mux}
+	// IdleTimeout reaps keep-alive conns a client opened and then forgot, so a misbehaving client
+	// cannot pile up fds in the daemon. It does not touch an active SSE stream.
+	s.http = &http.Server{Handler: mux, IdleTimeout: idleTimeout}
 
 	go func() {
 		if err := s.http.Serve(l); err != nil && !errors.Is(err, http.ErrServerClosed) {

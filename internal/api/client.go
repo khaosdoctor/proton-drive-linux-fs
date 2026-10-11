@@ -28,6 +28,11 @@ func NewClient() (*Client, error) {
 	return &Client{
 		http: &http.Client{
 			Transport: &http.Transport{
+				// Callers build a fresh Client per request (the embedded tray polls once a second),
+				// so a keep-alive conn would stay parked in a Transport nobody reuses, holding an fd
+				// on both ends forever. That leaked ~335k sockets in a few days. A unix-socket dial
+				// costs next to nothing, so close each conn after its one request.
+				DisableKeepAlives: true,
 				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 					var d net.Dialer
 					return d.DialContext(ctx, "unix", sockPath)
