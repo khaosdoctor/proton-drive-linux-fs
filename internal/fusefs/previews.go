@@ -74,15 +74,27 @@ func (st *mountState) fetchThumb(ctx context.Context, job thumbJob) {
 	}
 	slog.Debug("thumbnail written", "path", job.relPath, "uri", st.thumbs.URI(job.relPath))
 
-	st.mu.Lock()
-	delete(st.thumbInflight, thumbKey(job.node))
-	st.mu.Unlock()
+	st.releaseThumb(job.node)
 }
 
-// thumbFailed logs the failure and leaves the revision marked, so a file Proton cannot give us a
-// preview for is not retried (and re-logged) on every listing refresh.
+// thumbRetryAfter is how long a failed revision stays marked before a listing may queue it again.
+// Long enough that a file Proton cannot give us a preview for (or an external thumbnailer that
+// downloads a whole file and then fails) is not retried on every 30s listing refresh, short
+// enough that a network outage or a timeout does not block that preview until restart. A var so
+// tests can shorten it.
+var thumbRetryAfter = 10 * time.Minute
+
+// thumbFailed logs the failure and keeps the revision marked for thumbRetryAfter.
 func (st *mountState) thumbFailed(job thumbJob, err error) {
 	slog.Warn("thumbnail failed", "path", job.relPath, "err", err)
+	st.retryThumbLater(job.node)
+}
+
+// retryThumbLater unmarks a failed revision once thumbRetryAfter has passed. The entry is removed
+// either way, so thumbInflight only ever holds revisions in flight or recently failed instead of
+// growing with every failure for the life of the mount.
+func (st *mountState) retryThumbLater(n *drive.Node) {
+	time.AfterFunc(thumbRetryAfter, func() { st.releaseThumb(n) })
 }
 
 // runExternalThumbWorker downloads files and runs external thumbnailers on them. One goroutine
@@ -101,6 +113,17 @@ func (st *mountState) runExternalThumbWorker(ctx context.Context) {
 func (st *mountState) generateExternalThumb(ctx context.Context, job externalThumbJob) {
 	opCtx, cancel := context.WithTimeout(ctx, externalThumbTimeout)
 	defer cancel()
+
+	// Every early return below is a failure: those retry after thumbRetryAfter, a written
+	// thumbnail unmarks right away.
+	written := false
+	defer func() {
+		if written {
+			st.releaseThumb(job.node)
+			return
+		}
+		st.retryThumbLater(job.node)
+	}()
 
 	tmp, err := os.CreateTemp("", "proton-thumb-src-*"+job.ext)
 	if err != nil {
@@ -154,10 +177,7 @@ func (st *mountState) generateExternalThumb(ctx context.Context, job externalThu
 		return
 	}
 	slog.Debug("external thumbnail written", "path", job.relPath)
-
-	st.mu.Lock()
-	delete(st.thumbInflight, thumbKey(job.node))
-	st.mu.Unlock()
+	written = true
 }
 
 // queueThumbs fetches previews for the files in a fresh listing that are not already cached.
@@ -211,7 +231,7 @@ func (st *mountState) queueThumbs(dirPath string, children []*drive.Node) {
 }
 
 // claimThumb reports whether this revision's thumbnail still needs fetching, marking it as
-// taken if so. A revision stays marked once it fails, so a broken preview is tried once.
+// taken if so. A failed revision stays marked for thumbRetryAfter (see retryThumbLater).
 func (st *mountState) claimThumb(n *drive.Node) bool {
 	key := thumbKey(n)
 
