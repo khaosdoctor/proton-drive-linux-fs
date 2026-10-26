@@ -21,6 +21,8 @@ jobs:
       - run: go vet ./...
       - run: go test ./...
       - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.2 # same as the Makefile; "latest" broke CI with a new false positive
 
   docker:
     runs-on: ubuntu-latest
