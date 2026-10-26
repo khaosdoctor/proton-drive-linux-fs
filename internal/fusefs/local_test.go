@@ -6,9 +6,12 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+
+	"github.com/khaosdoctor/proton-drive-linux-fs/internal/drive"
 )
 
 func newLocalState(t *testing.T) *mountState {
@@ -81,6 +84,51 @@ func TestExcludedFolderIsLocalAndListed(t *testing.T) {
 	}
 	if errno := d.Rmdir(context.Background(), "node_modules"); errno != syscall.ENOTEMPTY {
 		t.Errorf("Rmdir of a non-empty local folder = %v, want ENOTEMPTY", errno)
+	}
+}
+
+func TestTrashingLocalFolderStaysLocal(t *testing.T) {
+	st := newLocalState(t)
+	d, raw := newRawTree(st)
+	ctx := context.Background()
+
+	var nm fuse.EntryOut
+	if status := raw.Mkdir(nil, &fuse.MkdirIn{InHeader: fuse.InHeader{NodeId: 1}, Mode: 0o755}, "node_modules", &nm); !status.Ok() {
+		t.Fatalf("Mkdir node_modules = %v", status)
+	}
+	if err := os.WriteFile(filepath.Join(st.local.Path, "node_modules", "index.js"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// trash-put renames into .Trash-1000/files, a drive folder, under a free name.
+	trash := &dirNode{st: st, node: node("t", ".Trash-1000"), children: []*drive.Node{}, expires: time.Now().Add(time.Hour)}
+	d.AddChild(".Trash-1000", d.NewPersistentInode(ctx, trash, fs.StableAttr{Mode: fuse.S_IFDIR}), true)
+	if errno := d.Rename(ctx, "node_modules", trash, "node_modules_1", 0); errno != 0 {
+		t.Fatalf("Rename into the trash = %v, want it moved locally", errno)
+	}
+	if !exists(filepath.Join(st.local.Path, ".Trash-1000", "node_modules_1", "index.js")) {
+		t.Fatal("trashed folder not in the local store's trash")
+	}
+	if _, ok := listNames(t, trash)["node_modules_1"]; !ok {
+		t.Error("trashed folder missing from the trash listing")
+	}
+	var out fuse.EntryOut
+	if _, errno := trash.Lookup(ctx, "node_modules_1", &out); errno != 0 {
+		t.Errorf("Lookup in the trash = %v", errno)
+	}
+
+	// Restoring moves it back; emptying the trash removes it.
+	if errno := trash.Rename(ctx, "node_modules_1", d, "node_modules", 0); errno != 0 {
+		t.Fatalf("restore = %v", errno)
+	}
+	if errno := d.Rename(ctx, "node_modules", trash, "node_modules_1", 0); errno != 0 {
+		t.Fatalf("second trash = %v", errno)
+	}
+	if err := os.Remove(filepath.Join(st.local.Path, ".Trash-1000", "node_modules_1", "index.js")); err != nil {
+		t.Fatal(err)
+	}
+	if errno := trash.Rmdir(ctx, "node_modules_1"); errno != 0 {
+		t.Errorf("emptying the trash = %v", errno)
 	}
 }
 

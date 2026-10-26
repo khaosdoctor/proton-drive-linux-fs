@@ -625,10 +625,44 @@ func (d *dirNode) localPath(name string) string {
 	return d.st.localDir(path.Join(d.relPath(), name))
 }
 
+// inTrash reports whether rel, a path from the mountpoint, is inside a top-level trash folder
+// (".Trash-<uid>" or ".Trash", where file managers and trash-put move what they delete).
+func inTrash(rel string) bool {
+	first, _, _ := strings.Cut(rel, "/")
+	return strings.HasPrefix(first, ".Trash")
+}
+
+// keepsLocal reports whether the entry name in d may live in the local store: an excluded name, or
+// anything in the trash, where a local-only folder goes under a new name ("node_modules_1") when
+// it is trashed. It would otherwise have to upload to get there.
+func (d *dirNode) keepsLocal(name string) bool {
+	return d.st.local != nil && (d.st.excluded(name) || inTrash(d.relPath()))
+}
+
+// storedPath returns where the entry name in d is in the local store, "" when it is not there or
+// may not be (keepsLocal).
+func (d *dirNode) storedPath(name string) string {
+	if !d.keepsLocal(name) {
+		return ""
+	}
+	p := d.st.localDir(path.Join(d.relPath(), name))
+	if _, err := os.Lstat(p); err != nil {
+		return ""
+	}
+	return p
+}
+
+// onDrive reports whether the entry name in d is on the drive; in the trash a name is looked for
+// there before the local store.
+func (d *dirNode) onDrive(ctx context.Context, name string) bool {
+	_, errno := d.findChild(ctx, name)
+	return errno != syscall.ENOENT
+}
+
 // lookupLocal mounts the local-only entry name of d as a loopback node, which serves it and
 // everything under it straight from local disk.
 func (d *dirNode) lookupLocal(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	p := d.localPath(name)
+	p := d.storedPath(name)
 	if p == "" {
 		return nil, syscall.ENOENT
 	}
@@ -1879,7 +1913,8 @@ func (d *dirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (
 		return fn.EmbeddedInode(), 0
 	}
 
-	return nil, syscall.ENOENT
+	// A local-only folder moved to the trash.
+	return d.lookupLocal(ctx, name, out)
 }
 
 // findChild looks up name in the cached listing, refetching once if it's not there in case the
@@ -1982,10 +2017,20 @@ func (d *dirNode) Unlink(ctx context.Context, name string) syscall.Errno {
 			return 0
 		}
 	}
-	if p := d.localPath(name); p != "" {
+	if p := d.localEntry(ctx, name); p != "" {
 		return fs.ToErrno(syscall.Unlink(p))
 	}
 	return d.remove(ctx, name)
+}
+
+// localEntry returns where the entry name in d is in the local store when that is the one the
+// mount shows: always for an excluded name, and in the trash only when the drive has no such name.
+func (d *dirNode) localEntry(ctx context.Context, name string) string {
+	p := d.storedPath(name)
+	if p == "" || d.st.excluded(name) || !d.onDrive(ctx, name) {
+		return p
+	}
+	return ""
 }
 
 // fileChild returns the file mounted under name, if any.
@@ -2009,7 +2054,7 @@ func (d *dirNode) pendingChild(name string) *fileNode {
 // Rmdir trashes a folder. Proton trashes non-empty folders recursively, so this doesn't need to
 // check for children first.
 func (d *dirNode) Rmdir(ctx context.Context, name string) syscall.Errno {
-	if p := d.localPath(name); p != "" {
+	if p := d.localEntry(ctx, name); p != "" {
 		return fs.ToErrno(syscall.Rmdir(p))
 	}
 	return d.remove(ctx, name)
@@ -2059,23 +2104,22 @@ func (d *dirNode) Rename(ctx context.Context, name string, newParent fs.InodeEmb
 		return syscall.EINVAL
 	}
 
-	// A local-only entry moves on local disk while it keeps an excluded name or goes into a
-	// local-only folder. Anywhere else it would have to upload, which a whole folder can't do in
-	// one call: EXDEV makes mv copy it in, uploading as it goes.
+	// A local-only entry moves on local disk while it keeps an excluded name, goes into the trash
+	// (and back out of it), or goes into a local-only folder. Anywhere else it would have to
+	// upload, which a whole folder can't do in one call: EXDEV makes mv copy it in, uploading as it
+	// goes.
 	// ponytail: a local-only file renamed by rename(2) to an uploadable name fails with EXDEV too;
 	// atomic saves still work because a file written here stays pending (see Create) until unmount
-	if src := d.localPath(name); src != "" && d.pendingChild(name) == nil {
-		if _, err := os.Lstat(src); err == nil {
-			newDir, toDrive := newParent.(*dirNode)
-			if toDrive && !newDir.st.excluded(newName) {
-				return syscall.EXDEV
-			}
-			dst := d.st.localDir(path.Join(newParent.EmbeddedInode().Path(nil), newName))
-			if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
-				return fs.ToErrno(err)
-			}
-			return fs.ToErrno(syscall.Rename(src, dst))
+	if src := d.localEntry(ctx, name); src != "" && d.pendingChild(name) == nil {
+		newDir, toDrive := newParent.(*dirNode)
+		if toDrive && !newDir.keepsLocal(newName) {
+			return syscall.EXDEV
 		}
+		dst := d.st.localDir(path.Join(newParent.EmbeddedInode().Path(nil), newName))
+		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+			return fs.ToErrno(err)
+		}
+		return fs.ToErrno(syscall.Rename(src, dst))
 	}
 
 	newDir, ok := newParent.(*dirNode)
@@ -2320,12 +2364,13 @@ func (d *dirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 		entries = append(entries, fuse.DirEntry{Name: name, Ino: child.StableAttr().Ino, Mode: fuse.S_IFREG})
 	}
 
-	// So are the local-only entries, which the drive never sees. What else is in the local copy
-	// of this folder only mirrors the drive's folders on the way to them.
+	// So are the local-only entries, which the drive never sees: excluded names, and in the trash
+	// whatever was trashed from them. What else is in the local copy of this folder only mirrors
+	// the drive's folders on the way to them.
 	if dir := d.st.localDir(d.relPath()); dir != "" {
 		locals, _ := os.ReadDir(dir)
 		for _, e := range locals {
-			if listed[e.Name()] || !d.st.excluded(e.Name()) {
+			if listed[e.Name()] || !d.keepsLocal(e.Name()) {
 				continue
 			}
 			info, err := e.Info()
