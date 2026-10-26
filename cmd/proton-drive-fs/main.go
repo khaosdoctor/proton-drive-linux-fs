@@ -594,8 +594,8 @@ func mountDetached(args []string, mountpoint string) int {
 		return 1
 	}
 
-	exited := make(chan error, 1)
-	go func() { exited <- cmd.Wait() }()
+	exited := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(exited) }() // the log says why it exited
 
 	absMountpoint := absOrSelf(mountpoint)
 

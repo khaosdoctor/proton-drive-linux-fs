@@ -21,11 +21,6 @@ jobs:
       - run: go vet ./...
       - run: go test ./...
       - uses: golangci/golangci-lint-action@v9
-        with:
-          # Same as the Makefile, built with this Go like `go run` does: "latest" broke CI with a new
-          # false positive, and the prebuilt v2.13.2 can't read Go 1.27's export data.
-          version: v2.13.2
-          install-mode: goinstall
 
   docker:
     runs-on: ubuntu-latest

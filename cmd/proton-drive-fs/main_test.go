@@ -208,8 +208,8 @@ func TestStopPreviousDaemon(t *testing.T) {
 
 	stopPreviousDaemon()
 
-	waited := make(chan error, 1)
-	go func() { waited <- cmd.Wait() }()
+	waited := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(waited) }() // killed, so it exits with an error anyway
 
 	select {
 	case <-waited:
