@@ -144,7 +144,7 @@ func registerMountConfigFlags(fs *flag.FlagSet, cfg config.Config) (*mountConfig
 		thumbnails:   fs.Bool("thumbnails", cfg.Thumbnails, "write Proton's stored previews into the freedesktop thumbnail cache"),
 		thumbnailDir: fs.String("thumbnail-dir", cfg.ThumbnailDir, "freedesktop thumbnail cache directory"),
 		denyReaders:  fs.String("deny-readers", strings.Join(cfg.DenyReaders, ","), "comma-separated process names refused a read of a file above -large-file; empty allows all"),
-		exclude:      fs.String("exclude", strings.Join(cfg.Exclude, ","), "comma-separated filename patterns to hide and never upload; prefix with re: for regexp, otherwise glob"),
+		exclude:      fs.String("exclude", strings.Join(cfg.Exclude, ","), "comma-separated file and folder name patterns kept on this machine only, never uploaded; prefix with re: for regexp, otherwise glob"),
 		uploadDelay:  fs.Duration("upload-delay", uploadDelayDefault, "how long a saved file waits before it uploads, so an app finishes saving first; 0 uploads on close"),
 		uploadDelays: fs.String("upload-delays", strings.Join(cfg.UploadDelays, ","), "comma-separated per-pattern -upload-delay overrides as pattern=duration; the first matching pattern is used"),
 		maxUploads:   fs.Int("max-uploads", cfg.MaxUploads, "how many files upload at once; the rest wait in line"),

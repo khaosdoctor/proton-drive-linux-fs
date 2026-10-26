@@ -94,12 +94,24 @@ func Dir() (string, error) {
 // $XDG_STATE_HOME/proton-drive-fs/unsaved, or ~/.local/state/proton-drive-fs/unsaved. Never the
 // session runtime directory Dir prefers, which is tmpfs like the $TMPDIR the buffers come from.
 func UnsavedDir() (string, error) {
+	return persistentDir("unsaved")
+}
+
+// LocalDir returns where the mount keeps the files and folders with an excluded name, which live
+// on this machine only: $XDG_STATE_HOME/proton-drive-fs/local, or
+// ~/.local/state/proton-drive-fs/local. It mirrors the mount's tree, and like UnsavedDir it has to
+// survive a reboot.
+func LocalDir() (string, error) {
+	return persistentDir("local")
+}
+
+func persistentDir(sub string) (string, error) {
 	stateHome := os.Getenv("XDG_STATE_HOME")
 	home, err := os.UserHomeDir()
 	if err != nil && stateHome == "" {
 		return "", err
 	}
-	return filepath.Join(resolveDir("", stateHome, home), "unsaved"), nil
+	return filepath.Join(resolveDir("", stateHome, home), sub), nil
 }
 
 // PausePath returns the path of the pause marker.

@@ -76,7 +76,8 @@ type Options struct {
 	// threshold. Empty allows every reader.
 	DenyReaders []string
 
-	// Exclude are filename patterns hidden from listings and never uploaded. Each entry
+	// Exclude are filename patterns that never upload: a file or folder with such a name is kept
+	// on local disk only (state.LocalDir), still listed and usable through the mount. Each entry
 	// is a filepath.Match glob, or a regexp if prefixed with "re:".
 	Exclude []string
 
@@ -135,6 +136,11 @@ func Mount(ctx context.Context, mountpoint string, c *drive.Client, root *drive.
 	uid := uint32(os.Getuid())
 	gid := uint32(os.Getgid())
 	st := newMountState(ctx, c, uid, gid, opts)
+	if local, err := openLocalStore(); err != nil {
+		slog.Warn("no local store for excluded names; they only live until unmount", "err", err)
+	} else {
+		st.local = local
+	}
 
 	rootNode := &dirNode{client: c, node: root, ttl: opts.TTL, st: st}
 	st.register(rootNode)
@@ -383,6 +389,11 @@ type mountState struct {
 	denyThumbnailers  []string
 	excludes          []func(string) bool
 
+	// local backs every entry with an excluded name: its Path mirrors the mount's tree on local
+	// disk, and go-fuse's loopback nodes serve what is under it. nil keeps nothing locally (tests
+	// that build a mountState directly), and an excluded name then only exists as a pending file.
+	local *fs.LoopbackRoot
+
 	uploadDelay time.Duration
 	delayRules  []delayRule
 
@@ -526,6 +537,109 @@ func (st *mountState) excluded(name string) bool {
 		}
 	}
 	return false
+}
+
+// openLocalStore creates state.LocalDir if needed and returns the loopback root serving it.
+// RootNode stays nil so a loopback node's path is its path from the mount's own root, which is
+// the layout the store mirrors.
+// ponytail: one store per machine, keyed by mount path; changing the mounted root folder strands
+// what is stored under the old layout
+func openLocalStore() (*fs.LoopbackRoot, error) {
+	dir, err := state.LocalDir()
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	var stat syscall.Stat_t
+	if err := syscall.Stat(dir, &stat); err != nil {
+		return nil, err
+	}
+	return &fs.LoopbackRoot{Path: dir, Dev: stat.Dev}, nil
+}
+
+// localDir returns where rel, a path from the mountpoint, is kept on local disk, "" when this
+// mount keeps nothing locally.
+func (st *mountState) localDir(rel string) string {
+	if st.local == nil {
+		return ""
+	}
+	return filepath.Join(st.local.Path, rel)
+}
+
+// moveLocal follows a folder moved on the drive with the local-only entries kept under it, which
+// would otherwise stay behind at the old path.
+// ponytail: a folder renamed from another device leaves them at the old path until renamed back
+func (st *mountState) moveLocal(from, to string) {
+	src, dst := st.localDir(from), st.localDir(to)
+	if src == "" {
+		return
+	}
+	if _, err := os.Lstat(src); err != nil {
+		return
+	}
+	err := os.MkdirAll(filepath.Dir(dst), 0o700)
+	if err == nil {
+		err = os.Rename(src, dst)
+	}
+	if err == nil {
+		return
+	}
+	slog.Warn("moving local-only entries with their folder failed; they stay at the old path", "from", from, "to", to, "err", err)
+}
+
+// removeLocalMirror removes the local copy of a drive folder's tree, dir, when nothing local-only
+// is left in it: only the folders mirroring the drive's, which MkdirAll made on the way to some
+// entry since deleted. Anything else in it is ENOTEMPTY, the same as a non-empty rmdir.
+func (st *mountState) removeLocalMirror(dir string) syscall.Errno {
+	empty := true
+	err := filepath.WalkDir(dir, func(p string, e os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if p != dir && (!e.IsDir() || st.excluded(e.Name())) {
+			empty = false
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	if errors.Is(err, os.ErrNotExist) {
+		return 0
+	}
+	if err != nil {
+		return fs.ToErrno(err)
+	}
+	if !empty {
+		return syscall.ENOTEMPTY
+	}
+	return fs.ToErrno(os.RemoveAll(dir))
+}
+
+// localPath returns where the entry name in d is kept on local disk when it is local-only, which
+// an excluded name is; "" for any other name, or when the mount keeps nothing locally.
+func (d *dirNode) localPath(name string) string {
+	if !d.st.excluded(name) {
+		return ""
+	}
+	return d.st.localDir(path.Join(d.relPath(), name))
+}
+
+// lookupLocal mounts the local-only entry name of d as a loopback node, which serves it and
+// everything under it straight from local disk.
+func (d *dirNode) lookupLocal(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	p := d.localPath(name)
+	if p == "" {
+		return nil, syscall.ENOENT
+	}
+	var stat syscall.Stat_t
+	if err := syscall.Lstat(p, &stat); err != nil {
+		return nil, fs.ToErrno(err)
+	}
+	out.FromStat(&stat)
+	// The inode number the loopback nodes give their own children for a store on one device.
+	attr := fs.StableAttr{Mode: stat.Mode, Gen: 1, Ino: stat.Ino}
+	return d.NewInode(ctx, &fs.LoopbackNode{RootData: d.st.local}, attr), 0
 }
 
 type delayRule struct {
@@ -1722,10 +1836,11 @@ func removeNode(children []*drive.Node, name string) (*drive.Node, []*drive.Node
 
 func (d *dirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	if d.st.excluded(name) {
-		// Listings never show an excluded name; only a local, not-yet-uploaded file can have one.
+		// An excluded name is never looked up on the drive: it is a file still being written (an
+		// atomic save's "x.tmp", waiting for its rename) or a local-only entry.
 		fn := d.pendingChild(name)
 		if fn == nil {
-			return nil, syscall.ENOENT
+			return d.lookupLocal(ctx, name, out)
 		}
 		var attr fuse.AttrOut
 		_ = fn.Getattr(ctx, nil, &attr) // never fails: it only reads local state
@@ -1787,6 +1902,17 @@ func (d *dirNode) findChild(ctx context.Context, name string) (*drive.Node, sysc
 // Mkdir creates a folder on the drive and mounts its inode from what the API returned, without
 // re-listing the parent.
 func (d *dirNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	// A folder with an excluded name (node_modules) is local-only, and so is everything in it.
+	if p := d.localPath(name); p != "" {
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			return nil, fs.ToErrno(err)
+		}
+		if err := os.Mkdir(p, os.FileMode(mode)); err != nil {
+			return nil, fs.ToErrno(err)
+		}
+		return d.lookupLocal(ctx, name, out)
+	}
+
 	target := path.Join(d.relPath(), name)
 	slog.Info("creating folder", "path", target)
 
@@ -1856,6 +1982,9 @@ func (d *dirNode) Unlink(ctx context.Context, name string) syscall.Errno {
 			return 0
 		}
 	}
+	if p := d.localPath(name); p != "" {
+		return fs.ToErrno(syscall.Unlink(p))
+	}
 	return d.remove(ctx, name)
 }
 
@@ -1880,6 +2009,9 @@ func (d *dirNode) pendingChild(name string) *fileNode {
 // Rmdir trashes a folder. Proton trashes non-empty folders recursively, so this doesn't need to
 // check for children first.
 func (d *dirNode) Rmdir(ctx context.Context, name string) syscall.Errno {
+	if p := d.localPath(name); p != "" {
+		return fs.ToErrno(syscall.Rmdir(p))
+	}
 	return d.remove(ctx, name)
 }
 
@@ -1890,6 +2022,15 @@ func (d *dirNode) remove(ctx context.Context, name string) syscall.Errno {
 	}
 
 	targetPath := path.Join(d.relPath(), name)
+
+	// A folder still holding local-only entries is not empty, though the drive has none of them,
+	// and Proton's trash would not have them back.
+	if local := d.st.localDir(targetPath); target.IsDir() && local != "" {
+		if errno := d.st.removeLocalMirror(local); errno != 0 {
+			return errno
+		}
+	}
+
 	slog.Info("deleting", "path", targetPath)
 
 	defer d.st.track("remove", targetPath)()
@@ -1918,9 +2059,29 @@ func (d *dirNode) Rename(ctx context.Context, name string, newParent fs.InodeEmb
 		return syscall.EINVAL
 	}
 
+	// A local-only entry moves on local disk while it keeps an excluded name or goes into a
+	// local-only folder. Anywhere else it would have to upload, which a whole folder can't do in
+	// one call: EXDEV makes mv copy it in, uploading as it goes.
+	// ponytail: a local-only file renamed by rename(2) to an uploadable name fails with EXDEV too;
+	// atomic saves still work because a file written here stays pending (see Create) until unmount
+	if src := d.localPath(name); src != "" && d.pendingChild(name) == nil {
+		if _, err := os.Lstat(src); err == nil {
+			newDir, toDrive := newParent.(*dirNode)
+			if toDrive && !newDir.st.excluded(newName) {
+				return syscall.EXDEV
+			}
+			dst := d.st.localDir(path.Join(newParent.EmbeddedInode().Path(nil), newName))
+			if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+				return fs.ToErrno(err)
+			}
+			return fs.ToErrno(syscall.Rename(src, dst))
+		}
+	}
+
 	newDir, ok := newParent.(*dirNode)
 	if !ok {
-		return syscall.EINVAL
+		// Into a local-only folder, which a pending file or a drive item can only be copied to.
+		return syscall.EXDEV
 	}
 
 	target, errno := d.findChild(ctx, name)
@@ -1931,9 +2092,18 @@ func (d *dirNode) Rename(ctx context.Context, name string, newParent fs.InodeEmb
 		return errno
 	}
 
+	// A drive item renamed to an excluded name would become local-only, so it has to come off the
+	// drive: copied by mv, like a local-only entry going the other way.
+	if newDir.st.local != nil && newDir.st.excluded(newName) {
+		return syscall.EXDEV
+	}
+
 	moved, errno := d.moveLink(ctx, target, name, newDir, newName)
 	if errno != 0 {
 		return errno
+	}
+	if target.IsDir() {
+		d.st.moveLocal(path.Join(d.relPath(), name), path.Join(newDir.relPath(), newName))
 	}
 
 	// A pending file under newName, or a parked edit of the file just trashed there, would
@@ -2143,10 +2313,28 @@ func (d *dirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	// Files written here but not uploaded yet (waiting out their upload delay) belong in the
 	// listing too, or a just-saved file would vanish from it until the upload finishes.
 	for name, child := range d.Children() {
-		if listed[name] || d.st.excluded(name) || d.pendingChild(name) == nil {
+		if listed[name] || d.pendingChild(name) == nil {
 			continue
 		}
+		listed[name] = true
 		entries = append(entries, fuse.DirEntry{Name: name, Ino: child.StableAttr().Ino, Mode: fuse.S_IFREG})
+	}
+
+	// So are the local-only entries, which the drive never sees. What else is in the local copy
+	// of this folder only mirrors the drive's folders on the way to them.
+	if dir := d.st.localDir(d.relPath()); dir != "" {
+		locals, _ := os.ReadDir(dir)
+		for _, e := range locals {
+			if listed[e.Name()] || !d.st.excluded(e.Name()) {
+				continue
+			}
+			info, err := e.Info()
+			if err != nil {
+				continue
+			}
+			stat := info.Sys().(*syscall.Stat_t)
+			entries = append(entries, fuse.DirEntry{Name: e.Name(), Ino: stat.Ino, Mode: stat.Mode})
+		}
 	}
 
 	return fs.NewListDirStream(entries), 0
@@ -2811,8 +2999,9 @@ func (h *fileHandle) unpark(dirty bool) bool {
 
 // abandon lets go of a parked buffer at unmount, once nothing can take it back any more. (A
 // kernel forget is no such point: a pending file stays pinned in the tree, see Create.) An
-// excluded name was never going to upload, so its temp file is removed. Anything else is a save
-// that never reached the drive, kept for recovery (keepUnsaved).
+// excluded name was never going to upload, so its temp file moves into the local store
+// (keepLocal), or is removed when there is none. Anything else is a save that never reached the
+// drive, kept for recovery (keepUnsaved).
 func (h *fileHandle) abandon() {
 	h.mu.Lock()
 	if !h.parked {
@@ -2832,6 +3021,10 @@ func (h *fileHandle) abandon() {
 	}
 
 	if timer == nil && !failed {
+		if st.local != nil && st.excluded(h.node.currentName()) {
+			h.keepLocal(tmp)
+			return
+		}
 		h.drop(tmp)
 		return
 	}
@@ -2887,28 +3080,61 @@ func saveUnsaved(tmp *os.File, name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if err := moveTmp(tmp, dst); err != nil {
+		return "", err
+	}
+	return dst.Name(), nil
+}
+
+// moveTmp moves tmp's file over dst, just created, by a rename on the same filesystem or a copy
+// across them, and closes dst. A failed copy removes dst and leaves tmp where it is.
+func moveTmp(tmp, dst *os.File) error {
 	defer func() { _ = dst.Close() }()
 
 	if os.Rename(tmp.Name(), dst.Name()) == nil {
-		return dst.Name(), nil
+		return nil
 	}
 
 	// Across filesystems (tmpfs $TMPDIR to the home disk): copy, and remove the temp file only
 	// once the copy is safely written.
 	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
 		_ = os.Remove(dst.Name())
-		return "", err
+		return err
 	}
 	if _, err := io.Copy(dst, tmp); err != nil {
 		_ = os.Remove(dst.Name())
-		return "", err
+		return err
 	}
 	if err := dst.Sync(); err != nil {
 		_ = os.Remove(dst.Name())
-		return "", err
+		return err
 	}
 	_ = os.Remove(tmp.Name())
-	return dst.Name(), nil
+	return nil
+}
+
+// keepLocal lets go of the buffer of a file with an excluded name at unmount by moving it into the
+// local store, where the next mount lists it as a local-only file. A failed move drops it, as
+// unmount always did with these before there was a store.
+func (h *fileHandle) keepLocal(tmp *os.File) {
+	where := h.node.displayPath()
+	st := h.node.mountState()
+	h.detach()
+
+	dst := st.localDir(where)
+	err := os.MkdirAll(filepath.Dir(dst), 0o700)
+	var f *os.File
+	if err == nil {
+		f, err = os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	}
+	if err == nil {
+		err = moveTmp(tmp, f)
+	}
+	_ = tmp.Close()
+	if err != nil {
+		slog.Warn("keeping an excluded file on local disk failed; it is gone", "path", where, "err", err)
+		_ = os.Remove(tmp.Name())
+	}
 }
 
 func (h *fileHandle) hasTmp() bool {

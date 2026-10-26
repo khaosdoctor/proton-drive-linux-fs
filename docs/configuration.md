@@ -35,7 +35,7 @@ proton-drive-fs config show [-config path] [flags...]
 | `thumbnails` | `-thumbnails` | `true` | Write previews into the freedesktop thumbnail cache, from Proton's stored previews and the system thumbnailers. |
 | `thumbnail_dir` | `-thumbnail-dir` | `$XDG_CACHE_HOME/thumbnails` | The freedesktop thumbnail cache directory. |
 | `deny_readers` | `-deny-readers` | see [Usage](usage.md#mount) | Processes that can't read files bigger than `large_file`. Empty lets everyone read. |
-| `exclude` | `-exclude` | see [Usage](usage.md#mount) | Filename patterns we hide from listings and never upload. Globs by default, prefix with `re:` for a regexp. |
+| `exclude` | `-exclude` | see [Usage](usage.md#mount) | File and folder name patterns we keep on this machine only and never upload. They stay visible and usable in the mount. Globs by default, prefix with `re:` for a regexp. |
 | `upload_delay` | `-upload-delay` | `5s` | How long a saved file waits after it closes before we upload it. `"0s"` uploads right on close. |
 | `upload_delays` | `-upload-delays` | `[]` | Per-pattern `upload_delay` overrides as `"pattern=duration"`, like `["*.bak=1m"]`. The first pattern that matches wins. |
 | `max_uploads` | `-max-uploads` | `5` | How many files we upload at the same time. |

@@ -69,9 +69,10 @@ var initFields = []struct {
 		`Indexers and thumbnailers open every file they find, which would download every big file on the drive.`,
 	), func(d Config) string { return QuoteArray(d.DenyReaders) }},
 	{"exclude", lines(
-		`File names that are hidden from the mount and never uploaded, such as editor swap files ("*.swp") or "Thumbs.db".`,
+		`File and folder names that are never uploaded, such as editor swap files ("*.swp") or "node_modules".`,
+		`They still show up and work in the mount, but live on this machine only, and so does everything inside such a folder.`,
 		`Patterns are globs. Start one with "re:" to use a regular expression instead.`,
-		`An app can still create a file with one of these names. It only uploads if the app renames it to a name not on this list.`,
+		`A file an app just saved under one of these names uploads if the app renames it to a name not on this list.`,
 	), func(d Config) string { return QuoteArray(d.Exclude) }},
 	{"upload_delay", lines(
 		`How long to wait after a file closes before uploading it, so the app can finish saving first. "0s" uploads right away.`,
